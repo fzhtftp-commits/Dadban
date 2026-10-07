@@ -3,9 +3,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
   links.forEach((link) => {
     link.addEventListener("click", (event) => {
-      event.preventDefault();
       links.forEach((item) => item.classList.remove("active"));
       link.classList.add("active");
+
+      const href = link.getAttribute("href");
+      if (!href || href === "#") {
+        event.preventDefault();
+      }
     });
   });
 });
