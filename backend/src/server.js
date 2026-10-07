@@ -64,6 +64,8 @@ app.use((_req, res) => {
   res.status(404).json({ error: "not_found" });
 });
 
-app.listen(port, () => {
-  console.log(`Dadban API listening on port ${port}`);
+const host = "0.0.0.0";
+
+app.listen(port, host, () => {
+  console.log(`Dadban API listening on ${host}:${port}`);
 });
