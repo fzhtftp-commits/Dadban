@@ -5,7 +5,7 @@ import pg from "pg";
 
 const { Pool } = pg;
 const app = express();
-const port = Number(process.env.PORT || 3000);
+const port = Number(process.env.PORT || 10000);
 const databaseUrl = process.env.DATABASE_URL;
 
 const pool = databaseUrl
@@ -32,7 +32,8 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "dadban-backend" });
 });
 
-// Database readiness endpoint: used to verify the Supabase connection separately.
+// Database readiness endpoint: temporarily exposes only safe PostgreSQL
+// diagnostics. Never returns DATABASE_URL, password, host, or connection string.
 app.get("/health/db", async (_req, res) => {
   if (!pool) {
     return res.status(503).json({
@@ -42,12 +43,20 @@ app.get("/health/db", async (_req, res) => {
   }
 
   try {
-    await pool.query("select 1");
-    return res.json({ ok: true, database: "connected" });
-  } catch {
+    const result = await pool.query("select 1 as ok");
+    return res.json({
+      ok: true,
+      database: "connected",
+      result: result.rows[0]
+    });
+  } catch (error) {
+    console.error("Database health check failed:", error);
+
     return res.status(503).json({
       ok: false,
-      database: "unavailable"
+      database: "unavailable",
+      error: error?.code || "unknown_database_error",
+      message: error?.message || "database connection failed"
     });
   }
 });
