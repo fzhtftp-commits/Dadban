@@ -11,8 +11,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const setType = (type) => {
     const isCompany = type === "company";
-    individual.hidden = isCompany;
-    company.hidden = !isCompany;
+    individual.classList.toggle("form-hidden", isCompany);
+    company.classList.toggle("form-hidden", !isCompany);
     fullName.required = !isCompany;
     nationalId.required = !isCompany;
     companyName.required = isCompany;
