@@ -26,7 +26,14 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "100kb" }));
 
-app.get("/health", async (_req, res) => {
+// Liveness endpoint: must stay independent from the database so Render
+// can route traffic even if the external database is temporarily unavailable.
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "dadban-backend" });
+});
+
+// Database readiness endpoint: used to verify the Supabase connection separately.
+app.get("/health/db", async (_req, res) => {
   if (!pool) {
     return res.status(503).json({
       ok: false,
