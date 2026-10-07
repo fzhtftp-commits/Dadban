@@ -11,10 +11,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const editMode = new URLSearchParams(window.location.search).get("mode") === "edit";
 
   const normalizeDigits = (value) => String(value || "")
-    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
-    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - "۰".charCodeAt(0)))
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - "٠".charCodeAt(0)));
 
-  const numeric = (value) => normalizeDigits(value).replace(/\D/g, "");
+  const digitsOnly = (value) => normalizeDigits(value).replace(/[^0-9]/g, "");
 
   const setType = (type) => {
     const isCompany = type === "company";
@@ -26,7 +26,9 @@ document.addEventListener("DOMContentLoaded", () => {
     nationalId.required = !isCompany;
     companyName.required = isCompany;
     companyId.required = isCompany;
-    document.querySelectorAll(".type-option").forEach((item) => item.classList.toggle("active", item.querySelector("input").checked));
+    document.querySelectorAll(".type-option").forEach((item) =>
+      item.classList.toggle("active", item.querySelector("input").checked)
+    );
   };
 
   if (editMode) {
@@ -49,7 +51,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   radios.forEach((radio) => radio.addEventListener("change", () => setType(radio.value)));
-  setType("individual");
+  setType(document.querySelector('input[name="clientType"]:checked')?.value || "individual");
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -63,15 +65,17 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const selected = document.querySelector('input[name="clientType"]:checked').value;
+    const nationalIdDigits = digitsOnly(nationalId.value);
 
-    if (selected === "individual" && numeric(nationalId.value).length !== 10) {
+    if (selected === "individual" && !/^\d{10}$/.test(nationalIdDigits)) {
       message.textContent = "کد ملی باید دقیقاً ۱۰ رقم باشد.";
       message.hidden = false;
       nationalId.focus();
       return;
     }
 
-    if (!/^09\d{9}$/.test(numeric(document.getElementById("mobile").value))) {
+    const mobileDigits = digitsOnly(document.getElementById("mobile").value);
+    if (!/^09\d{9}$/.test(mobileDigits)) {
       message.textContent = "شماره موبایل معتبر وارد کنید.";
       message.hidden = false;
       document.getElementById("mobile").focus();
