@@ -16,3 +16,4 @@
 .form-message{margin-top:16px;padding:12px;border-radius:10px;background:#fff1f1;color:#9a3838;font-size:12px}
 .success-message{background:#e9f5ed;color:#39734d}
 @media(max-width:700px){.form-grid{grid-template-columns:1fr}.field.full{grid-column:auto}}
+.form-hidden{display:none!important}
