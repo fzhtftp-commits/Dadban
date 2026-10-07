@@ -11,10 +11,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const editMode = new URLSearchParams(window.location.search).get("mode") === "edit";
 
   const normalizeDigits = (value) => String(value || "")
-    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - "۰".charCodeAt(0)))
-    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - "٠".charCodeAt(0)));
-
-  const digitsOnly = (value) => normalizeDigits(value).replace(/[^0-9]/g, "");
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 1776))
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 1632));
 
   const setType = (type) => {
     const isCompany = type === "company";
@@ -26,6 +24,7 @@ document.addEventListener("DOMContentLoaded", () => {
     nationalId.required = !isCompany;
     companyName.required = isCompany;
     companyId.required = isCompany;
+
     document.querySelectorAll(".type-option").forEach((item) =>
       item.classList.toggle("active", item.querySelector("input").checked)
     );
@@ -35,9 +34,11 @@ document.addEventListener("DOMContentLoaded", () => {
     document.title = "دادبان | ویرایش اطلاعات موکل";
     document.getElementById("pageTitle").textContent = "ویرایش اطلاعات موکل";
     document.getElementById("formTitle").textContent = "ویرایش اطلاعات علی رضایی";
-    document.getElementById("formSubtitle").textContent = "اطلاعات فعلی موکل بارگذاری شده است. در این مرحله تغییرات فقط اعتبارسنجی می‌شوند و هنوز دائمی ذخیره نمی‌شوند.";
+    document.getElementById("formSubtitle").textContent =
+      "اطلاعات فعلی موکل بارگذاری شده است. در این مرحله تغییرات فقط اعتبارسنجی می‌شوند و هنوز دائمی ذخیره نمی‌شوند.";
     document.getElementById("submitButton").textContent = "بررسی و ذخیره تغییرات";
     document.getElementById("cancelLink").href = "client-profile.html";
+
     fullName.value = "علی رضایی";
     nationalId.value = "۰۰۱۲۳۴۵۶۷۸";
     document.getElementById("birthDate").value = "۱۳۷۰/۰۵/۲۰";
@@ -50,11 +51,15 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("notes").value = "پیگیری پرونده‌های جاری";
   }
 
-  radios.forEach((radio) => radio.addEventListener("change", () => setType(radio.value)));
+  radios.forEach((radio) =>
+    radio.addEventListener("change", () => setType(radio.value))
+  );
+
   setType(document.querySelector('input[name="clientType"]:checked')?.value || "individual");
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+
     message.hidden = true;
     message.classList.remove("success-message");
     message.textContent = "";
@@ -65,17 +70,24 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const selected = document.querySelector('input[name="clientType"]:checked').value;
-    const nationalIdDigits = digitsOnly(nationalId.value);
+    const nationalIdValue = String(nationalId.value || "").trim();
 
-    if (selected === "individual" && !/^\d{10}$/.test(nationalIdDigits)) {
+    // کد ملی: دقیقاً ۱۰ رقم؛ فارسی، عربی یا انگلیسی
+    if (
+      selected === "individual" &&
+      !/^[0-9۰-۹٠-٩]{10}$/.test(nationalIdValue)
+    ) {
       message.textContent = "کد ملی باید دقیقاً ۱۰ رقم باشد.";
       message.hidden = false;
       nationalId.focus();
       return;
     }
 
-    const mobileDigits = digitsOnly(document.getElementById("mobile").value);
-    if (!/^09\d{9}$/.test(mobileDigits)) {
+    const mobileValue = normalizeDigits(
+      document.getElementById("mobile").value
+    ).replace(/[^0-9]/g, "");
+
+    if (!/^09\d{9}$/.test(mobileValue)) {
       message.textContent = "شماره موبایل معتبر وارد کنید.";
       message.hidden = false;
       document.getElementById("mobile").focus();
@@ -85,6 +97,7 @@ document.addEventListener("DOMContentLoaded", () => {
     message.textContent = editMode
       ? "اطلاعات ویرایش‌شده با موفقیت اعتبارسنجی شد؛ ذخیره دائمی پس از اتصال امن به دیتابیس فعال می‌شود."
       : "اطلاعات فرم با موفقیت اعتبارسنجی شد. ذخیره واقعی پس از اتصال امن به دیتابیس انجام می‌شود.";
+
     message.hidden = false;
     message.classList.add("success-message");
   });
