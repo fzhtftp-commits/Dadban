@@ -1,0 +1,1 @@
+document.querySelectorAll('.sidebar nav a').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();document.querySelectorAll('.sidebar nav a').forEach(x=>x.classList.remove('active'));a.classList.add('active')}));
