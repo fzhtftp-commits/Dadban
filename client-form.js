@@ -8,11 +8,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const nationalId = document.getElementById("nationalId");
   const companyName = document.getElementById("companyName");
   const companyId = document.getElementById("companyId");
+  const editMode = new URLSearchParams(window.location.search).get("mode") === "edit";
 
   const setType = (type) => {
     const isCompany = type === "company";
     individual.classList.toggle("form-hidden", isCompany);
     company.classList.toggle("form-hidden", !isCompany);
+    individual.hidden = isCompany;
+    company.hidden = !isCompany;
     fullName.required = !isCompany;
     nationalId.required = !isCompany;
     companyName.required = isCompany;
@@ -20,12 +23,32 @@ document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll(".type-option").forEach((item) => item.classList.toggle("active", item.querySelector("input").checked));
   };
 
+  if (editMode) {
+    document.title = "دادبان | ویرایش اطلاعات موکل";
+    document.getElementById("pageTitle").textContent = "ویرایش اطلاعات موکل";
+    document.getElementById("formTitle").textContent = "ویرایش اطلاعات علی رضایی";
+    document.getElementById("formSubtitle").textContent = "اطلاعات فعلی موکل بارگذاری شده است. در این مرحله تغییرات فقط اعتبارسنجی می‌شوند و هنوز دائمی ذخیره نمی‌شوند.";
+    document.getElementById("submitButton").textContent = "بررسی و ذخیره تغییرات";
+    document.getElementById("cancelLink").href = "client-profile.html";
+    fullName.value = "علی رضایی";
+    nationalId.value = "۰۰۱۲۳۴۵۶۷۸";
+    document.getElementById("birthDate").value = "۱۳۷۰/۰۵/۲۰";
+    document.getElementById("occupation").value = "مهندس";
+    document.getElementById("mobile").value = "09121234567";
+    document.getElementById("phone").value = "02112345678";
+    document.getElementById("email").value = "ali@example.com";
+    document.getElementById("source").value = "معرفی";
+    document.getElementById("address").value = "تهران، خیابان نمونه، پلاک ۱۲";
+    document.getElementById("notes").value = "پیگیری پرونده‌های جاری";
+  }
+
   radios.forEach((radio) => radio.addEventListener("change", () => setType(radio.value)));
   setType("individual");
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     message.hidden = true;
+    message.classList.remove("success-message");
     message.textContent = "";
 
     if (!form.checkValidity()) {
@@ -50,7 +73,9 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    message.textContent = "اطلاعات فرم با موفقیت اعتبارسنجی شد. ذخیره واقعی پس از اتصال امن به دیتابیس انجام می‌شود.";
+    message.textContent = editMode
+      ? "اطلاعات ویرایش‌شده با موفقیت اعتبارسنجی شد؛ ذخیره دائمی پس از اتصال امن به دیتابیس فعال می‌شود."
+      : "اطلاعات فرم با موفقیت اعتبارسنجی شد. ذخیره واقعی پس از اتصال امن به دیتابیس انجام می‌شود.";
     message.hidden = false;
     message.classList.add("success-message");
   });
