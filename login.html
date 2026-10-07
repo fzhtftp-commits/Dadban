@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ورود | دادبان</title>
+<link rel="stylesheet" href="login.css">
+</head>
+<body>
+<main class="login-page">
+<section class="login-card">
+  <div class="brand">
+    <div class="mark">⚖</div>
+    <h1>دادبان</h1>
+    <p>مدیریت هوشمند و امن دفتر وکالت</p>
+  </div>
+  <div class="security"><span>🔒</span><div><b>ورود امن</b><small>اطلاعات شما تحت حفاظت چندلایه قرار دارد</small></div></div>
+  <form id="loginForm" novalidate>
+    <label for="email">ایمیل</label>
+    <input id="email" type="email" autocomplete="username" placeholder="example@domain.com" required>
+    <label for="password">رمز عبور</label>
+    <div class="password"><input id="password" type="password" autocomplete="current-password" placeholder="رمز عبور خود را وارد کنید" required><button type="button" id="toggle">نمایش</button></div>
+    <div class="row"><label class="remember"><input type="checkbox" id="remember"> <span>مرا به خاطر بسپار</span></label><a href="#">فراموشی رمز عبور؟</a></div>
+    <button class="submit" type="submit">ورود به دادبان</button>
+    <p id="message" class="message"></p>
+  </form>
+  <div class="divider"><span>یا</span></div>
+  <button class="passkey" type="button">🔑 ورود با Passkey</button>
+  <p class="signup">حساب کاربری ندارید؟ <a href="#">درخواست ایجاد حساب</a></p>
+  <footer>دادبان • امنیت، محرمانگی و مدیریت حرفه‌ای</footer>
+</section>
+</main>
+<script src="login.js"></script>
+</body>
+</html>
