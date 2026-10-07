@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dadban Auth Test</title>
+<style>
+body{font-family:Tahoma,Arial,sans-serif;background:#0b1730;color:#fff;max-width:760px;margin:40px auto;padding:20px}
+button{padding:12px 18px;border:0;border-radius:8px;cursor:pointer}
+pre{background:#071020;padding:16px;border-radius:8px;white-space:pre-wrap;word-break:break-word}
+.ok{color:#8ee6a8}.err{color:#ff9b9b}
+</style>
+</head>
+<body>
+<h1>تست موقت احراز هویت دادبان</h1>
+<p>این صفحه فقط برای تست Backend ساخته شده و اطلاعات آزمایشی را به صورت تصادفی ایجاد می‌کند.</p>
+<button id="run">شروع تست ثبت‌نام و Session</button>
+<pre id="out">آماده...</pre>
+<script>
+const API="https://dadban-backend.onrender.com";
+const out=document.getElementById("out");
+const log=(x,ok=false)=>{out.className=ok?"ok":"err";out.textContent=typeof x==="string"?x:JSON.stringify(x,null,2);};
+document.getElementById("run").onclick=async()=>{
+  const id=Date.now();
+  const email="auth-test-"+id+"@example.com";
+  const password="DadbanTest!"+id+"Secure";
+  try{
+    const reg=await fetch(API+"/api/auth/register",{
+      method:"POST",credentials:"include",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        full_name:"کاربر تست دادبان",
+        email,
+        password,
+        office_name:"دفتر تست دادبان"
+      })
+    });
+    const regData=await reg.json().catch(()=>({}));
+    if(!reg.ok) throw new Error("REGISTER "+reg.status+"\n"+JSON.stringify(regData,null,2));
+
+    const me=await fetch(API+"/api/auth/me",{credentials:"include"});
+    const meData=await me.json().catch(()=>({}));
+    if(!me.ok) throw new Error("SESSION / ME "+me.status+"\n"+JSON.stringify(meData,null,2));
+
+    log({
+      success:true,
+      message:"ثبت‌نام و Session با موفقیت تست شد.",
+      test_email:email,
+      register:regData,
+      me:meData
+    },true);
+  }catch(e){
+    log({success:false,error:e.message});
+  }
+};
+</script>
+</body>
+</html>
