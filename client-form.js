@@ -10,6 +10,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const companyId = document.getElementById("companyId");
   const editMode = new URLSearchParams(window.location.search).get("mode") === "edit";
 
+  const normalizeDigits = (value) => String(value || "")
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+
+  const numeric = (value) => normalizeDigits(value).replace(/\D/g, "");
+
   const setType = (type) => {
     const isCompany = type === "company";
     individual.classList.toggle("form-hidden", isCompany);
@@ -56,7 +62,6 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    const numeric = (value) => value.replace(/\D/g, "");
     const selected = document.querySelector('input[name="clientType"]:checked').value;
 
     if (selected === "individual" && numeric(nationalId.value).length !== 10) {
