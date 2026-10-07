@@ -142,3 +142,34 @@ create trigger clients_set_updated_at before update on clients
 for each row execute function set_updated_at();
 
 -- RLS policies will be added together with the authenticated API context.
+
+
+-- Authentication foundation
+-- Password hashes and sessions are kept outside the business users table.
+create table if not exists auth_credentials (
+  user_id uuid primary key references users(id) on delete cascade,
+  password_hash text not null,
+  password_updated_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists auth_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  office_id uuid not null references offices(id) on delete cascade,
+  token_hash char(64) not null unique,
+  csrf_hash char(64) not null,
+  expires_at timestamptz not null,
+  last_seen_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  revoked_at timestamptz
+);
+
+create index if not exists auth_sessions_user_idx
+  on auth_sessions (user_id, revoked_at, expires_at);
+
+create index if not exists auth_sessions_expiry_idx
+  on auth_sessions (expires_at);
+
+-- Keep the authentication tables protected from accidental public exposure.
+-- RLS can be enabled with policies once the database role strategy is finalized.
