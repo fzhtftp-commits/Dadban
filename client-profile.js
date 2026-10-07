@@ -1,0 +1,1 @@
+document.addEventListener("DOMContentLoaded",()=>{document.getElementById("editClient")?.addEventListener("click",()=>{const m=document.getElementById("profileMessage");m.hidden=false;m.textContent="ویرایش اطلاعات در مرحله بعد فعال می‌شود.";});});
