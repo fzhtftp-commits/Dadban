@@ -925,6 +925,7 @@ app.get("/api/cases/:id", requireAuth, async (req, res) => {
                c.priority, c.filing_date, c.next_hearing_at, c.description,
                c.notes, c.created_at, c.updated_at,
                cl.client_type, cl.full_name as client_full_name,
+               cl.national_id, cl.national_company_id,
                cl.company_name as client_company_name
         from cases c
         join clients cl on cl.id = c.client_id
