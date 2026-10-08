@@ -14,8 +14,9 @@ async function load(){
   if(!r.ok)throw new Error();
   const c=d.data;
   $("caseTitle").textContent=c.title||"پرونده";
-  $("caseStatus").textContent="اطلاعات پرونده";
+  $("caseStatus").textContent=`● ${statusLabel[c.status]||"پرونده"}`;
   $("caseNumber").textContent=c.case_number||"—";
+  $("caseNumberHero").textContent=`شماره پرونده: ${c.case_number||"—"}`;
   $("clientName").textContent=c.client_full_name||c.client_company_name||"—";
   $("caseType").textContent=c.case_type||"—";
   $("courtName").textContent=c.court_name||"—";
@@ -23,8 +24,11 @@ async function load(){
   $("opposingParty").textContent=c.opposing_party||"—";
   $("statusValue").textContent=statusLabel[c.status]||c.status||"—";
   $("priorityValue").textContent=priorityLabel[c.priority]||c.priority||"—";
+  $("summaryStatus").textContent=statusLabel[c.status]||c.status||"—";
+  $("summaryPriority").textContent=priorityLabel[c.priority]||c.priority||"—";
   $("filingDate").textContent=fmt(c.filing_date);
   $("hearingDate").textContent=fmt(c.next_hearing_at);
+  $("summaryHearing").textContent=fmt(c.next_hearing_at);
   $("description").textContent=c.description||"—";
   $("notes").textContent=c.notes||"—";
  }catch{ $("caseStatus").textContent="خطا در دریافت اطلاعات پرونده."; }
