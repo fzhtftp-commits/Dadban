@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>دادبان | پرونده جدید</title><link rel="stylesheet" href="styles.css"></head>
+<body><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">⚖</div><div><strong>دادبان</strong><span>مدیریت دفتر وکالت</span></div></div><nav><a href="index.html">⌂ داشبورد</a><a href="clients.html">👥 موکل‌ها</a><a class="active" href="cases.html">▣ پرونده‌ها</a><a href="#">◷ تقویم و جلسات</a><a href="#">✓ اقدامات پرونده</a><a href="#">▤ اسناد و مدارک</a><a href="#">﷼ امور مالی</a><a href="#">▥ گزارش‌ها</a></nav><div class="side-bottom"><a href="#">⚙ تنظیمات</a><div class="secure">🔒 امنیت چندلایه فعال</div></div></aside>
+<main><header class="topbar"><div><div class="eyebrow">مدیریت پرونده</div><h1>ثبت پرونده جدید</h1></div></header>
+<section class="card client-form-card"><form id="caseForm"><div class="form-grid">
+<div class="field"><label>موکل *</label><select id="client_id" required><option value="">در حال دریافت موکل‌ها...</option></select></div>
+<div class="field"><label>شماره پرونده *</label><input id="case_number" maxlength="80" required></div>
+<div class="field"><label>عنوان پرونده *</label><input id="title" maxlength="240" required></div>
+<div class="field"><label>نوع پرونده</label><input id="case_type" maxlength="80" placeholder="مثلاً حقوقی، کیفری، خانواده"></div>
+<div class="field"><label>مرجع قضایی</label><input id="court_name" maxlength="200"></div>
+<div class="field"><label>شعبه</label><input id="branch_name" maxlength="120"></div>
+<div class="field"><label>طرف مقابل</label><input id="opposing_party" maxlength="240"></div>
+<div class="field"><label>وضعیت</label><select id="status"><option value="active">فعال</option><option value="pending">در انتظار</option><option value="closed">بسته</option><option value="archived">بایگانی</option></select></div>
+<div class="field"><label>اولویت</label><select id="priority"><option value="normal">عادی</option><option value="low">کم</option><option value="high">بالا</option><option value="urgent">فوری</option></select></div>
+<div class="field"><label>تاریخ تشکیل</label><input id="filing_date" type="date"></div>
+<div class="field"><label>تاریخ و ساعت جلسه بعدی</label><input id="next_hearing_at" type="datetime-local"></div>
+<div class="field full"><label>توضیحات</label><textarea id="description" rows="4"></textarea></div>
+<div class="field full"><label>یادداشت</label><textarea id="notes" rows="4"></textarea></div>
+</div><div class="form-actions"><button class="primary" type="submit" id="saveCase">ذخیره پرونده</button><a class="secondary-btn" href="cases.html">انصراف</a></div><div id="formMessage" class="form-message" hidden></div></form></section></main></div><script src="case-form.js?v=1"></script></body></html>
