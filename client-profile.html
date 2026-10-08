@@ -15,7 +15,19 @@
 <div><span>موبایل</span><b id="dMobile" class="ltr-value">—</b></div><div><span>تلفن ثابت</span><b id="dPhone" class="ltr-value">—</b></div>
 <div class="full"><span>ایمیل</span><b id="dEmail">—</b></div><div class="full"><span>آدرس</span><b id="dAddress">—</b></div><div class="full"><span>یادداشت‌ها</span><b id="dNotes">—</b></div>
 </div></div>
-<div class="card"><div class="section-head"><h3>خلاصه وضعیت</h3></div><div class="mini-stats"><div><strong>—</strong><span>پرونده</span></div><div><strong>—</strong><span>جلسه</span></div><div><strong>—</strong><span>اقدام</span></div><div><strong>—</strong><span>سند</span></div></div><div class="profile-note"><span>آخرین تغییر</span><b id="dUpdated">—</b></div></div>
+<div class="card"><div class="section-head"><h3>خلاصه وضعیت</h3></div><div class="mini-stats"><div><strong id="clientCasesCount">—</strong><span>پرونده</span></div><div><strong>—</strong><span>جلسه</span></div><div><strong>—</strong><span>اقدام</span></div><div><strong>—</strong><span>سند</span></div></div><div class="profile-note"><span>آخرین تغییر</span><b id="dUpdated">—</b></div></div>
+</section>
+<section class="card" style="margin-top:18px">
+  <div class="section-head">
+    <div><h3>پرونده‌های این موکل</h3><span class="panel-subtitle">پرونده‌های مرتبط با همین موکل</span></div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>شماره پرونده</th><th>عنوان</th><th>نوع</th><th>وضعیت</th><th>اولویت</th><th>جلسه بعدی</th></tr></thead>
+      <tbody id="clientCasesBody"><tr><td colspan="6" class="empty-state">در حال دریافت پرونده‌ها...</td></tr></tbody>
+    </table>
+    <div id="clientCasesEmpty" class="empty-state" hidden>این موکل هنوز پرونده‌ای ندارد.</div>
+  </div>
 </section>
 <div id="profileMessage" class="form-message profile-message" hidden></div>
-</main></div><script src="client-profile.js?v=3"></script></body></html>
+</main></div><script src="client-profile.js?v=4"></script></body></html>
