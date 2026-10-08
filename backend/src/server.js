@@ -345,7 +345,8 @@ app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
 
     return res.status(201).json({
       data: {
-        user: user.rows[0]
+        user: user.rows[0],
+        csrf_token: csrfToken
       }
     });
   } catch (error) {
@@ -409,7 +410,8 @@ app.post("/api/auth/login", requireTrustedOrigin, async (req, res) => {
           full_name: result.rows[0].full_name,
           email: result.rows[0].email,
           role: result.rows[0].role
-        }
+        },
+        csrf_token: csrfToken
       }
     });
   } catch (error) {
