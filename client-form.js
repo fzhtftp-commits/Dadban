@@ -33,7 +33,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     let jy = Number(m[1]), jm = Number(m[2]), jd = Number(m[3]);
     if (jm < 1 || jm > 12 || jd < 1 || jd > 31) return null;
     jy -= 979;
-    const jDayNo = 365 * jy + Math.floor(jy / 33) * 8 + Math.floor((jy % 33 + 3) / 4);
+    let jDayNo = 365 * jy + Math.floor(jy / 33) * 8 + Math.floor((jy % 33 + 3) / 4);
     for (let i = 1; i < jm; i++) jDayNo += i <= 6 ? 31 : 30;
     jDayNo += jd - 1;
     let gDayNo = jDayNo + 79;
@@ -120,9 +120,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
 
   if (editMode && !clientId) {
-    showMessage("شناسه موکل برای ویرایش مشخص نیست.");
-    submitButton.disabled = true;
-    return;
+    showMessage("شناسه موکل برای ویرایش مشخص نیست. از صفحه پروفایل، دکمه ویرایش را دوباره بزنید.");
+    submitButton.disabled = false;
   }
 
   if (editMode) {
@@ -140,10 +139,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       fillForm(data.data);
     } catch (error) {
       showMessage(error.message || "خطا در دریافت اطلاعات موکل.");
-      submitButton.disabled = true;
-      return;
+      submitButton.disabled = false;
     }
   }
+
+  // دکمه ذخیره همیشه قابل کلیک است؛ خطاهای دریافت اطلاعات هنگام ارسال دوباره بررسی می‌شوند.
+  submitButton.disabled = false;
 
   radios.forEach(radio => radio.addEventListener("change", () => setType(radio.value)));
   setType(document.querySelector('input[name="clientType"]:checked')?.value || "individual");
