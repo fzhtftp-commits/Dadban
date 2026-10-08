@@ -564,6 +564,33 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
   }
 });
 
+app.get("/api/clients/lookup", requireAuth, async (req, res) => {
+  const parsed = z.object({
+    national_id: z.string().trim().transform(normalizeDigits).pipe(z.string().regex(/^\\d{10}$/))
+  }).safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_national_id" });
+
+  try {
+    const result = await pool.query(
+      `
+        select id, client_type, full_name, national_id, company_name, national_company_id, status
+        from clients
+        where office_id = $1
+          and deleted_at is null
+          and national_id = $2
+        limit 1
+      `,
+      [req.auth.officeId, parsed.data.national_id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "client_not_found" });
+    return res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error("Lookup client failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
 app.get("/api/clients/:id", requireAuth, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_client_id" });
