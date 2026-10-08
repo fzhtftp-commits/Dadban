@@ -219,3 +219,41 @@ create index if not exists cases_hearing_idx
 drop trigger if exists cases_set_updated_at on cases;
 create trigger cases_set_updated_at before update on cases
 for each row execute function set_updated_at();
+
+
+-- Calendar / court hearings
+create table if not exists hearings (
+  id uuid primary key default gen_random_uuid(),
+  office_id uuid not null references offices(id) on delete restrict,
+  case_id uuid not null references cases(id) on delete restrict,
+  hearing_at timestamptz not null,
+  hearing_type varchar(60) not null default 'hearing',
+  court_name varchar(200),
+  branch_name varchar(120),
+  status varchar(30) not null default 'scheduled'
+    check (status in ('scheduled','completed','cancelled','postponed')),
+  reminder_minutes integer not null default 1440
+    check (reminder_minutes >= 0 and reminder_minutes <= 43200),
+  notes text,
+  created_by uuid references users(id) on delete set null,
+  updated_by uuid references users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+
+create index if not exists hearings_office_date_idx
+  on hearings (office_id, hearing_at)
+  where deleted_at is null;
+
+create index if not exists hearings_case_idx
+  on hearings (office_id, case_id, hearing_at desc)
+  where deleted_at is null;
+
+create index if not exists hearings_status_date_idx
+  on hearings (office_id, status, hearing_at)
+  where deleted_at is null;
+
+drop trigger if exists hearings_set_updated_at on hearings;
+create trigger hearings_set_updated_at before update on hearings
+for each row execute function set_updated_at();
