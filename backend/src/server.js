@@ -733,22 +733,22 @@ app.get("/api/cases", requireAuth, async (req, res) => {
 
   if (status) {
     values.push(status);
-    conditions.push(`c.status = ${values.length}`);
+    conditions.push(`c.status = $${values.length}`);
   }
   if (client_id) {
     values.push(client_id);
-    conditions.push(`c.client_id = ${values.length}`);
+    conditions.push(`c.client_id = $${values.length}`);
   }
   if (search) {
     values.push(`%${search}%`);
     conditions.push(`(
-      c.case_number ilike ${values.length}
-      or c.title ilike ${values.length}
-      or c.case_type ilike ${values.length}
-      or c.court_name ilike ${values.length}
-      or c.opposing_party ilike ${values.length}
-      or cl.full_name ilike ${values.length}
-      or cl.company_name ilike ${values.length}
+      c.case_number ilike $${values.length}
+      or c.title ilike $${values.length}
+      or c.case_type ilike $${values.length}
+      or c.court_name ilike $${values.length}
+      or c.opposing_party ilike $${values.length}
+      or cl.full_name ilike $${values.length}
+      or cl.company_name ilike $${values.length}
     )`);
   }
 
@@ -769,8 +769,8 @@ app.get("/api/cases", requireAuth, async (req, res) => {
           and cl.deleted_at is null
         where ${conditions.join(" and ")}
         order by c.created_at desc
-        limit ${values.length - 1}
-        offset ${values.length}
+        limit $${values.length - 1}
+        offset $${values.length}
       `,
       values
     );
@@ -894,13 +894,13 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   for (const field of allowedFields) {
     if (Object.prototype.hasOwnProperty.call(data, field)) {
       values.push(data[field] ?? null);
-      fields.push(`${field} = ${values.length}`);
+      fields.push(`${field} = $${values.length}`);
     }
   }
 
   if (!fields.length) return res.status(400).json({ error: "no_changes" });
   values.push(req.auth.userId);
-  fields.push(`updated_by = ${values.length}`);
+  fields.push(`updated_by = $${values.length}`);
 
   const client = await pool.connect();
   try {
