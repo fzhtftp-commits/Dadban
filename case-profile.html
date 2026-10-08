@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>پرونده | دادبان</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+<aside class="sidebar">
+<div class="brand">⚖ <span>دادبان</span></div>
+<nav>
+<a href="index.html">▦ داشبورد</a>
+<a href="clients.html">👥 موکل‌ها</a>
+<a class="active" href="cases.html">▣ پرونده‌ها</a>
+<a href="#">◷ تقویم / جلسات</a><a href="#">✓ اقدامات پرونده</a><a href="#">▤ اسناد / مدارک</a><a href="#">₿ امور مالی</a><a href="#">▤ گزارش‌ها</a><a href="#">⚙ تنظیمات</a>
+</nav>
+</aside>
+<main class="main">
+<header class="topbar"><div><h1 id="caseTitle">پرونده</h1><p id="caseStatus" class="panel-subtitle">در حال دریافت اطلاعات...</p></div></header>
+<section class="panel">
+<div id="caseMessage" class="form-message" hidden></div>
+<div class="form-grid">
+<div><strong>شماره پرونده</strong><p id="caseNumber">—</p></div>
+<div><strong>موکل</strong><p id="clientName">—</p></div>
+<div><strong>نوع پرونده</strong><p id="caseType">—</p></div>
+<div><strong>دادگاه</strong><p id="courtName">—</p></div>
+<div><strong>شعبه</strong><p id="branchName">—</p></div>
+<div><strong>طرف مقابل</strong><p id="opposingParty">—</p></div>
+<div><strong>وضعیت</strong><p id="statusValue">—</p></div>
+<div><strong>اولویت</strong><p id="priorityValue">—</p></div>
+<div><strong>تاریخ ثبت</strong><p id="filingDate">—</p></div>
+<div><strong>جلسه بعدی</strong><p id="hearingDate">—</p></div>
+</div>
+<hr>
+<div><strong>شرح</strong><p id="description">—</p></div>
+<div><strong>یادداشت</strong><p id="notes">—</p></div>
+<div style="margin-top:20px"><a class="primary" href="cases.html" style="text-decoration:none">بازگشت به پرونده‌ها</a></div>
+</section>
+</main></div>
+<script src="case-profile.js?v=1"></script>
+</body></html>
