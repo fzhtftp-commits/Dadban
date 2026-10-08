@@ -48,4 +48,5 @@ async function load(){
   $("notes").textContent=c.notes||"—";
  }catch{ $("caseStatus").textContent="خطا در دریافت اطلاعات پرونده."; }
 }
-deleteBtn.addEventListener("click",removeCase);\nload();
+deleteBtn.addEventListener("click",removeCase);
+load();
