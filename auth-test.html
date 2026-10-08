@@ -6,48 +6,73 @@
 <title>Dadban Auth Test</title>
 <style>
 body{font-family:Tahoma,Arial,sans-serif;background:#0b1730;color:#fff;max-width:760px;margin:40px auto;padding:20px}
-button{padding:12px 18px;border:0;border-radius:8px;cursor:pointer}
+button{padding:12px 18px;border:0;border-radius:8px;cursor:pointer;margin-left:8px}
 pre{background:#071020;padding:16px;border-radius:8px;white-space:pre-wrap;word-break:break-word}
 .ok{color:#8ee6a8}.err{color:#ff9b9b}
+.box{background:#122142;padding:16px;border-radius:10px;margin:16px 0}
+code{direction:ltr;unicode-bidi:isolate}
 </style>
 </head>
 <body>
 <h1>تست موقت احراز هویت دادبان</h1>
-<p>این صفحه فقط برای تست Backend ساخته شده و اطلاعات آزمایشی را به صورت تصادفی ایجاد می‌کند.</p>
-<button id="run">شروع تست ثبت‌نام و Session</button>
+<div class="box">
+  <div>ایمیل تست: <code>admin@dadban.test</code></div>
+  <div>رمز تست: <code>Dadban@12345</code></div>
+</div>
+<p>این صفحه فقط برای ساخت/ورود حساب آزمایشی است.</p>
+<button id="run">ساخت حساب و ورود</button>
 <pre id="out">آماده...</pre>
 <script>
 const API="https://dadban-backend.onrender.com";
+const EMAIL="admin@dadban.test";
+const PASSWORD="Dadban@12345";
 const out=document.getElementById("out");
 const log=(x,ok=false)=>{out.className=ok?"ok":"err";out.textContent=typeof x==="string"?x:JSON.stringify(x,null,2);};
+
+async function request(path, options){
+  const res=await fetch(API+path,{...options,credentials:"include"});
+  const data=await res.json().catch(()=>({}));
+  return {res,data};
+}
+
 document.getElementById("run").onclick=async()=>{
-  const id=Date.now();
-  const email="auth-test-"+id+"@example.com";
-  const password="DadbanTest!"+id+"Secure";
   try{
-    const reg=await fetch(API+"/api/auth/register",{
-      method:"POST",credentials:"include",
+    log("در حال ساخت/ورود حساب تست...");
+    const reg=await request("/api/auth/register",{
+      method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
-        full_name:"کاربر تست دادبان",
-        email,
-        password,
+        full_name:"مدیر تست دادبان",
+        email:EMAIL,
+        password:PASSWORD,
         office_name:"دفتر تست دادبان"
       })
     });
-    const regData=await reg.json().catch(()=>({}));
-    if(!reg.ok) throw new Error("REGISTER "+reg.status+"\n"+JSON.stringify(regData,null,2));
 
-    const me=await fetch(API+"/api/auth/me",{credentials:"include"});
-    const meData=await me.json().catch(()=>({}));
-    if(!me.ok) throw new Error("SESSION / ME "+me.status+"\n"+JSON.stringify(meData,null,2));
+    let loginData=null;
+    if(reg.res.status===409){
+      const login=await request("/api/auth/login",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({email:EMAIL,password:PASSWORD})
+      });
+      if(!login.res.ok) throw new Error("LOGIN "+login.res.status+"\n"+JSON.stringify(login.data,null,2));
+      loginData=login.data;
+    }else if(!reg.res.ok){
+      throw new Error("REGISTER "+reg.res.status+"\n"+JSON.stringify(reg.data,null,2));
+    }
+
+    const me=await request("/api/auth/me",{method:"GET"});
+    if(!me.res.ok) throw new Error("SESSION / ME "+me.res.status+"\n"+JSON.stringify(me.data,null,2));
 
     log({
       success:true,
-      message:"ثبت‌نام و Session با موفقیت تست شد.",
-      test_email:email,
-      register:regData,
-      me:meData
+      message:"حساب تست آماده است و ورود واقعی با موفقیت انجام شد.",
+      test_email:EMAIL,
+      test_password:PASSWORD,
+      register:reg.res.status===409?"حساب قبلاً وجود داشت؛ ورود انجام شد.":reg.data,
+      login:loginData,
+      me:me.data
     },true);
   }catch(e){
     log({success:false,error:e.message});
