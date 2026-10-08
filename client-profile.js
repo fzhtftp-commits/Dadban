@@ -4,6 +4,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const id = new URLSearchParams(window.location.search).get("id");
   const message = document.getElementById("profileMessage");
   const editButton = document.getElementById("editClient");
+  const deleteButton = document.getElementById("deleteClient");
+  const csrfToken = () => sessionStorage.getItem("dadban_csrf") || "";
   const faDigits = d => "۰۱۲۳۴۵۶۷۸۹"[d];
 
   const formatDigits = value => String(value ?? "").replace(/\d/g, d => faDigits(Number(d)));
@@ -49,9 +51,40 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("profileStatus").textContent =
       c.status === "needs_followup" ? "● نیازمند پیگیری" : c.status === "inactive" ? "● غیرفعال" : "● فعال";
     editButton.disabled = false;
+    if (deleteButton) deleteButton.disabled = false;
     editButton.onclick = () => {
       window.location.href = `client-form.html?mode=edit&id=${encodeURIComponent(id)}`;
     };
+    if (deleteButton) {
+      deleteButton.onclick = async () => {
+        const confirmed = window.confirm("آیا از حذف این موکل مطمئن هستید؟\n\nاین عملیات حذف نرم است و اطلاعات برای سوابق امنیتی نگهداری می‌شود.");
+        if (!confirmed) return;
+        deleteButton.disabled = true;
+        editButton.disabled = true;
+        deleteButton.textContent = "در حال حذف...";
+        message.hidden = true;
+        try {
+          const token = csrfToken();
+          if (!token) throw new Error("نشست امنیتی معتبر نیست. لطفاً دوباره وارد شوید.");
+          const deleteResponse = await fetch(`${API}/api/clients/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+            credentials: "include",
+            headers: { "x-csrf-token": token }
+          });
+          const deleteData = await deleteResponse.json().catch(() => ({}));
+          if (deleteResponse.status === 401) { window.location.href = "login.html"; return; }
+          if (deleteResponse.status === 403) throw new Error("درخواست حذف از نظر امنیتی تأیید نشد. صفحه را تازه‌سازی کنید.");
+          if (!deleteResponse.ok) throw new Error(deleteData?.error || "حذف موکل انجام نشد.");
+          window.location.href = "clients.html?deleted=1";
+        } catch (error) {
+          message.textContent = error.message || "خطا در ارتباط با سرور.";
+          message.hidden = false;
+          deleteButton.disabled = false;
+          editButton.disabled = false;
+          deleteButton.textContent = "حذف موکل";
+        }
+      };
+    }
   } catch (error) {
     message.textContent = error.message || "خطا در ارتباط با سرور.";
     message.hidden = false;
