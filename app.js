@@ -29,6 +29,35 @@ const statusLabel = {
 
 document.addEventListener("DOMContentLoaded", async () => {
   const links = document.querySelectorAll(".sidebar nav a, .side-bottom a");
+  const logoutButton = document.getElementById("logoutBtn");
+
+  logoutButton?.addEventListener("click", async () => {
+    if (!window.confirm("آیا می‌خواهید از حساب دادبان خارج شوید؟")) return;
+
+    logoutButton.disabled = true;
+    logoutButton.textContent = "در حال خروج...";
+
+    try {
+      const csrf = sessionStorage.getItem("dadban_csrf") || "";
+      const response = await fetch(`${API}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "x-csrf-token": csrf
+        }
+      });
+
+      if (!response.ok && response.status !== 401) {
+        throw new Error("logout_failed");
+      }
+    } catch (error) {
+      console.error("Logout failed:", error);
+    } finally {
+      sessionStorage.removeItem("dadban_user");
+      sessionStorage.removeItem("dadban_csrf");
+      window.location.href = "login.html";
+    }
+  });
 
   links.forEach((link) => {
     link.addEventListener("click", (event) => {
