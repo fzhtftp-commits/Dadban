@@ -8,7 +8,7 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({
   "'":"&#039;"
 }[ch]));
 
-const toFa = (value) => String(value ?? "").replace(/\\d/g, d => "۰۱۲۳۴۵۶۷۸۹"[d]);
+const toFa = (value) => String(value ?? "").replace(/\d/g, d => "۰۱۲۳۴۵۶۷۸۹"[d]);
 
 const formatDateTime = (value) => {
   if (!value) return "—";
