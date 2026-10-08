@@ -461,6 +461,82 @@ app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, asy
   return res.json({ ok: true });
 });
 
+
+app.get("/api/dashboard", requireAuth, async (req, res) => {
+  try {
+    const [stats, recentCases, upcomingHearings] = await Promise.all([
+      pool.query(
+        `
+          select
+            (select count(*)::int from clients
+              where office_id = $1 and deleted_at is null) as total_clients,
+            (select count(*)::int from cases
+              where office_id = $1 and deleted_at is null and status = 'active') as active_cases,
+            (select count(*)::int from cases
+              where office_id = $1 and deleted_at is null and status = 'closed') as closed_cases,
+            (select count(*)::int from cases
+              where office_id = $1 and deleted_at is null
+                and next_hearing_at is not null
+                and next_hearing_at >= now()) as upcoming_hearings
+        `,
+        [req.auth.officeId]
+      ),
+      pool.query(
+        `
+          select c.id, c.case_number, c.title, c.case_type, c.status,
+                 cl.full_name as client_full_name,
+                 cl.company_name as client_company_name
+          from cases c
+          join clients cl on cl.id = c.client_id
+            and cl.office_id = c.office_id
+            and cl.deleted_at is null
+          where c.office_id = $1
+            and c.deleted_at is null
+          order by c.created_at desc
+          limit 5
+        `,
+        [req.auth.officeId]
+      ),
+      pool.query(
+        `
+          select c.id, c.case_number, c.title, c.next_hearing_at,
+                 c.court_name, c.branch_name,
+                 cl.full_name as client_full_name,
+                 cl.company_name as client_company_name
+          from cases c
+          join clients cl on cl.id = c.client_id
+            and cl.office_id = c.office_id
+            and cl.deleted_at is null
+          where c.office_id = $1
+            and c.deleted_at is null
+            and c.next_hearing_at is not null
+            and c.next_hearing_at >= now()
+          order by c.next_hearing_at asc
+          limit 5
+        `,
+        [req.auth.officeId]
+      )
+    ]);
+
+    return res.json({
+      data: {
+        stats: stats.rows[0] || {
+          total_clients: 0,
+          active_cases: 0,
+          closed_cases: 0,
+          upcoming_hearings: 0
+        },
+        recent_cases: recentCases.rows,
+        upcoming_hearings: upcomingHearings.rows
+      }
+    });
+  } catch (error) {
+    console.error("Dashboard data failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
 app.get("/api/clients", requireAuth, async (req, res) => {
   const querySchema = z.object({
     search: z.string().trim().max(100).optional(),
