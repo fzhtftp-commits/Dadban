@@ -121,3 +121,30 @@ th{font-size:11.5px}
   }
   .logout-btn::first-letter{font-size:18px}
 }
+
+
+/* Header logout action */
+.header-logout-btn{
+  border:1px solid var(--line);
+  background:#fff;
+  color:var(--text);
+  border-radius:10px;
+  padding:10px 14px;
+  font:inherit;
+  font-size:12px;
+  line-height:1.5;
+  cursor:pointer;
+}
+.header-logout-btn:hover:not(:disabled){
+  border-color:#b24b4b;
+  color:#a23b3b;
+  background:#fff8f8;
+}
+.header-logout-btn:disabled{
+  opacity:.65;
+  cursor:wait;
+}
+@media(max-width:600px){
+  .top-actions{gap:8px}
+  .header-logout-btn{padding:9px 10px;font-size:11px}
+}
