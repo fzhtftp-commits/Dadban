@@ -2,41 +2,87 @@
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>پرونده | دادبان</title>
+<title>دادبان | پروفایل پرونده</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<div class="app">
+<div class="app-shell">
 <aside class="sidebar">
-<div class="brand">⚖ <span>دادبان</span></div>
-<nav>
-<a href="index.html">▦ داشبورد</a>
-<a href="clients.html">👥 موکل‌ها</a>
-<a class="active" href="cases.html">▣ پرونده‌ها</a>
-<a href="#">◷ تقویم / جلسات</a><a href="#">✓ اقدامات پرونده</a><a href="#">▤ اسناد / مدارک</a><a href="#">₿ امور مالی</a><a href="#">▤ گزارش‌ها</a><a href="#">⚙ تنظیمات</a>
-</nav>
+  <div class="brand"><div class="brand-mark">⚖</div><div><strong>دادبان</strong><span>مدیریت دفتر وکالت</span></div></div>
+  <nav>
+    <a href="index.html">⌂ داشبورد</a>
+    <a href="clients.html">👥 موکل‌ها</a>
+    <a class="active" href="cases.html">▣ پرونده‌ها</a>
+    <a href="#">◷ تقویم و جلسات</a>
+    <a href="#">✓ اقدامات پرونده</a>
+    <a href="#">▤ اسناد و مدارک</a>
+    <a href="#">﷼ امور مالی</a>
+    <a href="#">▥ گزارش‌ها</a>
+  </nav>
+  <div class="side-bottom"><a href="#">⚙ تنظیمات</a><div class="secure">🔒 امنیت چندلایه فعال</div></div>
 </aside>
-<main class="main">
-<header class="topbar"><div><h1 id="caseTitle">پرونده</h1><p id="caseStatus" class="panel-subtitle">در حال دریافت اطلاعات...</p></div></header>
-<section class="panel">
-<div id="caseMessage" class="form-message" hidden></div>
-<div class="form-grid">
-<div><strong>شماره پرونده</strong><p id="caseNumber">—</p></div>
-<div><strong>موکل</strong><p id="clientName">—</p></div>
-<div><strong>نوع پرونده</strong><p id="caseType">—</p></div>
-<div><strong>دادگاه</strong><p id="courtName">—</p></div>
-<div><strong>شعبه</strong><p id="branchName">—</p></div>
-<div><strong>طرف مقابل</strong><p id="opposingParty">—</p></div>
-<div><strong>وضعیت</strong><p id="statusValue">—</p></div>
-<div><strong>اولویت</strong><p id="priorityValue">—</p></div>
-<div><strong>تاریخ ثبت</strong><p id="filingDate">—</p></div>
-<div><strong>جلسه بعدی</strong><p id="hearingDate">—</p></div>
-</div>
-<hr>
-<div><strong>شرح</strong><p id="description">—</p></div>
-<div><strong>یادداشت</strong><p id="notes">—</p></div>
-<div style="margin-top:20px"><a class="primary" href="cases.html" style="text-decoration:none">بازگشت به پرونده‌ها</a></div>
+
+<main>
+<header class="topbar">
+  <div><div class="eyebrow">مدیریت پرونده‌ها</div><h1>پروفایل پرونده</h1></div>
+  <div class="top-actions"><div class="user"><div class="avatar">و</div><div><b>مدیر دفتر</b><small>مدیر</small></div></div></div>
+</header>
+
+<section class="profile-hero">
+  <div class="profile-main">
+    <div class="profile-avatar">⚖</div>
+    <div>
+      <span class="badge" id="caseStatus">● در حال دریافت...</span>
+      <h2 id="caseTitle">پرونده</h2>
+      <p id="caseNumberHero">شماره پرونده: —</p>
+    </div>
+  </div>
+  <div class="profile-actions">
+    <a class="secondary-btn" href="cases.html">← بازگشت به پرونده‌ها</a>
+  </div>
 </section>
-</main></div>
-<script src="case-profile.js?v=1"></script>
-</body></html>
+
+<div id="caseMessage" class="form-message profile-message" hidden></div>
+
+<section class="profile-grid">
+  <div class="card">
+    <div class="section-head"><h3>اطلاعات اصلی پرونده</h3></div>
+    <div class="detail-grid">
+      <div><span>شماره پرونده</span><b id="caseNumber" class="ltr-value">—</b></div>
+      <div><span>موکل</span><b id="clientName">—</b></div>
+      <div><span>نوع پرونده</span><b id="caseType">—</b></div>
+      <div><span>دادگاه</span><b id="courtName">—</b></div>
+      <div><span>شعبه</span><b id="branchName">—</b></div>
+      <div><span>طرف مقابل</span><b id="opposingParty">—</b></div>
+      <div><span>وضعیت</span><b id="statusValue">—</b></div>
+      <div><span>اولویت</span><b id="priorityValue">—</b></div>
+      <div><span>تاریخ ثبت</span><b id="filingDate">—</b></div>
+      <div><span>جلسه بعدی</span><b id="hearingDate">—</b></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-head"><h3>خلاصه پرونده</h3></div>
+    <div class="mini-stats">
+      <div><strong id="summaryStatus">—</strong><span>وضعیت</span></div>
+      <div><strong id="summaryPriority">—</strong><span>اولویت</span></div>
+    </div>
+    <div class="profile-note"><span>جلسه بعدی</span><b id="summaryHearing">—</b></div>
+  </div>
+</section>
+
+<section class="profile-grid case-text-grid">
+  <div class="card">
+    <div class="section-head"><h3>شرح پرونده</h3></div>
+    <div class="profile-note" style="margin-top:0;padding-top:0;border-top:0"><b id="description" class="case-text">—</b></div>
+  </div>
+  <div class="card">
+    <div class="section-head"><h3>یادداشت‌ها</h3></div>
+    <div class="profile-note" style="margin-top:0;padding-top:0;border-top:0"><b id="notes" class="case-text">—</b></div>
+  </div>
+</section>
+</main>
+</div>
+<script src="case-profile.js?v=2"></script>
+</body>
+</html>
