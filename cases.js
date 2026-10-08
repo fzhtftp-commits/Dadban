@@ -1,6 +1,7 @@
 const API="https://dadban-backend.onrender.com";
 const body=document.getElementById("casesBody"), statusText=document.getElementById("casesStatus"), search=document.getElementById("caseSearch"), filter=document.getElementById("caseStatus");
 let cases=[];
+const clientId=new URLSearchParams(window.location.search).get("client_id");
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 const statusLabel={active:"فعال",pending:"در انتظار",closed:"بسته",archived:"بایگانی"};
 const priorityLabel={low:"کم",normal:"عادی",high:"بالا",urgent:"فوری"};
@@ -13,10 +14,12 @@ function render(){
 }
 async function load(){
  try{
-  const r=await fetch(`${API}/api/cases?limit=100`,{credentials:"include"});
+  const url = new URL(`${API}/api/cases`); url.searchParams.set("limit","100"); if (clientId) url.searchParams.set("client_id",clientId);
+  const r=await fetch(url.toString(),{credentials:"include"});
   if(r.status===401){location.href="login.html";return}
   if(!r.ok) throw new Error();
   const d=await r.json(); cases=Array.isArray(d?.data)?d.data:[]; render();
+  if (clientId) statusText.textContent=`${cases.length} پرونده مرتبط با این موکل دریافت شد`;
  }catch{statusText.textContent="دریافت پرونده‌ها انجام نشد.";body.innerHTML='<tr><td colspan="7" class="empty-state">خطا در ارتباط با سرور.</td></tr>';}
 }
 search.addEventListener("input",render);filter.addEventListener("change",render);load();
