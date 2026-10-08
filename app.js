@@ -29,13 +29,18 @@ const statusLabel = {
 
 document.addEventListener("DOMContentLoaded", async () => {
   const links = document.querySelectorAll(".sidebar nav a, .side-bottom a");
-  const logoutButton = document.getElementById("logoutBtn");
+  const logoutButtons = [
+    document.getElementById("logoutBtn"),
+    document.getElementById("headerLogoutBtn")
+  ].filter(Boolean);
 
-  logoutButton?.addEventListener("click", async () => {
+  const performLogout = async (clickedButton) => {
     if (!window.confirm("آیا می‌خواهید از حساب دادبان خارج شوید؟")) return;
 
-    logoutButton.disabled = true;
-    logoutButton.textContent = "در حال خروج...";
+    logoutButtons.forEach((button) => {
+      button.disabled = true;
+      button.textContent = "در حال خروج...";
+    });
 
     try {
       const csrf = sessionStorage.getItem("dadban_csrf") || "";
@@ -57,6 +62,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       sessionStorage.removeItem("dadban_csrf");
       window.location.href = "login.html";
     }
+  };
+
+  logoutButtons.forEach((button) => {
+    button.addEventListener("click", () => performLogout(button));
   });
 
   links.forEach((link) => {
