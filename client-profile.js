@@ -7,6 +7,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const deleteButton = document.getElementById("deleteClient");
   const csrfToken = () => sessionStorage.getItem("dadban_csrf") || "";
   const faDigits = d => "۰۱۲۳۴۵۶۷۸۹"[d];
+  const statusLabel = {active:"فعال",pending:"در انتظار",closed:"بسته",archived:"بایگانی"};
+  const priorityLabel = {low:"کم",normal:"عادی",high:"بالا",urgent:"فوری"};
 
   const formatDigits = value => String(value ?? "").replace(/\d/g, d => faDigits(Number(d)));
   const formatDate = value => {
@@ -17,6 +19,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   };
   const jalaliFromIso = value => formatDate(value);
   const setText = (idName, value) => { document.getElementById(idName).textContent = value || "—"; };
+
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+  }[ch]));
 
   if (!id) {
     message.textContent = "شناسه موکل در آدرس صفحه وجود ندارد.";
@@ -48,6 +54,35 @@ document.addEventListener("DOMContentLoaded", async () => {
     setText("dAddress", c.address);
     setText("dNotes", c.notes);
     setText("dUpdated", formatDate(c.updated_at || c.created_at));
+    const casesUrl = new URL(`${API}/api/cases`);
+    casesUrl.searchParams.set("client_id", id);
+    casesUrl.searchParams.set("limit", "100");
+    const casesResponse = await fetch(casesUrl.toString(), {credentials:"include"});
+    const casesData = await casesResponse.json().catch(() => ({}));
+    if (casesResponse.status === 401) { window.location.href = "login.html"; return; }
+    if (!casesResponse.ok) throw new Error("دریافت پرونده‌های موکل انجام نشد.");
+    const clientCases = Array.isArray(casesData?.data) ? casesData.data : [];
+    const caseCount = document.getElementById("clientCasesCount");
+    if (caseCount) caseCount.textContent = formatDigits(clientCases.length);
+    const casesBody = document.getElementById("clientCasesBody");
+    const casesEmpty = document.getElementById("clientCasesEmpty");
+    if (casesBody) {
+      casesBody.innerHTML = clientCases.length ? clientCases.map(item => {
+        const status = statusLabel[item.status] || item.status || "—";
+        const priority = priorityLabel[item.priority] || item.priority || "—";
+        const statusClass = item.status === "active" ? "green" : "gold";
+        return `<tr>
+          <td><a href="case-profile.html?id=${encodeURIComponent(item.id)}"><b>${escapeHtml(item.case_number || "—")}</b></a></td>
+          <td>${escapeHtml(item.title || "—")}</td>
+          <td>${escapeHtml(item.case_type || "—")}</td>
+          <td><span class="status ${statusClass}">${escapeHtml(status)}</span></td>
+          <td>${escapeHtml(priority)}</td>
+          <td>${escapeHtml(formatDate(item.next_hearing_at))}</td>
+        </tr>`;
+      }).join("") : "";
+    }
+    if (casesEmpty) casesEmpty.hidden = clientCases.length !== 0;
+
     document.getElementById("profileStatus").textContent =
       c.status === "needs_followup" ? "● نیازمند پیگیری" : c.status === "inactive" ? "● غیرفعال" : "● فعال";
     editButton.disabled = false;
