@@ -173,3 +173,49 @@ create index if not exists auth_sessions_expiry_idx
 
 -- Keep the authentication tables protected from accidental public exposure.
 -- RLS can be enabled with policies once the database role strategy is finalized.
+
+-- Case management
+create table if not exists cases (
+  id uuid primary key default gen_random_uuid(),
+  office_id uuid not null references offices(id) on delete restrict,
+  client_id uuid not null references clients(id) on delete restrict,
+  case_number varchar(80) not null,
+  title varchar(240) not null,
+  case_type varchar(80),
+  court_name varchar(200),
+  branch_name varchar(120),
+  opposing_party varchar(240),
+  status varchar(30) not null default 'active'
+    check (status in ('active','pending','closed','archived')),
+  priority varchar(20) not null default 'normal'
+    check (priority in ('low','normal','high','urgent')),
+  filing_date date,
+  next_hearing_at timestamptz,
+  description text,
+  notes text,
+  created_by uuid references users(id) on delete set null,
+  updated_by uuid references users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+
+create unique index if not exists cases_number_unique_active
+  on cases (office_id, case_number)
+  where deleted_at is null;
+
+create index if not exists cases_office_status_idx
+  on cases (office_id, status)
+  where deleted_at is null;
+
+create index if not exists cases_client_idx
+  on cases (office_id, client_id)
+  where deleted_at is null;
+
+create index if not exists cases_hearing_idx
+  on cases (office_id, next_hearing_at)
+  where deleted_at is null;
+
+drop trigger if exists cases_set_updated_at on cases;
+create trigger cases_set_updated_at before update on cases
+for each row execute function set_updated_at();
