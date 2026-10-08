@@ -3,7 +3,7 @@
 <body><div class="app-shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">⚖</div><div><strong>دادبان</strong><span>مدیریت دفتر وکالت</span></div></div><nav><a href="index.html">⌂ داشبورد</a><a href="clients.html">👥 موکل‌ها</a><a class="active" href="cases.html">▣ پرونده‌ها</a><a href="#">◷ تقویم و جلسات</a><a href="#">✓ اقدامات پرونده</a><a href="#">▤ اسناد و مدارک</a><a href="#">﷼ امور مالی</a><a href="#">▥ گزارش‌ها</a></nav><div class="side-bottom"><a href="#">⚙ تنظیمات</a><div class="secure">🔒 امنیت چندلایه فعال</div></div></aside>
 <main><header class="topbar"><div><div class="eyebrow">مدیریت پرونده</div><h1>ثبت پرونده جدید</h1></div></header>
 <section class="card client-form-card"><form id="caseForm"><div class="form-grid">
-<div class="field"><label>موکل *</label><select id="client_id" required><option value="">در حال دریافت موکل‌ها...</option></select></div>
+<div class="field"><label>کد ملی موکل *</label><input id="client_national_id" inputmode="numeric" maxlength="10" placeholder="۱۰ رقم کد ملی" required><small id="clientLookupMessage" class="panel-subtitle">کد ملی را وارد کنید تا نام موکل نمایش داده شود.</small><input id="client_id" type="hidden" required></div>
 <div class="field"><label>شماره پرونده *</label><input id="case_number" maxlength="80" required></div>
 <div class="field"><label>عنوان پرونده *</label><input id="title" maxlength="240" required></div>
 <div class="field"><label>نوع پرونده</label><input id="case_type" maxlength="80" placeholder="مثلاً حقوقی، کیفری، خانواده"></div>
