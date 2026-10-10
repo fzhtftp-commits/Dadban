@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { withOfficeTransaction } from "./db/tenant-transaction.js";
+import { findActiveSession } from "./auth/session-bootstrap.js";
 
 const { Pool } = pg;
 const scrypt = promisify(crypto.scrypt);
@@ -237,20 +238,7 @@ const requireAuth = async (req, res, next) => {
       return res.status(401).json({ error: "authentication_required" });
     }
 
-    const result = await pool.query(
-      `
-        select s.id as session_id, s.user_id, s.office_id, s.csrf_hash,
-               u.full_name, u.email, u.role
-        from auth_sessions s
-        join users u on u.id = s.user_id
-        where s.token_hash = $1
-          and s.revoked_at is null
-          and s.expires_at > now()
-          and u.is_active = true
-          and u.deleted_at is null
-      `,
-      [hashToken(token)]
-    );
+    const result = await findActiveSession(pool, hashToken(token));
 
     if (!result.rowCount) {
       return res.status(401).json({ error: "authentication_required" });
