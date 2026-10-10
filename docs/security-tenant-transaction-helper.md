@@ -21,7 +21,9 @@ replacement client inside that same transaction.
 This is still an incomplete migration and is not ready to merge or deploy.
 
 - Authentication bootstrap still queries sessions/users before the office
-  context can be established; `requireAuth` also updates session activity.
+  context can be established. This remains the main blocker: the initial
+  token-hash lookup needs a narrowly privileged, tested bootstrap strategy
+  before RLS can safely be enabled on `auth_sessions` and `users`.
 - Registration, login, logout, and session lifecycle queries need an explicit,
   tested policy/role strategy. Do not make authentication tables broadly
   accessible just to make RLS pass.
