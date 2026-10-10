@@ -217,9 +217,13 @@ const dbError = (error) => {
 
 const requireTrustedOrigin = (req, res, next) => {
   const origin = req.get("origin");
-  if (origin && origin !== corsOrigin) {
+
+  // Browser authentication and write requests must identify the configured
+  // frontend origin. Authenticated mutations also require a valid CSRF token.
+  if (!origin || origin !== corsOrigin) {
     return res.status(403).json({ error: "origin_not_allowed" });
   }
+
   next();
 };
 
