@@ -612,6 +612,7 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
 
   try {
     await client.query("begin");
+    await client.query("SELECT set_config('app.current_office_id', $1, true)", [req.auth.officeId]);
     const result = await client.query(
       `
         insert into clients (
@@ -729,6 +730,7 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
 
   try {
     await client.query("begin");
+    await client.query("SELECT set_config('app.current_office_id', $1, true)", [req.auth.officeId]);
     const result = await client.query(
       `
         update clients
@@ -766,6 +768,7 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
 
   try {
     await client.query("begin");
+    await client.query("SELECT set_config('app.current_office_id', $1, true)", [req.auth.officeId]);
     const result = await client.query(
       `
         update clients
@@ -872,6 +875,7 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
 
   try {
     await client.query("begin");
+    await client.query("SELECT set_config('app.current_office_id', $1, true)", [req.auth.officeId]);
 
     const owner = await client.query(
       "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
@@ -987,6 +991,7 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   const client = await pool.connect();
   try {
     await client.query("begin");
+    await client.query("SELECT set_config('app.current_office_id', $1, true)", [req.auth.officeId]);
     const result = await client.query(
       `
         update cases
@@ -1021,6 +1026,7 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
   const client = await pool.connect();
   try {
     await client.query("begin");
+    await client.query("SELECT set_config('app.current_office_id', $1, true)", [req.auth.officeId]);
     const result = await client.query(
       `
         update cases
