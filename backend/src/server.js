@@ -969,14 +969,6 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   const fields = [];
   const values = [id.data, req.auth.officeId];
 
-  if (Object.prototype.hasOwnProperty.call(data, "client_id")) {
-    const owner = await pool.query(
-      "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
-      [data.client_id, req.auth.officeId]
-    );
-    if (!owner.rowCount) return res.status(400).json({ error: "invalid_related_client" });
-  }
-
   for (const field of allowedFields) {
     if (Object.prototype.hasOwnProperty.call(data, field)) {
       values.push(data[field] ?? null);
@@ -992,6 +984,16 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   try {
     await client.query("begin");
     await client.query("SELECT set_config('app.current_office_id', $1, true)", [req.auth.officeId]);
+    if (Object.prototype.hasOwnProperty.call(data, "client_id")) {
+      const owner = await client.query(
+        "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
+        [data.client_id, req.auth.officeId]
+      );
+      if (!owner.rowCount) {
+        await client.query("rollback");
+        return res.status(400).json({ error: "invalid_related_client" });
+      }
+    }
     const result = await client.query(
       `
         update cases
