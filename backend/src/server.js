@@ -266,7 +266,13 @@ const requireAuth = async (req, res, next) => {
       role: result.rows[0].role
     };
 
-    await pool.query("update auth_sessions set last_seen_at = now() where id = $1", [req.auth.sessionId]);
+    const touchedSession = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
+      "update auth_sessions set last_seen_at = now() where id = $1 and office_id = $2 and revoked_at is null and expires_at > now()",
+      [req.auth.sessionId, req.auth.officeId]
+    ));
+    if (!touchedSession.rowCount) {
+      return res.status(401).json({ error: "authentication_required" });
+    }
     next();
   } catch (error) {
     console.error("Authentication failed:", error);
@@ -458,10 +464,14 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
-  await pool.query(
-    "update auth_sessions set revoked_at = now() where id = $1 and revoked_at is null",
-    [req.auth.sessionId]
-  );
+  const revokedSession = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
+    "update auth_sessions set revoked_at = now() where id = $1 and office_id = $2 and revoked_at is null",
+    [req.auth.sessionId, req.auth.officeId]
+  ));
+  if (!revokedSession.rowCount) {
+    setClearAuthCookies(res);
+    return res.status(401).json({ error: "authentication_required" });
+  }
   setClearAuthCookies(res);
   return res.json({ ok: true });
 });
