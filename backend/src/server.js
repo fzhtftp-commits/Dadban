@@ -578,7 +578,7 @@ app.get("/api/clients", requireAuth, async (req, res) => {
   values.push(limit, offset);
 
   try {
-    const result = await pool.query(
+    const result = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
       `
         select id, client_type, full_name, national_id, birth_date, occupation,
                company_name, national_company_id, registration_no, mobile, phone,
@@ -590,7 +590,7 @@ app.get("/api/clients", requireAuth, async (req, res) => {
         offset $${values.length}
       `,
       values
-    );
+    ));
 
     return res.json({
       data: result.rows,
@@ -836,7 +836,7 @@ app.get("/api/cases", requireAuth, async (req, res) => {
   values.push(limit, offset);
 
   try {
-    const result = await pool.query(
+    const result = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
       `
         select c.id, c.client_id, c.case_number, c.title, c.case_type,
                c.court_name, c.branch_name, c.opposing_party, c.status,
@@ -854,7 +854,7 @@ app.get("/api/cases", requireAuth, async (req, res) => {
         offset $${values.length}
       `,
       values
-    );
+    ));
     return res.json({ data: result.rows, pagination: { page, limit, returned: result.rows.length } });
   } catch (error) {
     console.error("List cases failed:", error);
