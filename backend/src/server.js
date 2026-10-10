@@ -6,6 +6,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { withOfficeTransaction } from "./db/tenant-transaction.js";
 
 const { Pool } = pg;
 const scrypt = promisify(crypto.scrypt);
@@ -651,7 +652,7 @@ app.get("/api/clients/lookup", requireAuth, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: "invalid_national_id" });
 
   try {
-    const result = await pool.query(
+    const result = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
       `
         select id, client_type, full_name, national_id, company_name, national_company_id, status
         from clients
@@ -661,7 +662,7 @@ app.get("/api/clients/lookup", requireAuth, async (req, res) => {
         limit 1
       `,
       [req.auth.officeId, parsed.data.national_id]
-    );
+    ));
     if (!result.rowCount) return res.status(404).json({ error: "client_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
@@ -676,7 +677,7 @@ app.get("/api/clients/:id", requireAuth, async (req, res) => {
   if (!id.success) return res.status(400).json({ error: "invalid_client_id" });
 
   try {
-    const result = await pool.query(
+    const result = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
       `
         select id, client_type, full_name, national_id, birth_date, occupation,
                company_name, national_company_id, registration_no, mobile, phone,
@@ -685,7 +686,7 @@ app.get("/api/clients/:id", requireAuth, async (req, res) => {
         where id = $1 and office_id = $2 and deleted_at is null
       `,
       [id.data, req.auth.officeId]
-    );
+    ));
 
     if (!result.rowCount) return res.status(404).json({ error: "client_not_found" });
     return res.json({ data: result.rows[0] });
