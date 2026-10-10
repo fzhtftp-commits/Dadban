@@ -22,8 +22,8 @@ function makePool({ failAt } = {}) {
 test("sets office context inside the transaction and releases client after commit", async () => {
   const { calls, pool } = makePool();
   const result = await withOfficeTransaction(pool, officeId, async (client) => {
-    calls.push({ sql: "TENANT_QUERY" });
-    return client === undefined ? null : "ok";
+    await client.query("TENANT_QUERY");
+    return "ok";
   });
 
   assert.equal(result, "ok");
@@ -50,11 +50,10 @@ test("rolls back and releases client if a tenant query fails", async () => {
   const { calls, pool } = makePool({ failAt: "TENANT_QUERY" });
 
   await assert.rejects(
-    withOfficeTransaction(pool, officeId, async () => {
-      await pool.connect; // Keep the callback asynchronous without external dependencies.
-      throw new Error("simulated callback failure");
+    withOfficeTransaction(pool, officeId, async (client) => {
+      await client.query("TENANT_QUERY");
     }),
-    /simulated callback failure/
+    /simulated failure/
   );
 
   assert.equal(calls.some((call) => call.sql === "ROLLBACK"), true);
