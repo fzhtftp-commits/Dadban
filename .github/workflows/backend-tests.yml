@@ -25,3 +25,4 @@ jobs:
         run: |
           npm install
           npm test
+          node --check src/server.js
