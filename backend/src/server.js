@@ -470,7 +470,7 @@ app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, asy
 app.get("/api/dashboard", requireAuth, async (req, res) => {
   try {
     const [stats, recentCases, upcomingHearings] = await Promise.all([
-      pool.query(
+      withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
         `
           select
             (select count(*)::int from clients
@@ -485,8 +485,8 @@ app.get("/api/dashboard", requireAuth, async (req, res) => {
                 and next_hearing_at >= now()) as upcoming_hearings
         `,
         [req.auth.officeId]
-      ),
-      pool.query(
+      )),
+      withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
         `
           select c.id, c.case_number, c.title, c.case_type, c.status,
                  cl.full_name as client_full_name,
@@ -501,8 +501,8 @@ app.get("/api/dashboard", requireAuth, async (req, res) => {
           limit 5
         `,
         [req.auth.officeId]
-      ),
-      pool.query(
+      )),
+      withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
         `
           select c.id, c.case_number, c.title, c.next_hearing_at,
                  c.court_name, c.branch_name,
@@ -520,7 +520,7 @@ app.get("/api/dashboard", requireAuth, async (req, res) => {
           limit 5
         `,
         [req.auth.officeId]
-      )
+      ))
     ]);
 
     return res.json({
@@ -923,7 +923,7 @@ app.get("/api/cases/:id", requireAuth, async (req, res) => {
   if (!id.success) return res.status(400).json({ error: "invalid_case_id" });
 
   try {
-    const result = await pool.query(
+    const result = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
       `
         select c.id, c.client_id, c.case_number, c.title, c.case_type,
                c.court_name, c.branch_name, c.opposing_party, c.status,
@@ -939,7 +939,7 @@ app.get("/api/cases/:id", requireAuth, async (req, res) => {
         where c.id = $1 and c.office_id = $2 and c.deleted_at is null
       `,
       [id.data, req.auth.officeId]
-    );
+    ));
     if (!result.rowCount) return res.status(404).json({ error: "case_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
