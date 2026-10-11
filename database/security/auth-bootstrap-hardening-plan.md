@@ -1,6 +1,6 @@
 # Authentication bootstrap hardening — implementation plan
 
-Status: design checkpoint only. This document is not a migration and must not be executed as SQL.
+Status: implementation staged on the draft security branch. This document is not a migration and must not be executed as SQL. See `database/security/auth-bootstrap-deployment-gate.md` before any database rollout.
 
 ## Why this checkpoint exists
 
@@ -19,6 +19,15 @@ Simply enabling RLS or revoking table privileges now would break one or both flo
 4. Session INSERT must be narrowly mediated or allowed only through an equally reviewed path. Session UPDATE for `last_seen_at` and `revoked_at` must require the transaction-local office context and a matching session `office_id`.
 5. Registration must remain atomic: office, user, credential, and session either all commit or all roll back. The user row's office context and any office creation permissions must be considered before enabling RLS on `users`.
 6. Do not apply production changes until the exact Render/Supabase runtime connection role and the role/function ownership model have been confirmed.
+
+
+## Staged implementation added
+
+- Added `database/migrations/20261011_auth_bootstrap_hardening.sql` with a non-login, non-superuser, non-BYPASSRLS function owner; narrow login/session lookup functions; mediated session creation; atomic registration; and office-context-bound touch/revoke operations.
+- Added `backend/src/auth/auth-bootstrap.js` and routed server registration, login, active-session lookup, session touch, and logout through these functions.
+- Added `backend/test/auth-bootstrap.test.js` to assert that the server-side helpers use only the constrained function entry points.
+- Added a deployment gate document. The migration remains unverified against a disposable PostgreSQL copy of the exact current production schema. Do not apply to production or switch Render's connection until role/grant preflight is complete.
+- CI for the auth-bootstrap tests reported success on the draft branch; this is unit-test evidence only, not proof of SQL migration or end-to-end auth correctness.
 
 ## Acceptance tests
 
