@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { withOfficeTransaction } from "./db/tenant-transaction.js";
-import { findActiveSession } from "./auth/session-bootstrap.js";
+import { findActiveSession, findLoginUser, createAuthSession, registerAuthAccount, updateAuthSession } from "./auth/auth-bootstrap.js";
 
 const { Pool } = pg;
 const scrypt = promisify(crypto.scrypt);
@@ -254,11 +254,10 @@ const requireAuth = async (req, res, next) => {
       role: result.rows[0].role
     };
 
-    const touchedSession = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
-      "update auth_sessions set last_seen_at = now() where id = $1 and office_id = $2 and revoked_at is null and expires_at > now()",
-      [req.auth.sessionId, req.auth.officeId]
-    ));
-    if (!touchedSession.rowCount) {
+    const touchedSession = await withOfficeTransaction(pool, req.auth.officeId, (client) =>
+      updateAuthSession(client, { sessionId: req.auth.sessionId, officeId: req.auth.officeId, action: "touch" })
+    );
+    if (!touchedSession.rows[0]?.updated) {
       return res.status(401).json({ error: "authentication_required" });
     }
     next();
@@ -317,54 +316,30 @@ app.get("/health/db", async (_req, res) => {
 
 app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "invalid_registration" });
-  }
+  if (!parsed.success) return res.status(400).json({ error: "invalid_registration" });
+  if (!pool) return res.status(503).json({ error: "database_unavailable" });
 
   const { full_name, email, password, office_name } = parsed.data;
+  const passwordHash = await createPasswordHash(password);
+  const sessionToken = crypto.randomBytes(32).toString("base64url");
+  const csrfToken = crypto.randomBytes(32).toString("base64url");
   const client = await pool.connect();
 
   try {
     await client.query("begin");
-    const office = await client.query(
-      "insert into offices (name) values ($1) returning id",
-      [office_name]
-    );
-
-    const user = await client.query(
-      `
-        insert into users (office_id, full_name, email, role)
-        values ($1,$2,$3,'owner')
-        returning id, office_id, full_name, email, role
-      `,
-      [office.rows[0].id, full_name, email]
-    );
-
-    const passwordHash = await createPasswordHash(password);
-    await client.query(
-      "insert into auth_credentials (user_id, password_hash) values ($1,$2)",
-      [user.rows[0].id, passwordHash]
-    );
-
-    const sessionToken = crypto.randomBytes(32).toString("base64url");
-    const csrfToken = crypto.randomBytes(32).toString("base64url");
-    await client.query(
-      `
-        insert into auth_sessions
-          (user_id, office_id, token_hash, csrf_hash, expires_at)
-        values ($1,$2,$3,$4,now()+interval '8 hours')
-      `,
-      [user.rows[0].id, user.rows[0].office_id, hashToken(sessionToken), hashToken(csrfToken)]
-    );
-
+    const result = await registerAuthAccount(client, {
+      fullName: full_name,
+      email,
+      officeName: office_name,
+      passwordHash,
+      tokenHash: hashToken(sessionToken),
+      csrfHash: hashToken(csrfToken)
+    });
+    if (!result.rowCount) throw new Error("Registration function did not return the created user");
     await client.query("commit");
     setAuthCookies(res, sessionToken, csrfToken);
-
     return res.status(201).json({
-      data: {
-        user: user.rows[0],
-        csrf_token: csrfToken
-      }
+      data: { user: result.rows[0], csrf_token: csrfToken }
     });
   } catch (error) {
     await client.query("rollback");
@@ -379,46 +354,28 @@ app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
 app.post("/api/auth/login", requireTrustedOrigin, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_login" });
+  if (!pool) return res.status(503).json({ error: "database_unavailable" });
 
   const { email, password } = parsed.data;
-
   try {
-    const result = await pool.query(
-      `
-        select u.id, u.office_id, u.full_name, u.email, u.role, c.password_hash
-        from users u
-        join auth_credentials c on c.user_id = u.id
-        where lower(u.email) = lower($1)
-          and u.is_active = true
-          and u.deleted_at is null
-        limit 1
-      `,
-      [email]
-    );
-
+    const result = await findLoginUser(pool, email);
     if (!result.rowCount || !(await verifyPassword(password, result.rows[0].password_hash))) {
       return res.status(401).json({ error: "invalid_credentials" });
     }
 
     const sessionToken = crypto.randomBytes(32).toString("base64url");
     const csrfToken = crypto.randomBytes(32).toString("base64url");
-
-    await pool.query(
-      `
-        insert into auth_sessions
-          (user_id, office_id, token_hash, csrf_hash, expires_at)
-        values ($1,$2,$3,$4,now()+interval '8 hours')
-      `,
-      [
-        result.rows[0].id,
-        result.rows[0].office_id,
-        hashToken(sessionToken),
-        hashToken(csrfToken)
-      ]
-    );
+    const created = await createAuthSession(pool, {
+      userId: result.rows[0].id,
+      officeId: result.rows[0].office_id,
+      tokenHash: hashToken(sessionToken),
+      csrfHash: hashToken(csrfToken)
+    });
+    if (!created.rows[0]?.created) {
+      return res.status(401).json({ error: "invalid_credentials" });
+    }
 
     setAuthCookies(res, sessionToken, csrfToken);
-
     return res.json({
       data: {
         user: {
@@ -452,11 +409,10 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
-  const revokedSession = await withOfficeTransaction(pool, req.auth.officeId, (client) => client.query(
-    "update auth_sessions set revoked_at = now() where id = $1 and office_id = $2 and revoked_at is null",
-    [req.auth.sessionId, req.auth.officeId]
-  ));
-  if (!revokedSession.rowCount) {
+  const revokedSession = await withOfficeTransaction(pool, req.auth.officeId, (client) =>
+    updateAuthSession(client, { sessionId: req.auth.sessionId, officeId: req.auth.officeId, action: "revoke" })
+  );
+  if (!revokedSession.rows[0]?.updated) {
     setClearAuthCookies(res);
     return res.status(401).json({ error: "authentication_required" });
   }
