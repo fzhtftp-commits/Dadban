@@ -16,7 +16,7 @@ $$;
 
 ALTER ROLE dadban_auth_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
-GRANT USAGE ON SCHEMA public TO dadban_auth_owner;
+GRANT USAGE, CREATE ON SCHEMA public TO dadban_auth_owner;
 GRANT SELECT, INSERT, UPDATE ON public.offices TO dadban_auth_owner;
 GRANT SELECT, INSERT, UPDATE ON public.users TO dadban_auth_owner;
 GRANT SELECT, INSERT, UPDATE ON public.auth_credentials TO dadban_auth_owner;
@@ -173,6 +173,17 @@ REVOKE ALL ON FUNCTION public.dadban_auth_session_lookup(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.dadban_auth_create_session(uuid, uuid, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.dadban_auth_register(text, text, text, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.dadban_auth_update_session(uuid, uuid, text) FROM PUBLIC;
+
+-- The application role must not read credential hashes or session rows directly.
+-- Its authentication access is limited to the reviewed function entry points.
+DO $
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dadban_runtime') THEN
+    REVOKE ALL ON public.auth_credentials FROM dadban_runtime;
+    REVOKE ALL ON public.auth_sessions FROM dadban_runtime;
+  END IF;
+END
+$;
 
 -- Explicitly grant function entry points only to the intended app role if it exists.
 -- If absent, deployment must provision dadban_runtime and re-run this grant block.
