@@ -168,6 +168,9 @@ ALTER FUNCTION public.dadban_auth_create_session(uuid, uuid, text, text) OWNER T
 ALTER FUNCTION public.dadban_auth_register(text, text, text, text, text, text) OWNER TO dadban_auth_owner;
 ALTER FUNCTION public.dadban_auth_update_session(uuid, uuid, text) OWNER TO dadban_auth_owner;
 
+-- CREATE was needed only for ownership transfer; remove it from the definer role.
+REVOKE CREATE ON SCHEMA public FROM dadban_auth_owner;
+
 REVOKE ALL ON FUNCTION public.dadban_auth_login_lookup(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.dadban_auth_session_lookup(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.dadban_auth_create_session(uuid, uuid, text, text) FROM PUBLIC;
