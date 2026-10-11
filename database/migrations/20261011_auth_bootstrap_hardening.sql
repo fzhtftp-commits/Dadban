@@ -177,6 +177,10 @@ REVOKE ALL ON FUNCTION public.dadban_auth_create_session(uuid, uuid, text, text)
 REVOKE ALL ON FUNCTION public.dadban_auth_register(text, text, text, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.dadban_auth_update_session(uuid, uuid, text) FROM PUBLIC;
 
+-- Remove any default/public grants on sensitive authentication tables.
+REVOKE ALL ON public.auth_credentials FROM PUBLIC;
+REVOKE ALL ON public.auth_sessions FROM PUBLIC;
+
 -- The application role must not read credential hashes or session rows directly.
 -- Its authentication access is limited to the reviewed function entry points.
 DO $
