@@ -20,6 +20,8 @@ let outageServer;
 let outageServerOutput = "";
 let timeoutServer;
 let timeoutServerOutput = "";
+let rateLimitServer;
+let rateLimitServerOutput = "";
 
 const ids = {
   officeA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -46,7 +48,7 @@ async function waitForServer(portToCheck = port) {
   throw new Error("Dadban API did not become healthy in time");
 }
 
-async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true, idempotencyKey, extraHeaders = {} } = {}) {
+async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true, idempotencyKey, extraHeaders = {}, portToUse = port } = {}) {
   const headers = { origin: originHeader, cookie: `dadban_session=${token}; dadban_csrf=${csrf}`, ...extraHeaders };
   if (csrfHeader && ["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
     headers["x-csrf-token"] = csrf;
@@ -55,7 +57,7 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
     headers["content-type"] = "application/json";
   }
   if (idempotencyKey !== undefined) headers["idempotency-key"] = idempotencyKey;
-  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${portToUse}${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
   });
@@ -472,6 +474,16 @@ try {
   console.log("PASS: cross-office update rejected without mutation");
   console.log("PASS: cross-office delete rejected without mutation");
 
+  const rateLimitPort = port + 3;
+  rateLimitServer = spawn(process.execPath, ["src/server.js"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, PORT: String(rateLimitPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  rateLimitServer.stdout.on("data", chunk => { rateLimitServerOutput += chunk.toString(); });
+  rateLimitServer.stderr.on("data", chunk => { rateLimitServerOutput += chunk.toString(); });
+  await waitForServer(rateLimitPort);
+
   let rateLimited = false;
   for (let i = 0; i < 21; i++) {
     const limited = await request("/api/case-documents", {
@@ -479,7 +491,8 @@ try {
       idempotencyKey: `rate-limit-key-${String(i).padStart(2,"0")}`,
       // Spoofed forwarding headers must not let a direct client rotate its limiter identity.
       extraHeaders: { "x-forwarded-for": `198.51.100.${i + 1}` },
-      body: {}
+      body: {},
+      portToUse: rateLimitPort
     });
     if (limited.status === 429) {
       rateLimited = true;
@@ -521,5 +534,6 @@ try {
   if (server && server.exitCode === null) server.kill("SIGTERM");
   if (outageServer && outageServer.exitCode === null) outageServer.kill("SIGTERM");
   if (timeoutServer && timeoutServer.exitCode === null) timeoutServer.kill("SIGTERM");
+  if (rateLimitServer && rateLimitServer.exitCode === null) rateLimitServer.kill("SIGTERM");
   await pool.end();
 }
