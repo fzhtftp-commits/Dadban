@@ -94,3 +94,20 @@ test("document metadata rejects client-controlled office/case/storage fields and
  assert.match(server, /reference_number: z\.string\(\)\.trim\(\)\.max\(100\)/);
  assert.match(migration, /storage_status = 'metadata_only' and storage_key is null/);
 });
+
+
+test("document creation is idempotent and sensitive endpoints are rate limited", () => {
+ assert.match(server, /idempotency-key/);
+ assert.match(server, /request_fingerprint/);
+ assert.match(server, /on conflict \(office_id,created_by,idempotency_key\)/);
+ assert.match(server, /idempotent_replay: true/);
+ assert.match(server, /createRateLimiter\(\{ windowMs: 15 \* 60 \* 1000, maxRequests: 10 \}\)/);
+ assert.match(server, /createRateLimiter\(\{ windowMs: 15 \* 60 \* 1000, maxRequests: 40 \}\)/);
+ assert.match(server, /Retry-After/);
+ assert.match(server, /Max-Age=28800/);
+ assert.match(server, /SameSite=/);
+ assert.match(server, /interval '8 hours'/);
+ assert.match(server, /s\.expires_at > now\(\)/);
+ assert.match(migration, /case_documents_idempotency_unique_idx/);
+ assert.match(migration, /request_fingerprint char\(64\)/);
+});
