@@ -143,6 +143,13 @@ try {
   const outageResponse = await fetch(`http://127.0.0.1:${outagePort}/health/db`);
   assert.equal(outageResponse.status, 503, "database disconnect must return service unavailable");
   assert.deepEqual(await outageResponse.json(), { ok: false, database: "unavailable" }, "database outage response must not expose connection details");
+  const outageAuthenticatedRequest = await fetch(`http://127.0.0.1:${outagePort}/api/case-documents`, {
+    headers: { cookie: `dadban_session=${tokenA}; dadban_csrf=${csrfA}` },
+    signal: AbortSignal.timeout(10000)
+  });
+  assert.equal(outageAuthenticatedRequest.status, 401, "database connection failure during authentication must fail closed");
+  assert.deepEqual(await outageAuthenticatedRequest.json(), { error: "authentication_required" },
+    "authentication connection errors must return a sanitized response");
   outageServer.kill("SIGTERM");
   outageServer = null;
 
@@ -448,6 +455,19 @@ try {
 
 
 
+
+  const sequentialPoolRequests = [];
+  for (let i = 0; i < 30; i++) {
+    sequentialPoolRequests.push(await request("/api/case-documents", { token: tokenA, csrf: csrfA }));
+  }
+  assert.ok(sequentialPoolRequests.every(result => result.status === 200),
+    "30 sequential authenticated requests must continue succeeding without leaking checked-out clients");
+  const concurrentPoolRequests = await Promise.all(
+    Array.from({ length: 24 }, () => request("/api/case-documents", { token: tokenA, csrf: csrfA }))
+  );
+  assert.ok(concurrentPoolRequests.every(result => result.status === 200),
+    "concurrent authenticated requests above pool size must finish after clients are released");
+  console.log("PASS: repeated and concurrent requests do not exhaust the PostgreSQL connection pool");
 
   console.log("PASS: office A can read its own document");
   console.log("PASS: office B list does not disclose office A document");
