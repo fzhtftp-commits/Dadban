@@ -287,7 +287,7 @@ create table if not exists case_actions (
   constraint case_actions_case_same_office_fk
     foreign key (case_id, office_id) references cases(id, office_id) on delete restrict,
   constraint case_actions_assignee_same_office_fk
-    foreign key (assigned_to, office_id) references users(id, office_id) on delete set null
+    foreign key (assigned_to, office_id) references users(id, office_id) on delete restrict
 );
 
 create index if not exists case_actions_office_due_idx
