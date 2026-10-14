@@ -150,6 +150,29 @@ try {
     body: { case_id: ids.caseA, title: "Invalid date document", document_date: "2026-02-30" }
   });
   assert.equal(invalidDate.status, 400, "impossible calendar date must fail validation");
+  const invalidDateUpdate = await request("/api/case-documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa03", {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { document_date: "2026-02-30" }
+  });
+  assert.equal(invalidDateUpdate.status, 400, "impossible date must be rejected on update before document lookup");
+  const forgedOffice = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Forged office metadata", office_id: ids.officeB }
+  });
+  assert.equal(forgedOffice.status, 400, "clients must not supply or override office_id");
+  const forgedCaseUpdate = await request("/api/case-documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa03", {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: ids.caseB }
+  });
+  assert.equal(forgedCaseUpdate.status, 400, "patch must not permit changing the document's linked case");
+  const unknownMetadata = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Unknown metadata", storage_key: "private/path.pdf" }
+  });
+  assert.equal(unknownMetadata.status, 400, "storage metadata and unknown fields must be rejected in metadata-only phase");
+  const emptyPatch = await request("/api/case-documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa03", {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: {}
+  });
+  assert.equal(emptyPatch.status, 400, "empty patch must be rejected");
+
   const oversizedTitle = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST", body: { case_id: ids.caseA, title: "T".repeat(201) }
   });
@@ -215,7 +238,7 @@ try {
   await pool.query(`
     create or replace function reject_document_mutation_audit() returns trigger language plpgsql as $fn$
     begin
-      if new.entity_type = 'case_document' and new.action in ('update','delete') then
+      if new.entity_type = 'case_document' and new.action in ('create','update','delete') then
         raise exception 'forced audit failure for rollback test';
       end if;
       return new;
@@ -224,6 +247,17 @@ try {
     create trigger reject_document_mutation_audit_trigger
       before insert on audit_logs for each row execute function reject_document_mutation_audit();
   `);
+  const failedCreate = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Create must roll back with audit" }
+  });
+  assert.equal(failedCreate.status, 500, "audit failure must reject document creation");
+  assert.deepEqual(failedCreate.body, { error: "database_error" }, "create audit failure response must be sanitized");
+  const failedCreateRow = await pool.query("select count(*)::int as count from case_documents where title='Create must roll back with audit'");
+  assert.equal(failedCreateRow.rows[0].count, 0, "failed create must roll back the document row");
+  const failedCreateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
+  assert.equal(failedCreateAudit.rows[0].count, 0, "failed create must not leave an audit row");
+
   const failedUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Must Roll Back" }
   });
