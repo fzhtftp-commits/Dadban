@@ -50,13 +50,13 @@ test("case_id list filter uses a bound SQL parameter and dates reject impossible
 });
 
 test("document transactions guard rollback failures and always release acquired clients", () => {
- assert.match(server, /import \{ rollbackQuietly, releaseClient \} from "\.\/document-transaction\.js"/);
+ assert.match(server, /import \{ acquireClient, rollbackQuietly, releaseClient \} from "\.\/document-transaction\.js"/);
  assert.match(transactionHelper, /catch \(rollbackError\)[\s\S]*?Database rollback failed/);
  const routeStart = server.indexOf('app.post("/api/case-documents"');
  const routeEnd = server.indexOf('app.use\(\(_req, res\) =>', routeStart);
  const routes = server.slice(routeStart, routeEnd);
  assert.equal((routes.match(/finally\{releaseClient\(c\);\}/g) || []).length, 3);
- assert.equal((routes.match(/try\{c=await pool\.connect\(\)/g) || []).length, 3);
+ assert.equal((routes.match(/try\{c=await acquireClient\(pool\)/g) || []).length, 3);
  assert.doesNotMatch(routes, /catch\(error\)\{await c\.query\("rollback"\)/);
 });
 test("unhandled and oversized request errors return sanitized JSON", () => {
