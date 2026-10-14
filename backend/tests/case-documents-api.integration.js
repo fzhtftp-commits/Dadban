@@ -131,6 +131,18 @@ try {
     body: { case_id: ids.caseA, title: "Invalid date document", document_date: "2026-02-30" }
   });
   assert.equal(invalidDate.status, 400, "impossible calendar date must fail validation");
+  const oversizedTitle = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", body: { case_id: ids.caseA, title: "T".repeat(201) }
+  });
+  assert.equal(oversizedTitle.status, 400, "title above 200 characters must be rejected");
+  const negativeSize = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", body: { case_id: ids.caseA, title: "Negative size", size_bytes: -1 }
+  });
+  assert.equal(negativeSize.status, 400, "negative metadata size must be rejected");
+  const excessiveSize = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", body: { case_id: ids.caseA, title: "Excessive size", size_bytes: 26214401 }
+  });
+  assert.equal(excessiveSize.status, 400, "metadata size above 25 MiB must be rejected");
   const rejectedAudit = await pool.query("select count(*)::int as count from audit_logs where action='create' and entity_type='case_document'");
   assert.equal(rejectedAudit.rows[0].count, 0, "rejected writes must not create audit records");
 
@@ -175,18 +187,65 @@ try {
   const createAudit = await pool.query("select action, entity_id from audit_logs where entity_type='case_document' and entity_id=$1", [documentId]);
   assert.equal(createAudit.rows.filter(row => row.action === "create").length, 1, "successful create must be audited once");
 
+  await pool.query(`
+    create or replace function reject_document_mutation_audit() returns trigger language plpgsql as $
+    begin
+      if new.entity_type = 'case_document' and new.action in ('update','delete') then
+        raise exception 'forced audit failure for rollback test';
+      end if;
+      return new;
+    end;
+    $;
+    create trigger reject_document_mutation_audit_trigger
+      before insert on audit_logs for each row execute function reject_document_mutation_audit();
+  `);
+  const failedUpdate = await request(`/api/case-documents/${documentId}`, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Must Roll Back" }
+  });
+  assert.equal(failedUpdate.status, 500, "audit insert failure should return a generic server error");
+  const afterFailedUpdate = await pool.query("select title from case_documents where id=$1", [documentId]);
+  assert.equal(afterFailedUpdate.rows[0].title, "Confidential Office A document", "document update must roll back when audit insert fails");
+  const failedUpdateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
+  assert.equal(failedUpdateAudit.rows[0].count, 0, "failed update must not leave an audit row");
+  await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
   const ownUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Updated by Office A" }
   });
   assert.equal(ownUpdate.status, 200, "office A can update its own document");
   const updateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
   assert.equal(updateAudit.rows[0].count, 1, "successful update must be audited once");
+  await pool.query(`
+    create trigger reject_document_mutation_audit_trigger
+      before insert on audit_logs for each row execute function reject_document_mutation_audit();
+  `);
+  const failedDelete = await request(`/api/case-documents/${documentId}`, {
+    token: tokenA, csrf: csrfA, method: "DELETE"
+  });
+  assert.equal(failedDelete.status, 500, "audit insert failure should prevent delete");
+  const afterFailedDelete = await pool.query("select deleted_at from case_documents where id=$1", [documentId]);
+  assert.equal(afterFailedDelete.rows[0].deleted_at, null, "soft delete must roll back when audit insert fails");
+  const failedDeleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
+  assert.equal(failedDeleteAudit.rows[0].count, 0, "failed delete must not leave an audit row");
+  await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
+  await pool.query("drop function reject_document_mutation_audit()");
+
+  const softDelete = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "DELETE" });
+  assert.equal(softDelete.status, 204, "own document should soft-delete successfully");
+  const hiddenDetail = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA });
+  assert.equal(hiddenDetail.status, 404, "soft-deleted document must be hidden from detail API");
+  const hiddenList = await request("/api/case-documents", { token: tokenA, csrf: csrfA });
+  assert.equal(hiddenList.body.data.some(item => item.id === documentId), false, "soft-deleted document must be hidden from list API");
+  const deleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
+  assert.equal(deleteAudit.rows[0].count, 1, "successful soft delete must be audited once");
 
   console.log("PASS: office A can read its own document");
   console.log("PASS: office B list does not disclose office A document");
   console.log("PASS: case_id filters work without SQL errors");
   console.log("PASS: untrusted Origin, missing CSRF, and impossible date are rejected");
   console.log("PASS: successful create/update are audited once");
+  console.log("PASS: audit failures roll back update and soft delete");
+  console.log("PASS: soft-deleted document is hidden and audited once");
+  console.log("PASS: title and size boundary inputs are rejected");
   console.log("PASS: cross-office read rejected");
   console.log("PASS: cross-office update rejected without mutation");
   console.log("PASS: cross-office delete rejected without mutation");
