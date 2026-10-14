@@ -1237,7 +1237,7 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     sets.push("updated_at = now()");
     values.push(id.data, req.auth.officeId);
     const result = await client.query(
-      `update hearings set ${sets.join(", ")} where id = ${values.length - 1} and office_id = $${values.length} and deleted_at is null returning *`,
+      `update hearings set ${sets.join(", ")} where id = $${values.length - 1} and office_id = $${values.length} and deleted_at is null returning *`,
       values
     );
     await syncCaseNextHearing(client, req.auth.officeId, previousCaseId);
