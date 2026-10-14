@@ -446,7 +446,7 @@ try {
     const limited = await request("/api/case-documents", {
       token: tokenA, csrf: csrfA, method: "POST",
       idempotencyKey: `rate-limit-key-${String(i).padStart(2,"0")}`,
-      body: { case_id: ids.caseA, title: `Rate limit test ${i}` }
+      body: {}
     });
     if (limited.status === 429) {
       rateLimited = true;
