@@ -40,6 +40,7 @@ test("dashboard and primary management pages link to the calendar", () => {
     assert.match(html, /href="calendar\.html(?:\?[^"]*)?"/, name + " should have a working calendar link");
   }
   assert.match(dashboardHtml, /upcomingHearingsBody/);
+  assert.match(read("../../app.js"), /calendar\\.html\\?case_id=/);
   assert.match(dashboardHtml, /href="calendar\.html">تقویم/);
 });
 
