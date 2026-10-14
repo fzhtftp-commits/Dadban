@@ -28,6 +28,8 @@ async function load(){
   const c=d.data;
   $("caseTitle").textContent=c.title||"پرونده";
   editBtn.href=`case-form.html?id=${encodeURIComponent(c.id)}`;
+  const hearingsLink=$("caseHearingsLink");
+  if(hearingsLink) hearingsLink.href=`calendar.html?case_id=${encodeURIComponent(c.id)}`;
   deleteBtn.disabled=false;
   $("caseStatus").textContent=`● ${statusLabel[c.status]||"پرونده"}`;
   $("caseNumber").textContent=c.case_number||"—";
