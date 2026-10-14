@@ -146,7 +146,7 @@ BEGIN
   -- Check every CHECK expression (including the inline type and size checks).
   IF (SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='c') <> 4 THEN
-    RAISE EXCEPTION 'CHECK constraint count mismatch';
+    RAISE EXCEPTION 'CHECK constraint count mismatch: got %', (SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='c');
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_storage_metadata_consistency'
