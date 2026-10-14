@@ -1,9 +1,9 @@
 name: Dadban Feature Checks
 on:
   pull_request:
-    branches: [main, feature/hearings-calendar]
+    branches: [main, feature/hearings-calendar, feature/case-actions]
   push:
-    branches: [feature/hearings-calendar, feature/case-actions]
+    branches: [feature/hearings-calendar, feature/case-actions, feature/case-documents]
 permissions:
   contents: read
 jobs:
@@ -59,4 +59,4 @@ jobs:
       - name: Install backend dependencies
         run: npm install --prefix backend
       - name: Run hearing API integration tests against disposable PostgreSQL
-        run: node --test backend/test/hearings.integration.test.js backend/test/hearings-ui-contract.test.js backend/test/case-actions-ui-contract.test.js
+        run: node --test backend/test/hearings.integration.test.js backend/test/hearings-ui-contract.test.js backend/test/case-actions-ui-contract.test.js backend/test/documents-ui-contract.test.js
