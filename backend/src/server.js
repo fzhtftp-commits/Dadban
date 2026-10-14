@@ -1564,31 +1564,52 @@ app.get("/api/case-documents/:id", requireAuth, async (req,res) => {
     if(!q.rowCount)return res.status(404).json({error:"document_not_found"});return res.json({data:q.rows[0]});
   }catch(error){console.error("Get case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
+const rollbackQuietly = async (client, context) => {
+  if (!client) return false;
+  try {
+    await client.query("rollback");
+    return true;
+  } catch (rollbackError) {
+    // Keep rollback details in server logs only; never expose them to clients.
+    console.error(`Database rollback failed (${context}):`, rollbackError);
+    return false;
+  }
+};
+
 app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
-  const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;const c=await pool.connect();
-  try{
+  const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;let c;
+  try{c=await pool.connect();
     await c.query("begin");const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
-    if(!related.rowCount){await c.query("rollback");return res.status(400).json({error:"invalid_related_case"});}
+    if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
     const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11) returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,req.auth.userId]);
     const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{case_id:doc.case_id,storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
-  }catch(error){await c.query("rollback");console.error("Create case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{c.release();}
+  }catch(error){await rollbackQuietly(c,"create case document");console.error("Create case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{if(c)c.release();}
 });
 app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
   const fields=["title","document_type","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
   for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
-  v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);const c=await pool.connect();
-  try{await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);
-    if(!q.rowCount){await c.query("rollback");return res.status(404).json({error:"document_not_found"});}
+  v.push(req.auth.userId);sets.push(`updated_by=${v.length}`);v.push(id.data,req.auth.officeId);let c;
+  try{c=await pool.connect();await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);
+    if(!q.rowCount){await rollbackQuietly(c,"update missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"update","case_document",id.data,req,{fields:Object.keys(p.data)});await c.query("commit");return res.json({data:q.rows[0]});
-  }catch(error){await c.query("rollback");console.error("Update case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{c.release();}
+  }catch(error){await rollbackQuietly(c,"update case document");console.error("Update case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{if(c)c.release();}
 });
 app.delete("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
-  const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});const c=await pool.connect();
-  try{await c.query("begin");const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
-    if(!q.rowCount){await c.query("rollback");return res.status(404).json({error:"document_not_found"});}
+  const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});let c;
+  try{c=await pool.connect();await c.query("begin");const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
+    if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);await c.query("commit");return res.status(204).send();
-  }catch(error){await c.query("rollback");console.error("Delete case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{c.release();}
+  }catch(error){await rollbackQuietly(c,"delete case document");console.error("Delete case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{if(c)c.release();}
+});
+
+
+app.use((error, _req, res, next) => {
+  console.error("Unhandled request error:", error);
+  if (res.headersSent) return next(error);
+  if (error?.type === "entity.too.large") return res.status(413).json({ error: "request_too_large" });
+  if (error instanceof SyntaxError && Object.hasOwn(error, "body")) return res.status(400).json({ error: "invalid_json" });
+  return res.status(500).json({ error: "internal_server_error" });
 });
 
 app.use((_req, res) => {
