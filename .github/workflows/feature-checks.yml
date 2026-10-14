@@ -22,6 +22,7 @@ jobs:
           node --check app.js
           node --check cases.js
           node --check clients.js
+          node --check case-profile.js
       - name: Install backend dependencies
         run: npm install --prefix backend
       - name: Check integration test syntax
@@ -52,4 +53,4 @@ jobs:
       - name: Install backend dependencies
         run: npm install --prefix backend
       - name: Run hearing API integration tests against disposable PostgreSQL
-        run: node --test backend/test/hearings.integration.test.js
+        run: node --test backend/test/hearings.integration.test.js backend/test/hearings-ui-contract.test.js
