@@ -16,6 +16,8 @@ const origin = "http://localhost:5500";
 const pool = new Pool({ connectionString: databaseUrl, ssl: false, max: 3 });
 let server;
 let serverOutput = "";
+let outageServer;
+let outageServerOutput = "";
 
 const ids = {
   officeA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -31,10 +33,10 @@ const csrfA = "test-csrf-office-a-".padEnd(48, "c");
 const csrfB = "test-csrf-office-b-".padEnd(48, "d");
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 
-async function waitForServer() {
+async function waitForServer(portToCheck = port) {
   for (let attempt = 0; attempt < 50; attempt++) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      const response = await fetch(`http://127.0.0.1:${portToCheck}/health`);
       if (response.ok) return;
     } catch {}
     await delay(200);
@@ -113,6 +115,21 @@ try {
   server.stdout.on("data", chunk => { serverOutput += chunk.toString(); });
   server.stderr.on("data", chunk => { serverOutput += chunk.toString(); });
   await waitForServer();
+
+  const outagePort = port + 1;
+  outageServer = spawn(process.execPath, ["src/server.js"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, PORT: String(outagePort), NODE_ENV: "test", DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:1/dadban_test", CORS_ORIGIN: origin },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  outageServer.stdout.on("data", chunk => { outageServerOutput += chunk.toString(); });
+  outageServer.stderr.on("data", chunk => { outageServerOutput += chunk.toString(); });
+  await waitForServer(outagePort);
+  const outageResponse = await fetch(`http://127.0.0.1:${outagePort}/health/db`);
+  assert.equal(outageResponse.status, 503, "database disconnect must return service unavailable");
+  assert.deepEqual(await outageResponse.json(), { ok: false, database: "unavailable" }, "database outage response must not expose connection details");
+  outageServer.kill("SIGTERM");
+  outageServer = null;
 
   const wrongOrigin = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST", originHeader: "https://attacker.example",
@@ -257,6 +274,7 @@ try {
   console.log("PASS: audit failures roll back update and soft delete");
   console.log("PASS: soft-deleted document is hidden and audited once");
   console.log("PASS: title and size boundary inputs are rejected");
+  console.log("PASS: database connection outage returns sanitized 503");
   console.log("PASS: oversized JSON receives a sanitized 413 response");
   console.log("PASS: repeated soft delete does not duplicate audit events");
   console.log("PASS: cross-office read rejected");
@@ -265,8 +283,10 @@ try {
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
+  if (outageServer) console.error(outageServerOutput);
   process.exitCode = 1;
 } finally {
   if (server && server.exitCode === null) server.kill("SIGTERM");
+  if (outageServer && outageServer.exitCode === null) outageServer.kill("SIGTERM");
   await pool.end();
 }
