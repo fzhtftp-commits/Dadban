@@ -367,7 +367,7 @@ BEGIN
         FROM (VALUES (1,'office_id'),(2,'case_id'),(3,'created_at')) v(ord,attname)
         JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attname=v.attname
       )
-      AND i.indoption::text = '0 0 1'
+      AND i.indoption::text = '0 0 3'
       AND regexp_replace(regexp_replace(pg_get_expr(i.indpred,i.indrelid), '[[:space:]()]', '', 'g'), '::text', '', 'g')
         = 'deleted_atISNULL'
   ) THEN
@@ -386,7 +386,7 @@ BEGIN
         FROM (VALUES (1,'office_id'),(2,'created_at')) v(ord,attname)
         JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attname=v.attname
       )
-      AND i.indoption::text = '0 1'
+      AND i.indoption::text = '0 3'
       AND regexp_replace(regexp_replace(pg_get_expr(i.indpred,i.indrelid), '[[:space:]()]', '', 'g'), '::text', '', 'g')
         = 'deleted_atISNULL'
   ) THEN
