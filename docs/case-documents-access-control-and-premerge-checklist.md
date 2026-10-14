@@ -112,3 +112,14 @@ Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/t
 - [ ] Add a catalog assertion for every expected FK/check/index, including the exact indexed columns and partial predicates; verify pre-existing same-named objects rather than relying on `IF NOT EXISTS`.
 - [ ] Resolve the `stored`/null-`storage_key` invariant before any file-storage capability is introduced.
 - [ ] Complete a backup restore rehearsal and have a human reviewer approve the recovery procedure before any shared-environment migration.
+
+
+## Full-baseline migration upgrade and rollback rehearsal — 2026-10-14
+
+- The previously pending GitHub Actions run #106 completed successfully on the exact then-current head `cbd7e6a3d8e4e3d1d2715b4640b39229bfd5de5f`: [run #106](https://github.com/fzhtftp-commits/Dadban/actions/runs/38595208461).
+- Added `backend/tests/case-documents-migration-upgrade.sql` to exercise a fresh disposable PostgreSQL database using the repository's actual `database/schema.sql`, then `database/migrations/20261010_office_isolation_constraints.sql`, then `database/migrations/20261014_case_actions.sql`, followed by `backend/migrations/004_case_documents_metadata.sql`.
+- The new test checks exact two-column unique-index prerequisites for `cases(id, office_id)` and `users(id, office_id)`, asserts the expected metadata constraints and index definitions, and performs a separate-schema transaction rollback rehearsal after an intentional test failure. It verifies the probe table and its indexes are absent after rollback.
+- Workflow order was changed so this full-baseline rehearsal runs before the HTTP integration test, because that integration test deliberately resets the disposable database to simplified fixtures.
+- **Interpretation limit:** the intentional error is raised and caught inside the test transaction to allow deterministic rollback assertions. This verifies PostgreSQL transactional DDL rollback when statements are wrapped in a transaction; it does not prove that every production migration runner automatically wraps migrations or that an out-of-transaction partial failure is recoverable.
+- This rehearsal is restricted to the GitHub Actions disposable PostgreSQL service. It does not connect to, migrate, reset, or otherwise touch a production/shared database; it does not deploy to Render.
+- The workflow/test changes create a new commit, so the new Actions run must finish successfully on the exact latest PR head before these additions can be marked CI-verified.
