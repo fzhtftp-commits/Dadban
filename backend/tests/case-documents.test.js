@@ -92,6 +92,9 @@ test("document metadata rejects client-controlled office/case/storage fields and
  assert.match(server, /document_type: documentTypeSchema\.optional\(\)/);
  assert.match(server, /date\.toISOString\(\)\.slice\(0,10\) === value/);
  assert.match(server, /reference_number: z\.string\(\)\.trim\(\)\.max\(100\)/);
+ assert.match(server, /const originalFilenameSchema = z\.string\(\)\.trim\(\)\.min\(1\)\.max\(255\)/);
+ assert.match(server, /original_filename: originalFilenameSchema\.optional\(\)\.nullable\(\)/);
+ assert.match(server, /Filename must be a basename without path separators or control characters/);
  assert.match(migration, /storage_status = 'metadata_only' and storage_key is null/);
 });
 
