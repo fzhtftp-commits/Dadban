@@ -118,6 +118,29 @@ const caseCreateSchema = z.object({
 
 const casePatchSchema = caseCreateSchema.partial().strict();
 
+const hearingCreateSchema = z.object({
+  case_id: z.string().uuid(),
+  hearing_at: z.string().datetime({ offset: true }),
+  hearing_type: z.string().trim().min(2).max(60).optional().default("hearing"),
+  court_name: z.string().trim().max(200).optional().nullable(),
+  branch_name: z.string().trim().max(120).optional().nullable(),
+  status: z.enum(["scheduled", "completed", "cancelled", "postponed"]).optional().default("scheduled"),
+  reminder_minutes: z.number().int().min(0).max(43200).optional().default(1440),
+  notes: optionalText
+}).strict();
+
+const hearingPatchSchema = z.object({
+  case_id: z.string().uuid().optional(),
+  hearing_at: z.string().datetime({ offset: true }).optional(),
+  hearing_type: z.string().trim().min(2).max(60).optional(),
+  court_name: z.string().trim().max(200).optional().nullable(),
+  branch_name: z.string().trim().max(120).optional().nullable(),
+  status: z.enum(["scheduled", "completed", "cancelled", "postponed"]).optional(),
+  reminder_minutes: z.number().int().min(0).max(43200).optional(),
+  notes: optionalText
+}).strict().refine((value) => Object.keys(value).length > 0, { message: "At least one field is required" });
+
+
 const registerSchema = z.object({
   full_name: z.string().trim().min(2).max(160),
   email: emailSchema,
@@ -1039,6 +1062,194 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
   } catch (error) {
     await client.query("rollback");
     console.error("Delete case failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+
+app.get("/api/hearings", requireAuth, async (req, res) => {
+  const querySchema = z.object({
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
+    status: z.enum(["scheduled", "completed", "cancelled", "postponed"]).optional(),
+    case_id: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(100),
+    offset: z.coerce.number().int().min(0).max(100000).default(0)
+  });
+  const parsed = querySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_hearing_query" });
+  const { from, to, status, case_id, limit, offset } = parsed.data;
+  if (from && to && new Date(from) > new Date(to)) {
+    return res.status(400).json({ error: "invalid_date_range" });
+  }
+  const values = [req.auth.officeId];
+  const conditions = ["h.office_id = $1", "h.deleted_at is null", "c.office_id = h.office_id", "c.deleted_at is null"];
+  if (from) { values.push(from); conditions.push(`h.hearing_at >= ${values.length}`); }
+  if (to) { values.push(to); conditions.push(`h.hearing_at <= ${values.length}`); }
+  if (status) { values.push(status); conditions.push(`h.status = ${values.length}`); }
+  if (case_id) { values.push(case_id); conditions.push(`h.case_id = ${values.length}`); }
+  values.push(limit, offset);
+  try {
+    const result = await pool.query(`
+      select h.id, h.case_id, h.hearing_at, h.hearing_type, h.court_name, h.branch_name,
+             h.status, h.reminder_minutes, h.notes, h.created_at, h.updated_at,
+             c.case_number, c.title as case_title, cl.full_name as client_full_name,
+             cl.company_name as client_company_name
+      from hearings h
+      join cases c on c.id = h.case_id and c.office_id = h.office_id
+      left join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
+      where ${conditions.join(" and ")}
+      order by h.hearing_at asc
+      limit ${values.length - 1} offset ${values.length}
+    `, values);
+    return res.json({ data: result.rows, pagination: { limit, offset, returned: result.rows.length } });
+  } catch (error) {
+    console.error("List hearings failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
+app.get("/api/hearings/:id", requireAuth, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  if (!id.success) return res.status(400).json({ error: "invalid_hearing_id" });
+  try {
+    const result = await pool.query(`
+      select h.id, h.case_id, h.hearing_at, h.hearing_type, h.court_name, h.branch_name,
+             h.status, h.reminder_minutes, h.notes, h.created_at, h.updated_at,
+             c.case_number, c.title as case_title, cl.full_name as client_full_name,
+             cl.company_name as client_company_name
+      from hearings h
+      join cases c on c.id = h.case_id and c.office_id = h.office_id and c.deleted_at is null
+      left join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
+      where h.id = $1 and h.office_id = $2 and h.deleted_at is null
+    `, [id.data, req.auth.officeId]);
+    if (!result.rowCount) return res.status(404).json({ error: "hearing_not_found" });
+    return res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error("Get hearing failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
+app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const parsed = hearingCreateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_hearing" });
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const related = await client.query(
+      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      [data.case_id, req.auth.officeId]
+    );
+    if (!related.rowCount) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_related_case" });
+    }
+    const result = await client.query(`
+      insert into hearings
+        (office_id, case_id, hearing_at, hearing_type, court_name, branch_name, status,
+         reminder_minutes, notes, created_by, updated_by)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+      returning *
+    `, [req.auth.officeId, data.case_id, data.hearing_at, data.hearing_type,
+      data.court_name ?? null, data.branch_name ?? null, data.status,
+      data.reminder_minutes, data.notes ?? null, req.auth.userId]);
+    const hearing = result.rows[0];
+    await writeAuditLog(client, req.auth, "create", "hearing", hearing.id, req, { case_id: hearing.case_id });
+    await client.query("commit");
+    return res.status(201).json({ data: hearing });
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Create hearing failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  const parsed = hearingPatchSchema.safeParse(req.body);
+  if (!id.success) return res.status(400).json({ error: "invalid_hearing_id" });
+  if (!parsed.success) return res.status(400).json({ error: "invalid_hearing" });
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const current = await client.query(
+      "select id, case_id from hearings where id = $1 and office_id = $2 and deleted_at is null for update",
+      [id.data, req.auth.officeId]
+    );
+    if (!current.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "hearing_not_found" });
+    }
+    const nextCaseId = data.case_id ?? current.rows[0].case_id;
+    const related = await client.query(
+      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      [nextCaseId, req.auth.officeId]
+    );
+    if (!related.rowCount) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_related_case" });
+    }
+    const fields = ["case_id", "hearing_at", "hearing_type", "court_name", "branch_name", "status", "reminder_minutes", "notes"];
+    const values = [];
+    const sets = [];
+    for (const field of fields) {
+      if (Object.hasOwn(data, field)) {
+        values.push(data[field] ?? null);
+        sets.push(`${field} = ${values.length}`);
+      }
+    }
+    values.push(req.auth.userId);
+    sets.push(`updated_by = ${values.length}`);
+    sets.push("updated_at = now()");
+    values.push(id.data, req.auth.officeId);
+    const result = await client.query(
+      `update hearings set ${sets.join(", ")} where id = ${values.length - 1} and office_id = ${values.length} and deleted_at is null returning *`,
+      values
+    );
+    await writeAuditLog(client, req.auth, "update", "hearing", id.data, req, { fields: Object.keys(data) });
+    await client.query("commit");
+    return res.json({ data: result.rows[0] });
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Update hearing failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  if (!id.success) return res.status(400).json({ error: "invalid_hearing_id" });
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query(
+      "update hearings set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id, case_id",
+      [id.data, req.auth.officeId, req.auth.userId]
+    );
+    if (!result.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "hearing_not_found" });
+    }
+    await writeAuditLog(client, req.auth, "delete", "hearing", id.data, req, { case_id: result.rows[0].case_id });
+    await client.query("commit");
+    return res.status(204).send();
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Delete hearing failed:", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
