@@ -25,9 +25,9 @@ This report inventories the form-related UI and the open feature branches before
 | Case actions/follow-ups | Not present on `main`; added by Draft PR #3 | Feature branch only |
 | Case-document metadata | Not present on `main`; attempted in Draft PRs #4 and #5 | Feature branches only; architecture overlap must be resolved first |
 
-## Confirmed form-quality gaps to address
+## Form-quality gaps and work status
 
-1. `client-form.html` has a create-mode subtitle saying the form is currently only demonstrative and persistent saving will be enabled later. That copy is stale: `client-form.js` already sends create/edit requests to the backend and reports database success. Update the text so users are not misled.
+1. **Done on this audit branch:** `client-form.html` no longer claims the form is only demonstrative; the subtitle now accurately says client information is saved/updated through the server. This copy-only change has not yet received a passing CI result.
 2. Client and case lists request `limit=100`; no pagination/load-more flow was observed in these pages. Define the expected behavior before claiming support for larger offices.
 3. The client profile has placeholder counts for hearings, actions, and documents. Replace only when the corresponding data sources are integrated; until then label them as unavailable or omit them.
 4. The UI validates national-ID length, but a full Iranian national-code checksum validation was not observed in the inspected client form/server schemas. Decide whether to add checksum validation with shared front/back-end tests; do not rely on browser-only validation.
