@@ -184,3 +184,72 @@ Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/t
 - **Runner status remains unknown:** repository inspection found no general-purpose migration runner command/configuration in `backend/package.json` or the reviewed branch workflow. CI proves both (a) rollback with an explicit transaction and (b) partial objects without a transaction in the disposable service. It does not establish how an external deployment operator or Render process invokes SQL. That must be verified before any shared-environment migration.
 - CI verification for this new test is pending until the latest Actions run completes and its `head_sha` exactly matches the current PR head. PR #4 remains Draft/unmerged; no `main`, operational database, or Render changes are in scope.
 
+### Catalog inspection and go/no-go gates for recovery — 2026-10-14
+
+The following catalog checks are **read-only examples** for an operator to adapt only after explicitly identifying the intended database and schema. They are not an automated production action and must not be pasted into a session until `current_database()`, server/host, and schema ownership are confirmed.
+
+```sql
+-- Confirm the session target first; stop if any value is unexpected.
+SELECT current_database() AS database_name,
+       current_user AS database_role,
+       inet_server_addr() AS server_address,
+       inet_server_port() AS server_port,
+       current_schema() AS current_schema;
+
+-- Inventory the table and its columns, types, nullability, and defaults.
+SELECT n.nspname AS schema_name, c.relname AS object_name,
+       c.relkind, a.attnum, a.attname,
+       format_type(a.atttypid, a.atttypmod) AS data_type,
+       a.attnotnull, pg_get_expr(d.adbin, d.adrelid) AS column_default
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_attribute a ON a.attrelid = c.oid
+LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+WHERE n.nspname = '<confirmed_schema>'
+  AND c.relname = 'case_documents'
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum;
+
+-- List all constraints on the table with their full definitions and validation state.
+SELECT con.conname, con.contype, con.convalidated,
+       pg_get_constraintdef(con.oid, true) AS definition
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = '<confirmed_schema>'
+  AND c.relname = 'case_documents'
+ORDER BY con.conname;
+
+-- List all indexes on the table, including validity/readiness and full definitions.
+SELECT i.indexrelid::regclass AS index_name,
+       i.indisunique, i.indisvalid, i.indisready,
+       pg_get_indexdef(i.indexrelid) AS definition
+FROM pg_index i
+JOIN pg_class t ON t.oid = i.indrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname = '<confirmed_schema>'
+  AND t.relname = 'case_documents'
+ORDER BY i.indexrelid::regclass::text;
+
+-- Check the expected names throughout the confirmed schema, including indexes
+-- that might belong to a different table and therefore evade table-only checks.
+SELECT c.relname AS object_name, c.relkind,
+       pg_get_userbyid(c.relowner) AS owner_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = '<confirmed_schema>'
+  AND c.relname IN (
+    'case_documents',
+    'case_documents_idempotency_unique_idx',
+    'case_documents_office_case_created_idx',
+    'case_documents_office_created_idx'
+  )
+ORDER BY c.relname;
+```
+
+Replace `<confirmed_schema>` with a schema identifier only after confirming the target. Do not treat a name match as proof of compatibility: compare column order/types/defaults, primary key, each foreign-key target and column order, each CHECK expression, and each index's columns/order, uniqueness, predicate, validity, and owning table against migration 004 and the approved baseline.
+
+**GO only if all gates are satisfied:** exact target/environment confirmed; prerequisites and migration order verified; no unexpected same-named or partial objects; a backup has been restored successfully to a separate disposable database; a non-production rehearsal has passed; an explicit transaction strategy and the actual runner's behavior have been confirmed; and a human reviewer has approved the change window and recovery plan.
+
+**STOP / do not retry** if the target is ambiguous, any expected prerequisite is missing, an object name exists with a mismatched definition, the table/index inventory suggests partial application, constraints or indexes are invalid/not ready, the backup/restore drill is unverified, or runner transaction semantics remain unknown. Preserve logs and catalog output, disable the feature/rollout, and request a reviewed repair plan. Never automatically drop the table or indexes in a shared environment; an object may contain real metadata or be shared by another dependency.
+
