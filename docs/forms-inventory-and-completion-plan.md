@@ -40,8 +40,8 @@ This report inventories the form-related UI and the open feature branches before
 - Shared browser/Node helpers normalize Persian/Arabic-Indic digits, validate Iranian national-code check digits, validate Jalali dates by round-trip conversion, and convert local `datetime-local` values to/from UTC ISO timestamps without silently accepting invalid calendar dates.
 - Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and isolated form-controller scenarios using a lightweight fake DOM and queued API responses. It also imports the actual Zod client create/patch schemas to test valid Persian-digit normalization, invalid/repeated check digits, optional patch updates, CSRF middleware placement, and HTTP 400 validation responses. No live backend/database is contacted.
 - GitHub Actions workflow `.github/workflows/forms-validation.yml` installs backend dependencies in the runner and executes `node --test backend/tests/forms-validation.test.cjs`.
-- A first schema-test run failed because the isolated workflow had not installed backend dependency `zod`; the workflow was corrected to install backend dependencies before tests. Verify the latest run against the current PR head SHA before treating the expanded suite as green.
-- The fake-DOM scenario tests exercise the real form controllers and the actual Zod schemas, but do not replace full browser automation or live API/database end-to-end testing.
+- The first expanded run exposed a missing dependency-install step and failed (17 passed, 3 failed); the workflow was corrected to install backend dependencies before tests. The corrected [Run #50](https://github.com/fzhtftp-commits/Dadban/actions/runs/38636821320) then passed all 20 tests on SHA `4861390557e2497e41fd3d8e83eb24e5be74da3f`.
+- The fake-DOM scenario tests exercise the real form controllers and the actual Zod schemas, but do not replace full browser automation or live API/database end-to-end testing. Recheck CI against the latest PR head before merge.
 
 ## Open PR overlap that must be reconciled
 
