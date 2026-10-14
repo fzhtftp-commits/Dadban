@@ -316,63 +316,6 @@ try {
   const createAudit = await pool.query("select action, entity_id from audit_logs where entity_type='case_document' and entity_id=$1", [documentId]);
   assert.equal(createAudit.rows.filter(row => row.action === "create").length, 1, "successful create must be audited once");
 
-  // Role authorization matrix: every role can list/read within its office.
-  for (const account of roleAccounts) {
-    const roleList = await request("/api/case-documents", { token: account.token, csrf: account.csrf });
-    assert.equal(roleList.status, 200, `${account.role} should be allowed to list document metadata`);
-    assert.ok(roleList.body.data.some(item => item.id === documentId), `${account.role} list should include the in-office document`);
-    const roleRead = await request(`/api/case-documents/${documentId}`, { token: account.token, csrf: account.csrf });
-    assert.equal(roleRead.status, 200, `${account.role} should be allowed to read document metadata`);
-  }
-
-  // Owner/admin/lawyer/assistant may create; viewer may not.
-  const roleCreatedDocuments = new Map();
-  for (const account of roleAccounts) {
-    const result = await request("/api/case-documents", {
-      token: account.token, csrf: account.csrf, method: "POST",
-      body: { case_id: ids.caseA, title: `Role policy create ${account.role}`, document_type: "other" }
-    });
-    if (["owner", "admin", "lawyer", "assistant"].includes(account.role)) {
-      assert.equal(result.status, 201, `${account.role} should be allowed to create metadata`);
-      roleCreatedDocuments.set(account.role, result.body.data.id);
-    } else {
-      assert.equal(result.status, 403, "viewer must be denied document creation");
-      assert.deepEqual(result.body, { error: "document_role_forbidden" });
-    }
-  }
-
-  // Owner/admin/lawyer may update; assistant/viewer must be denied.
-  for (const account of roleAccounts) {
-    const result = await request(`/api/case-documents/${documentId}`, {
-      token: account.token, csrf: account.csrf, method: "PATCH",
-      body: { description: `updated by ${account.role}` }
-    });
-    if (["owner", "admin", "lawyer"].includes(account.role)) {
-      assert.equal(result.status, 200, `${account.role} should be allowed to update metadata`);
-    } else {
-      assert.equal(result.status, 403, `${account.role} must be denied metadata updates`);
-      assert.deepEqual(result.body, { error: "document_role_forbidden" });
-    }
-  }
-
-  // Only owner/admin may soft-delete; denied roles must not mutate the record.
-  for (const role of ["lawyer", "assistant", "viewer"]) {
-    const account = roleAccounts.find(item => item.role === role);
-    const result = await request(`/api/case-documents/${documentId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE"
-    });
-    assert.equal(result.status, 403, `${role} must be denied document deletion`);
-    assert.deepEqual(result.body, { error: "document_role_forbidden" });
-  }
-  for (const role of ["owner", "admin"]) {
-    const account = roleAccounts.find(item => item.role === role);
-    const targetId = roleCreatedDocuments.get(role);
-    const result = await request(`/api/case-documents/${targetId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE"
-    });
-    assert.equal(result.status, 204, `${role} should be allowed to soft-delete metadata`);
-  }
-  console.log("PASS: role matrix verified for list/read/create/update/delete across owner/admin/lawyer/assistant/viewer");
 
 
   const idempotentPayload = { case_id: ids.caseA, title: "Idempotent retry regression", document_type: "evidence" };
@@ -578,6 +521,64 @@ try {
   assert.ok(concurrentPoolRequests.every(result => result.status === 200),
     "concurrent authenticated requests above pool size must finish after clients are released");
   console.log("PASS: repeated and concurrent requests do not exhaust the PostgreSQL connection pool");
+
+  // Role authorization matrix: every role can list/read within its office.
+  for (const account of roleAccounts) {
+    const roleList = await request("/api/case-documents", { token: account.token, csrf: account.csrf });
+    assert.equal(roleList.status, 200, `${account.role} should be allowed to list document metadata`);
+    assert.ok(roleList.body.data.some(item => item.id === documentId), `${account.role} list should include the in-office document`);
+    const roleRead = await request(`/api/case-documents/${documentId}`, { token: account.token, csrf: account.csrf });
+    assert.equal(roleRead.status, 200, `${account.role} should be allowed to read document metadata`);
+  }
+
+  // Owner/admin/lawyer/assistant may create; viewer may not.
+  const roleCreatedDocuments = new Map();
+  for (const account of roleAccounts) {
+    const result = await request("/api/case-documents", {
+      token: account.token, csrf: account.csrf, method: "POST",
+      body: { case_id: ids.caseA, title: `Role policy create ${account.role}`, document_type: "other" }
+    });
+    if (["owner", "admin", "lawyer", "assistant"].includes(account.role)) {
+      assert.equal(result.status, 201, `${account.role} should be allowed to create metadata`);
+      roleCreatedDocuments.set(account.role, result.body.data.id);
+    } else {
+      assert.equal(result.status, 403, "viewer must be denied document creation");
+      assert.deepEqual(result.body, { error: "document_role_forbidden" });
+    }
+  }
+
+  // Owner/admin/lawyer may update; assistant/viewer must be denied.
+  for (const account of roleAccounts) {
+    const result = await request(`/api/case-documents/${documentId}`, {
+      token: account.token, csrf: account.csrf, method: "PATCH",
+      body: { description: `updated by ${account.role}` }
+    });
+    if (["owner", "admin", "lawyer"].includes(account.role)) {
+      assert.equal(result.status, 200, `${account.role} should be allowed to update metadata`);
+    } else {
+      assert.equal(result.status, 403, `${account.role} must be denied metadata updates`);
+      assert.deepEqual(result.body, { error: "document_role_forbidden" });
+    }
+  }
+
+  // Only owner/admin may soft-delete; denied roles must not mutate the record.
+  for (const role of ["lawyer", "assistant", "viewer"]) {
+    const account = roleAccounts.find(item => item.role === role);
+    const result = await request(`/api/case-documents/${documentId}`, {
+      token: account.token, csrf: account.csrf, method: "DELETE"
+    });
+    assert.equal(result.status, 403, `${role} must be denied document deletion`);
+    assert.deepEqual(result.body, { error: "document_role_forbidden" });
+  }
+  for (const role of ["owner", "admin"]) {
+    const account = roleAccounts.find(item => item.role === role);
+    const targetId = roleCreatedDocuments.get(role);
+    const result = await request(`/api/case-documents/${targetId}`, {
+      token: account.token, csrf: account.csrf, method: "DELETE"
+    });
+    assert.equal(result.status, 204, `${role} should be allowed to soft-delete metadata`);
+  }
+  console.log("PASS: role matrix verified for list/read/create/update/delete across owner/admin/lawyer/assistant/viewer");
 
   console.log("PASS: office A can read its own document");
   console.log("PASS: office B list does not disclose office A document");
