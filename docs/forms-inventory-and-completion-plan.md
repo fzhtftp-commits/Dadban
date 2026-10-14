@@ -30,7 +30,7 @@ This report inventories the form-related UI and the open feature branches before
 1. **Done on this audit branch:** `client-form.html` no longer claims the form is only demonstrative; the subtitle now accurately says client information is saved/updated through the server. The shared validation helpers and isolated form-scenario tests now pass on the latest tested head; see the current PR verification section for exact SHA/run.
 2. Client and case lists request `limit=100`; no pagination/load-more flow was observed in these pages. Define the expected behavior before claiming support for larger offices.
 3. The client profile has placeholder counts for hearings, actions, and documents. Replace only when the corresponding data sources are integrated; until then label them as unavailable or omit them.
-4. Client and case forms now check Iranian national-code checksum in the browser before sending/lookups. The backend schema still enforces normalized 10-digit format rather than the checksum, so server-side checksum parity remains a follow-up security/consistency task.
+4. Client create and patch schemas now validate the Iranian national-code checksum server-side as well as requiring normalized 10-digit format. Corporate national/company identifiers remain governed by their separate format rules.
 5. Navigation entries for calendar, actions, and documents are `#` placeholders on `main`; they should be linked only when their feature has been reviewed and safely integrated.
 6. Case create/edit now uses tested local `datetime-local` to UTC ISO and back conversions. The conversion follows the browser's local timezone; deployment/user timezone policy should still be confirmed.
 7. Remaining acceptance work includes browser-driven keyboard/RTL usability and real staging/API/database checks for duplicate identifiers/case numbers, stale sessions, and office-boundary denials.
@@ -38,9 +38,10 @@ This report inventories the form-related UI and the open feature branches before
 ## Automated tests added on this branch
 
 - Shared browser/Node helpers normalize Persian/Arabic-Indic digits, validate Iranian national-code check digits, validate Jalali dates by round-trip conversion, and convert local `datetime-local` values to/from UTC ISO timestamps without silently accepting invalid calendar dates.
-- Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and isolated form-controller scenarios using a lightweight fake DOM and queued API responses. It exercises client create (POST), edit (load + PATCH), invalid checksum, missing CSRF, and server validation errors; case create (client lookup + POST), edit (load + PATCH), invalid checksum, server CSRF rejection, and hearing-time serialization. No live backend/database is contacted.
-- GitHub Actions workflow `.github/workflows/forms-validation.yml` executes `node --test backend/tests/forms-validation.test.cjs` on matching PR changes.
-- Latest verified run before this report update: [Run #38](https://github.com/fzhtftp-commits/Dadban/actions/runs/38636265816) passed all 16 tests on SHA `0edc1fbb745c444a8ea5e39bc589e79422deb9d6`. The fake-DOM scenario tests exercise the real form controllers but do not replace full browser automation or live API/database end-to-end testing.
+- Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and isolated form-controller scenarios using a lightweight fake DOM and queued API responses. It also imports the actual Zod client create/patch schemas to test valid Persian-digit normalization, invalid/repeated check digits, optional patch updates, CSRF middleware placement, and HTTP 400 validation responses. No live backend/database is contacted.
+- GitHub Actions workflow `.github/workflows/forms-validation.yml` installs backend dependencies in the runner and executes `node --test backend/tests/forms-validation.test.cjs`.
+- A first schema-test run failed because the isolated workflow had not installed backend dependency `zod`; the workflow was corrected to install backend dependencies before tests. Verify the latest run against the current PR head SHA before treating the expanded suite as green.
+- The fake-DOM scenario tests exercise the real form controllers and the actual Zod schemas, but do not replace full browser automation or live API/database end-to-end testing.
 
 ## Open PR overlap that must be reconciled
 
@@ -51,7 +52,7 @@ This report inventories the form-related UI and the open feature branches before
 ## Recommended implementation sequence
 
 1. Keep this audit branch isolated; do not merge it into `main` as part of this snapshot.
-2. Correct stale client-form copy and run the isolated form-controller tests; next add browser-driven acceptance tests and confirm backend checksum validation parity.
+2. Keep server-side national-code checksum validation covered by schema tests; next add browser-driven acceptance tests and run staging-only API checks.
 3. Improve list scalability (pagination or explicit capped-result messaging) and remove/label placeholder profile metrics.
 4. Review PR #2 and PR #3 for integration order and verify current-head CI and office-isolation tests.
 5. Reconcile PR #4/#5 into one canonical document-metadata implementation before any merge.
