@@ -7,12 +7,12 @@ export async function rollbackQuietly(client, context) {
     return true;
   } catch (rollbackError) {
     // A client whose rollback failed must be discarded rather than returned to the pool.
-    console.error(`Database rollback failed (${context}):`, rollbackError);
+    console.error(`Database rollback failed (${context})`, { name: typeof rollbackError?.name === "string" ? rollbackError.name.slice(0, 80) : "Error", code: typeof rollbackError?.code === "string" ? rollbackError.code.slice(0, 40) : undefined });
     releasedClients.add(client);
     try {
       client.release(rollbackError);
     } catch (releaseError) {
-      console.error(`Database client discard failed (${context}):`, releaseError);
+      console.error(`Database client discard failed (${context})`, { name: typeof releaseError?.name === "string" ? releaseError.name.slice(0, 80) : "Error", code: typeof releaseError?.code === "string" ? releaseError.code.slice(0, 40) : undefined });
     }
     return false;
   }
