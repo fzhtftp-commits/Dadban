@@ -27,20 +27,20 @@ This report inventories the form-related UI and the open feature branches before
 
 ## Form-quality gaps and work status
 
-1. **Done on this audit branch:** `client-form.html` no longer claims the form is only demonstrative; the subtitle now accurately says client information is saved/updated through the server. The shared form-validation and form-contract test workflow now passes on the current PR head (run 38635356372, SHA `33c99f8f1c8bff32a25e9274ed032359138c4917`).
+1. **Done on this audit branch:** `client-form.html` no longer claims the form is only demonstrative; the subtitle now accurately says client information is saved/updated through the server. The shared validation helpers and isolated form-scenario tests now pass on the latest tested head; see the current PR verification section for exact SHA/run.
 2. Client and case lists request `limit=100`; no pagination/load-more flow was observed in these pages. Define the expected behavior before claiming support for larger offices.
 3. The client profile has placeholder counts for hearings, actions, and documents. Replace only when the corresponding data sources are integrated; until then label them as unavailable or omit them.
-4. The UI validates national-ID length, but a full Iranian national-code checksum validation was not observed in the inspected client form/server schemas. Decide whether to add checksum validation with shared front/back-end tests; do not rely on browser-only validation.
+4. Client and case forms now check Iranian national-code checksum in the browser before sending/lookups. The backend schema still enforces normalized 10-digit format rather than the checksum, so server-side checksum parity remains a follow-up security/consistency task.
 5. Navigation entries for calendar, actions, and documents are `#` placeholders on `main`; they should be linked only when their feature has been reviewed and safely integrated.
-6. Case create/edit uses a browser `datetime-local` value and converts it to ISO before submission. Add tests that document the intended timezone behavior so hearings are not shifted unexpectedly.
-7. Acceptance tests should cover invalid/missing fields, duplicate identifiers/case numbers, stale session/CSRF, server failures, keyboard/RTL usability, and office-boundary denials.
+6. Case create/edit now uses tested local `datetime-local` to UTC ISO and back conversions. The conversion follows the browser's local timezone; deployment/user timezone policy should still be confirmed.
+7. Remaining acceptance work includes browser-driven keyboard/RTL usability and real staging/API/database checks for duplicate identifiers/case numbers, stale sessions, and office-boundary denials.
 
 ## Automated tests added on this branch
 
 - Shared browser/Node helpers normalize Persian/Arabic-Indic digits, validate Iranian national-code check digits, validate Jalali dates by round-trip conversion, and convert local `datetime-local` values to/from UTC ISO timestamps without silently accepting invalid calendar dates.
-- Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and static contracts for client/case create-edit routes, CSRF headers, client lookup, and script loading order.
+- Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and isolated form-controller scenarios using a lightweight fake DOM and queued API responses. It exercises client create (POST), edit (load + PATCH), invalid checksum, missing CSRF, and server validation errors; case create (client lookup + POST), edit (load + PATCH), invalid checksum, server CSRF rejection, and hearing-time serialization. No live backend/database is contacted.
 - GitHub Actions workflow `.github/workflows/forms-validation.yml` executes `node --test backend/tests/forms-validation.test.cjs` on matching PR changes.
-- Recorded validation checkpoint (historical): [Run #19](https://github.com/fzhtftp-commits/Dadban/actions/runs/38635505281) succeeded for SHA `5ac10975c1c26df66137f90915fbf129040b520c`. For the current PR head and latest matching CI run, see the verification section in [PR #6](https://github.com/fzhtftp-commits/Dadban/pull/6). The tests are unit and source-contract tests; they are not browser automation or a live API/database end-to-end test.
+- Latest verified run before this report update: [Run #38](https://github.com/fzhtftp-commits/Dadban/actions/runs/38636265816) passed all 16 tests on SHA `0edc1fbb745c444a8ea5e39bc589e79422deb9d6`. The fake-DOM scenario tests exercise the real form controllers but do not replace full browser automation or live API/database end-to-end testing.
 
 ## Open PR overlap that must be reconciled
 
@@ -51,7 +51,7 @@ This report inventories the form-related UI and the open feature branches before
 ## Recommended implementation sequence
 
 1. Keep this audit branch isolated; do not merge it into `main` as part of this snapshot.
-2. Correct stale client-form copy and add/confirm focused tests for client create/edit and case create/edit, including national-code lookup and date handling.
+2. Correct stale client-form copy and run the isolated form-controller tests; next add browser-driven acceptance tests and confirm backend checksum validation parity.
 3. Improve list scalability (pagination or explicit capped-result messaging) and remove/label placeholder profile metrics.
 4. Review PR #2 and PR #3 for integration order and verify current-head CI and office-isolation tests.
 5. Reconcile PR #4/#5 into one canonical document-metadata implementation before any merge.
@@ -60,4 +60,4 @@ This report inventories the form-related UI and the open feature branches before
 
 ## Verification note
 
-This remains a repository-source audit, not a browser-run acceptance test. The dedicated form-validation workflow passed on the recorded head SHA above; a successful unit/contract-test run does not establish that live API/database integration or browser behavior is fully accepted. Recheck the current head and Actions run before merge.
+This remains a repository audit with isolated controller tests, not a full browser-run acceptance test. The test harness uses fake DOM elements and mocked API responses and does not connect to production or any database. Recheck the current head and Actions run before merge.
