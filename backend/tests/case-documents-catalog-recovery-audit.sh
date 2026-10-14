@@ -548,6 +548,24 @@ BEGIN
     RAISE EXCEPTION 'unexpected identity/generated/inherited column attributes';
   END IF;
 
+  -- Migration 004 does not tune per-column TOAST/storage behavior or statistics.
+  -- Compare attstorage with the type's own default (rather than hard-coding
+  -- type-specific values), and reject explicit statistics targets/options.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_attribute a
+    JOIN pg_type ty ON ty.oid=a.atttypid
+    WHERE a.attrelid='${expected_schema}.case_documents'::regclass
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND (
+        a.attstorage <> ty.typstorage
+        OR a.attstattarget <> -1
+        OR a.attoptions IS NOT NULL
+      )
+  ) THEN
+    RAISE EXCEPTION 'unexpected per-column storage/statistics tuning';
+  END IF;
+
   IF EXISTS (
     SELECT 1 FROM pg_constraint c
     WHERE c.conrelid='${expected_schema}.case_documents'::regclass
