@@ -144,3 +144,13 @@ test("document creation is idempotent and sensitive endpoints are rate limited",
  assert.match(migration, /case_documents_idempotency_unique_idx/);
  assert.match(migration, /request_fingerprint char\(64\)/);
 });
+
+
+test("migration fails closed instead of silently accepting same-named pre-existing schema objects", () => {
+ assert.match(migration, /create table case_documents\s*\(/i);
+ assert.doesNotMatch(migration, /create table if not exists case_documents/i);
+ assert.match(migration, /create unique index case_documents_idempotency_unique_idx/i);
+ assert.match(migration, /create index case_documents_office_case_created_idx/i);
+ assert.match(migration, /create index case_documents_office_created_idx/i);
+ assert.doesNotMatch(migration, /create (?:unique )?index if not exists case_documents_/i);
+});
