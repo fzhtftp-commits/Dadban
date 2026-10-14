@@ -41,7 +41,7 @@ function createBrowser({ script, search = "", responses = [], initial = {}, csrf
   const context = {
     document, window, location: window.location, URLSearchParams, console,
     sessionStorage: { getItem: key => key === "dadban_csrf" ? csrf : null },
-    setTimeout: fn => { if (typeof fn === "function") fn(); return 1; },
+    setTimeout: fn => { if (typeof fn === "function") return fn(); return 1; },
     clearTimeout(){},
     fetch: async (url, options = {}) => {
       calls.push({ url: String(url), options });
