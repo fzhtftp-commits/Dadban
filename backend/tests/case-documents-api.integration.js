@@ -100,6 +100,15 @@ try {
 
   const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
   await pool.query(migration);
+  const indexCheck = await pool.query(`
+    select indexname, indexdef from pg_indexes
+    where schemaname = 'public' and tablename = 'case_documents'
+  `);
+  const indexDefinitions = new Map(indexCheck.rows.map(row => [row.indexname, row.indexdef]));
+  assert.ok(indexDefinitions.has("case_documents_office_case_created_idx"), "migration must create office/case/created partial index");
+  assert.ok(indexDefinitions.get("case_documents_office_case_created_idx").includes("WHERE (deleted_at IS NULL)"), "active-document index should exclude soft-deleted rows");
+  assert.ok(indexDefinitions.has("case_documents_office_created_idx"), "migration must create office/created listing index");
+  assert.ok(indexDefinitions.get("case_documents_office_created_idx").includes("WHERE (deleted_at IS NULL)"), "office listing index should exclude soft-deleted rows");
   await pool.query("insert into offices(id,name) values ($1,'Office A'),($2,'Office B')", [ids.officeA, ids.officeB]);
   await pool.query("insert into users(id,office_id,full_name,email) values ($1,$2,'Test User A','a@example.test'),($3,$4,'Test User B','b@example.test')", [ids.userA,ids.officeA,ids.userB,ids.officeB]);
   await pool.query("insert into cases(id,office_id,case_number,title) values ($1,$2,'A-001','Case A'),($3,$4,'B-001','Case B')", [ids.caseA,ids.officeA,ids.caseB,ids.officeB]);
