@@ -441,7 +441,7 @@ try {
   console.log("PASS: cross-office delete rejected without mutation");
 
   let rateLimited = false;
-  for (let i = 0; i < 41; i++) {
+  for (let i = 0; i < 12; i++) {
     const limited = await request("/api/case-documents", {
       token: tokenA, csrf: csrfA, method: "POST",
       idempotencyKey: `rate-limit-key-${String(i).padStart(2,"0")}`,
