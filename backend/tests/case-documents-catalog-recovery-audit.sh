@@ -261,11 +261,11 @@ BEGIN
       AND c.contype='c'
       AND (
         (c.conname='case_documents_storage_metadata_consistency'
-          AND regexp_replace(regexp_replace(lower(pg_get_constraintdef(c.oid,true)), '::character varying', '', 'g'), '[[:space:]()]', '', 'g')
+          AND regexp_replace(regexp_replace(lower(pg_get_constraintdef(c.oid,true)), '::(character varying|text)', '', 'g'), '[[:space:]()]', '', 'g')
             <> regexp_replace(lower('CHECK ((storage_status = ''metadata_only'' AND storage_key IS NULL) OR storage_status <> ''metadata_only'')'), '[[:space:]()]', '', 'g'))
         OR
         (c.conname='case_documents_idempotency_pair'
-          AND regexp_replace(regexp_replace(lower(pg_get_constraintdef(c.oid,true)), '::character varying', '', 'g'), '[[:space:]()]', '', 'g')
+          AND regexp_replace(regexp_replace(lower(pg_get_constraintdef(c.oid,true)), '::(character varying|text)', '', 'g'), '[[:space:]()]', '', 'g')
             <> regexp_replace(lower('CHECK ((idempotency_key IS NULL AND request_fingerprint IS NULL) OR (idempotency_key IS NOT NULL AND request_fingerprint IS NOT NULL))'), '[[:space:]()]', '', 'g'))
       )
   ) THEN
