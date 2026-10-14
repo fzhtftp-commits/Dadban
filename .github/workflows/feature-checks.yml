@@ -22,3 +22,34 @@ jobs:
           node --check app.js
           node --check cases.js
           node --check clients.js
+      - name: Install backend dependencies
+        run: npm install --prefix backend
+      - name: Check integration test syntax
+        run: node --check backend/test/hearings.integration.test.js
+  hearings-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dadban_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dadban_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DADBAN_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install backend dependencies
+        run: npm install --prefix backend
+      - name: Run hearing API integration tests against disposable PostgreSQL
+        run: node --test backend/test/hearings.integration.test.js
