@@ -424,6 +424,17 @@ BEGIN
     RAISE EXCEPTION 'index lifecycle state mismatch: expected all indexes live, valid, and ready';
   END IF;
 
+  -- Migration 004 neither clusters the table through an index nor designates a
+  -- replica-identity index. These per-index flags are distinct from relreplident
+  -- and from validity/readiness, so audit them explicitly on every index.
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND (i.indisclustered OR i.indisreplident)
+  ) THEN
+    RAISE EXCEPTION 'index clustering or replica-identity flags differ from migration contract';
+  END IF;
+
   -- Verify index access method, primary-index identity, and unique NULL semantics.
   IF EXISTS (
     SELECT 1
