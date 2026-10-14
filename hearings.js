@@ -36,6 +36,10 @@ async function loadHearings(){
  const params=new URLSearchParams();
  if($("filterStatus").value)params.set("status",$("filterStatus").value);
  const from=$("filterFrom").value, to=$("filterTo").value;
+ if(from && to && from > to) {
+  message("تاریخ شروع نباید بعد از تاریخ پایان باشد.","error");
+  return;
+ }
  if(from)params.set("from",new Date(from+"T00:00:00").toISOString());
  if(to)params.set("to",new Date(to+"T23:59:59").toISOString());
  try{const d=await request(API+"/api/hearings?"+params.toString());hearings=Array.isArray(d?.data)?d.data:[];render();message("");}
