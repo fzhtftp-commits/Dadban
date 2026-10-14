@@ -14,7 +14,7 @@ Backend foundation for the Dadban legal-office management system.
 - Business endpoints require a valid server-side session; derive `office_id` and `user_id` from authenticated context, never from client input.
 - Keep database credentials in environment variables. Never commit `DATABASE_URL`, tokens, passwords, or private keys.
 - JSON request bodies are limited to 100 KiB. This module stores document metadata only; it does not upload file bytes.
-- Login is limited to 10 requests per IP per 15 minutes and document creation to 40 requests per IP per 15 minutes. The current limiter is in-memory and per process; for multi-instance production deployment, use a shared rate-limit store at the trusted edge or a shared backend.
+- Login is limited to 10 requests per IP per 15 minutes and document creation to 30 requests per IP per 15 minutes. The current limiter is in-memory and per process; for multi-instance production deployment, use a shared rate-limit store at the trusted edge or a shared backend.
 - Document create requests may send an `Idempotency-Key` header (8–128 characters from letters, digits, dot, underscore, colon, or hyphen). A retry with the same key and same normalized payload returns the existing record without a second audit event; reuse with a different payload returns HTTP 409. Clients should generate a new key for each intended new document.
 
 ## Local setup
