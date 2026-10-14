@@ -42,9 +42,9 @@ async function waitForServer() {
   throw new Error("Dadban API did not become healthy in time");
 }
 
-async function request(path, { token, csrf, method = "GET", body } = {}) {
-  const headers = { origin, cookie: `dadban_session=${token}; dadban_csrf=${csrf}` };
-  if (["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
+async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true } = {}) {
+  const headers = { origin: originHeader, cookie: `dadban_session=${token}; dadban_csrf=${csrf}` };
+  if (csrfHeader && ["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
     headers["x-csrf-token"] = csrf;
   }
   if (body !== undefined) {
@@ -114,12 +114,39 @@ try {
   server.stderr.on("data", chunk => { serverOutput += chunk.toString(); });
   await waitForServer();
 
+  const wrongOrigin = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", originHeader: "https://attacker.example",
+    body: { case_id: ids.caseA, title: "Rejected origin document" }
+  });
+  assert.equal(wrongOrigin.status, 403, "write with untrusted Origin must be rejected");
+
+  const missingCsrf = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", csrfHeader: false,
+    body: { case_id: ids.caseA, title: "Rejected CSRF document" }
+  });
+  assert.equal(missingCsrf.status, 403, "write without CSRF header must be rejected");
+
+  const invalidDate = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Invalid date document", document_date: "2026-02-30" }
+  });
+  assert.equal(invalidDate.status, 400, "impossible calendar date must fail validation");
+  const rejectedAudit = await pool.query("select count(*)::int as count from audit_logs where action='create' and entity_type='case_document'");
+  assert.equal(rejectedAudit.rows[0].count, 0, "rejected writes must not create audit records");
+
   const created = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST",
     body: { case_id: ids.caseA, title: "Confidential Office A document", document_type: "other" }
   });
   assert.equal(created.status, 201, `office A create failed: ${JSON.stringify(created.body)}`);
   const documentId = created.body.data.id;
+
+  const filteredOwn = await request("/api/case-documents?case_id=" + ids.caseA, { token: tokenA, csrf: csrfA });
+  assert.equal(filteredOwn.status, 200, "valid case_id filter must work");
+  assert.equal(filteredOwn.body.data.length, 1, "case_id filter must return only matching case documents");
+  const filteredOther = await request("/api/case-documents?case_id=" + ids.caseB, { token: tokenA, csrf: csrfA });
+  assert.equal(filteredOther.status, 200);
+  assert.equal(filteredOther.body.data.length, 0, "case_id filter must not return documents from another case");
 
   const ownDetail = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA });
   assert.equal(ownDetail.status, 200, "office A must be able to view its own document");
@@ -145,8 +172,21 @@ try {
   assert.equal(persisted.rows[0].title, "Confidential Office A document", "cross-office update must not mutate the document");
   assert.equal(persisted.rows[0].deleted_at, null, "cross-office delete must not soft-delete the document");
 
+  const createAudit = await pool.query("select action, entity_id from audit_logs where entity_type='case_document' and entity_id=$1", [documentId]);
+  assert.equal(createAudit.rows.filter(row => row.action === "create").length, 1, "successful create must be audited once");
+
+  const ownUpdate = await request(`/api/case-documents/${documentId}`, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Updated by Office A" }
+  });
+  assert.equal(ownUpdate.status, 200, "office A can update its own document");
+  const updateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
+  assert.equal(updateAudit.rows[0].count, 1, "successful update must be audited once");
+
   console.log("PASS: office A can read its own document");
   console.log("PASS: office B list does not disclose office A document");
+  console.log("PASS: case_id filters work without SQL errors");
+  console.log("PASS: untrusted Origin, missing CSRF, and impossible date are rejected");
+  console.log("PASS: successful create/update are audited once");
   console.log("PASS: cross-office read rejected");
   console.log("PASS: cross-office update rejected without mutation");
   console.log("PASS: cross-office delete rejected without mutation");
