@@ -8,10 +8,11 @@ Scope: case-document metadata only. This checklist does not authorize file uploa
 - Pull request: [#4](https://github.com/fzhtftp-commits/Dadban/pull/4)
 - Head branch: `feature/case-documents-metadata`
 - Base branch: `feature/case-actions`
-- Baseline commit reviewed: `641513982848a8f931252d3ca5dba1ac7e2d62cc`
-- GitHub Actions run #89: [success](https://github.com/fzhtftp-commits/Dadban/actions/runs/38589389408), with the run SHA matching that baseline commit.
-- The baseline CI job completed unit tests, syntax checks, migration/office-isolation SQL checks, and two-office HTTP integration checks against disposable PostgreSQL.
-- Re-check the head SHA and latest run after any subsequent commit. A green run for an older SHA is not evidence that the current head passed.
+- Verified head commit at this review: `236f905670f4a98a7bb9b5acf00f1ffacf666e0b`
+- GitHub Actions run #94: [success](https://github.com/fzhtftp-commits/Dadban/actions/runs/38591210901). Its `head_sha` exactly matches the PR head SHA above.
+- The completed job passed `npm install`, `npm test`, syntax checks for the server/UI, metadata migration and office-isolation checks in disposable PostgreSQL, and two-office HTTP integration checks.
+- PR #4 was verified open, Draft, and not merged; its base remains `feature/case-actions`. No production deployment or operational database migration was performed.
+- After any new commit, re-check the latest run and require its `head_sha` to equal the current PR head. A green run for an older SHA is not evidence that the current head passed.
 
 ## Access-control matrix to verify
 
@@ -24,22 +25,30 @@ Scope: case-document metadata only. This checklist does not authorize file uploa
 | Soft-delete metadata | Session + trusted Origin + CSRF; ID and office predicate; transaction and audit row | Cross-office/unknown/already-deleted record |
 | Future file access (not implemented) | Separate design and security review before implementation: private object storage, authorization on every operation, malware scanning/quarantine, content validation, retention, audit, backup/restore | No public URLs, unauthenticated access, or trust in user-supplied filename/MIME/size |
 
-## Role authorization decision — unresolved
+## Role authorization audit — finding and decision blocker
 
-Authentication and office isolation do not by themselves define which roles may create, edit, or delete document metadata. Before merge, product/security review must decide and test permissions for each real application role (for example, office owner, administrator, lawyer, and assistant) based on the actual role model. Do not assume these example labels or their permissions are already enforced. If the intended policy is “all active office members may manage metadata,” record that decision explicitly and add tests for it.
+Observed in `backend/src/server.js` at the reviewed head:
+
+- `requireAuth` verifies a valid, unexpired, unrevoked session and an active, non-deleted user, then copies `users.role` into `req.auth.role`.
+- The case-document list/detail/create/update/soft-delete routes are guarded by `requireAuth` (mutations also require trusted Origin and CSRF), and their SQL is scoped by `req.auth.officeId`.
+- No role-specific authorization guard or role comparison was found on these five case-document routes. Therefore, the code currently enforces authentication and office boundaries, but does **not** establish different document permissions for different roles. This is an observation about the code, not a claim that any particular role should or should not be allowed.
+- Existing two-office integration coverage validates office isolation, but the fixture uses the default `owner` role; it does not prove an authorization policy across all actual roles.
+- Do not add a guessed allow/deny list. Before merge, confirm the real role vocabulary from the application schema and obtain an explicit product decision for list/read/create/update/delete permissions for each role. Then implement the policy centrally and add positive and negative tests for every role/action pair, including cross-office cases.
 
 ## Pre-merge checklist
 
 ### Automated checks
-- [ ] Latest GitHub Actions run is successful and its `head_sha` equals the current PR head SHA.
-- [ ] Unit tests, JavaScript syntax checks, migration checks, and two-office HTTP integration tests pass on that exact SHA.
+- [x] Latest GitHub Actions run #94 is successful and its `head_sha` equals the reviewed PR head SHA `236f905670f4a98a7bb9b5acf00f1ffacf666e0b`.
+- [x] Unit tests, JavaScript syntax checks, migration checks, and two-office HTTP integration tests passed on that exact SHA.
+- [ ] After this checklist update, verify the new branch head and its own Actions result before marking CI current again.
+- [ ] Add role/action authorization tests after the policy is decided; current passing CI does not establish role-based permissions.
 - [ ] Regression coverage remains for session expiry/revocation, Origin/CSRF failures, office isolation, soft deletion, audit atomicity, idempotency/replay, rollback failure, pool-client reuse, connection acquisition failure, sequential requests, and concurrent requests.
 - [ ] Tests run only against a dedicated disposable local/test database; they must not reset or migrate an operational database.
 
 ### Human review
 - [ ] Review the complete diff and confirm the PR base is still `feature/case-actions`, not `main`.
-- [ ] Confirm office/user identity is always derived from authenticated server-side context, never from request body/query parameters.
-- [ ] Review every list/detail/create/update/delete SQL predicate and verify cross-office access is denied without leaking record existence.
+- [x] Case-document office/user identity is derived from authenticated server-side context, not from request body/query parameters, in the reviewed route handlers.
+- [x] Reviewed list/detail/create/update/delete route predicates constrain document access to the authenticated office; two-office HTTP integration tests passed on the reviewed SHA.
 - [ ] Decide and implement/verify the role-permission policy described above.
 - [ ] Review migration constraints and indexes against the actual baseline schema; verify composite unique keys required by office-scoped foreign keys exist in the target schema.
 - [ ] Review the rollback and recovery plan. Confirm a verified backup and a tested restore procedure before any shared-environment migration.
@@ -58,4 +67,5 @@ Authentication and office isolation do not by themselves define which roles may 
 ## Decision record
 
 - Automated CI passing means the covered tests passed; it is not a complete security audit.
+- The current role-permission policy is not defined by the reviewed routes; product decision and role/action test coverage are required before merge.
 - Remaining blockers include human role-policy review, schema/migration review, staging verification, deployment-topology validation, and explicit pre-merge approval.
