@@ -566,6 +566,18 @@ BEGIN
     RAISE EXCEPTION 'unexpected per-column storage/statistics tuning';
   END IF;
 
+  -- Migration 004 declares no column-level GRANT/REVOKE. Explicit attacl
+  -- entries can expose or revoke a single column independently of table ACLs.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_attribute a
+    WHERE a.attrelid='${expected_schema}.case_documents'::regclass
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND a.attacl IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'unexpected explicit column-level ACL';
+  END IF;
+
   IF EXISTS (
     SELECT 1 FROM pg_constraint c
     WHERE c.conrelid='${expected_schema}.case_documents'::regclass
