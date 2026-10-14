@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>دادبان | اقدامات پرونده</title><link rel="stylesheet" href="styles.css">
+<style>
+.action-toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:18px}.action-toolbar .field{min-width:180px;flex:1}.action-form .field{margin-bottom:13px}.action-form label{display:block;margin-bottom:7px;font-size:13px;font-weight:700}.action-form input,.action-form select,.action-form textarea,.action-toolbar select{width:100%;padding:11px;border:1px solid var(--line);border-radius:9px;background:#fff;font:inherit;color:var(--text)}.action-form textarea{resize:vertical}.action-layout{display:grid;grid-template-columns:minmax(280px,360px) minmax(0,1fr);gap:18px}.action-layout .card{min-width:0}.action-table-wrap{overflow:auto}.action-table{width:100%;border-collapse:collapse;min-width:720px}.action-table th,.action-table td{text-align:right;padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}.action-table th{font-size:12px;color:var(--muted);background:#f8fafc}.action-table td{font-size:13px}.action-buttons{display:flex;gap:6px;flex-wrap:wrap}.action-buttons button{border:1px solid var(--line);border-radius:7px;background:#fff;padding:6px 9px;cursor:pointer;font:inherit}.action-buttons .delete-action{color:#a53b3b}.action-message{margin:12px 0;padding:10px 12px;border-radius:8px;background:#f1f5f9}.action-message.error{color:#a53b3b;background:#fff1f1}.action-message.success{color:#286746;background:#effaf3}.action-help{font-size:12px;color:var(--muted);line-height:1.8}@media(max-width:950px){.action-layout{grid-template-columns:1fr}}
+</style></head>
+<body><div class="app-shell">
+<aside class="sidebar"><div class="brand"><div class="brand-mark">⚖</div><div><strong>دادبان</strong><span>مدیریت دفتر وکالت</span></div></div>
+<nav><a href="index.html">⌂ داشبورد</a><a href="clients.html">👥 موکل‌ها</a><a href="cases.html">▣ پرونده‌ها</a><a href="calendar.html">◷ تقویم و جلسات</a><a class="active" href="actions.html">✓ اقدامات پرونده</a><a href="#">▤ اسناد و مدارک</a><a href="#">﷼ امور مالی</a><a href="#">▥ گزارش‌ها</a></nav>
+<div class="side-bottom"><a href="#">⚙ تنظیمات</a><button class="logout-btn" id="logoutBtn" type="button">⇥ خروج از برنامه</button><div class="secure">🔒 امنیت چندلایه فعال</div></div></aside>
+<main><header class="topbar"><div><div class="eyebrow">مدیریت دفتر وکالت</div><h1>اقدامات و پیگیری‌های پرونده</h1></div><div class="top-actions"><div class="user"><div class="avatar">و</div><div><b>مدیر دفتر</b><small>پیگیری کارها</small></div></div></div></header>
+<section class="hero"><div><span class="badge">● پیگیری اقدامات</span><h2>کارهای بعدی هر پرونده را فراموش نکنید</h2><p>اقدام را به پرونده متصل کنید، موعد و اولویت تعیین کنید و وضعیت انجام را به‌روز نگه دارید.</p></div></section>
+<div id="actionMessage" class="action-message" hidden></div>
+<section class="action-toolbar"><div class="field"><label for="filterCaseId">پرونده</label><select id="filterCaseId"><option value="">همه پرونده‌ها</option></select></div><div class="field"><label for="filterStatus">وضعیت اقدام</label><select id="filterStatus"><option value="">همه وضعیت‌ها</option><option value="todo">انجام‌نشده</option><option value="in_progress">در حال انجام</option><option value="completed">انجام‌شده</option><option value="cancelled">لغوشده</option></select></div><button class="secondary-btn" id="clearFilters" type="button">پاک‌کردن فیلترها</button></section>
+<section class="action-layout">
+<div class="card"><div class="section-head"><h3 id="formTitle">ثبت اقدام جدید</h3></div>
+<form id="actionForm" class="action-form">
+<input type="hidden" id="actionId">
+<div class="field"><label for="caseId">پرونده مرتبط *</label><select id="caseId" required><option value="">در حال دریافت پرونده‌ها...</option></select></div>
+<div class="field"><label for="actionTitle">عنوان اقدام *</label><input id="actionTitle" maxlength="200" minlength="2" required placeholder="مثلاً تهیه لایحه یا تماس با موکل"></div>
+<div class="field"><label for="actionDescription">شرح و یادداشت</label><textarea id="actionDescription" rows="3" maxlength="5000"></textarea></div>
+<div class="field"><label for="dueAt">مهلت انجام</label><input id="dueAt" type="datetime-local"></div>
+<div class="field"><label for="actionStatus">وضعیت</label><select id="actionStatus"><option value="todo">انجام‌نشده</option><option value="in_progress">در حال انجام</option><option value="completed">انجام‌شده</option><option value="cancelled">لغوشده</option></select></div>
+<div class="field"><label for="actionPriority">اولویت</label><select id="actionPriority"><option value="low">کم</option><option value="normal" selected>عادی</option><option value="high">بالا</option><option value="urgent">فوری</option></select></div>
+<p class="action-help">تغییرات در سابقهٔ ممیزی ثبت می‌شود. اعلان خودکار مهلت‌ها در این مرحله فعال نیست.</p>
+<div class="form-actions"><button class="primary" id="saveAction" type="submit">ثبت اقدام</button><button class="secondary-btn" id="cancelEdit" type="button" hidden>لغو ویرایش</button></div>
+</form></div>
+<div class="card"><div class="section-head"><h3>فهرست اقدامات</h3><button class="secondary-btn" id="refreshActions" type="button">به‌روزرسانی</button></div>
+<div class="action-table-wrap"><table class="action-table"><thead><tr><th>اقدام / پرونده</th><th>مهلت</th><th>وضعیت</th><th>اولویت</th><th>عملیات</th></tr></thead><tbody id="actionsBody"><tr><td colspan="5" class="empty-state">در حال دریافت اقدامات...</td></tr></tbody></table></div></div>
+</section></main></div><script src="app.js"></script><script src="actions.js?v=1"></script></body></html>
