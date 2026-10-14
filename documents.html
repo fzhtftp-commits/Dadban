@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>دادبان | اسناد و مدارک پرونده</title><link rel="stylesheet" href="styles.css"></head>
+<body><div class="app-shell">
+<aside class="sidebar"><div class="brand"><div class="brand-mark">⚖</div><div><strong>دادبان</strong><span>مدیریت دفتر وکالت</span></div></div>
+<nav><a href="index.html">⌂ داشبورد</a><a href="clients.html">👥 موکل‌ها</a><a href="cases.html">▣ پرونده‌ها</a><a href="calendar.html">◷ تقویم و جلسات</a><a href="actions.html">✓ اقدامات پرونده</a><a class="active" href="documents.html">▤ اسناد و مدارک</a><a href="#">﷼ امور مالی</a><a href="#">▥ گزارش‌ها</a></nav>
+<div class="side-bottom"><a href="#">⚙ تنظیمات</a><button class="logout-btn" id="logoutBtn" type="button">⇥ خروج از برنامه</button><div class="secure">🔒 امنیت چندلایه فعال</div></div></aside>
+<main><header class="topbar"><div><div class="eyebrow">مدیریت پرونده‌ها</div><h1>اسناد و مدارک</h1></div><div class="top-actions"><div class="user"><div class="avatar">و</div><div><b>مدیر دفتر</b><small>مدیر</small></div></div></div></header>
+<section class="hero"><div><span class="badge">● ثبت فراداده</span><h2>مدارک هر پرونده را مرتب نگه دارید</h2><p>در این مرحله فقط اطلاعات توصیفی سند ذخیره می‌شود؛ آپلود و دانلود فایل هنوز فعال نیست.</p></div><a class="primary" href="cases.html" style="text-decoration:none">انتخاب پرونده</a></section>
+<div id="documentMessage" class="form-message" hidden></div>
+<section class="document-layout">
+<div class="card"><div class="section-head"><h3 id="documentFormTitle">ثبت مشخصات سند</h3></div>
+<form id="documentForm" class="action-form">
+<input type="hidden" id="documentId">
+<div class="field"><label for="caseId">پرونده مرتبط *</label><select id="caseId" required><option value="">در حال دریافت پرونده‌ها...</option></select></div>
+<div class="field"><label for="documentTitle">عنوان سند *</label><input id="documentTitle" maxlength="200" minlength="2" required placeholder="مثلاً قرارداد یا لایحه تجدیدنظر"></div>
+<div class="field"><label for="documentType">نوع سند</label><select id="documentType"><option value="other">سایر</option><option value="pleading">لایحه</option><option value="evidence">مدرک / دلیل</option><option value="contract">قرارداد</option><option value="correspondence">مکاتبات</option><option value="court_order">رأی / قرار قضایی</option><option value="identity">مدرک هویتی</option></select></div>
+<div class="field"><label for="documentDate">تاریخ سند</label><input id="documentDate" type="date"></div>
+<div class="field"><label for="referenceNumber">شماره / شناسه مرجع</label><input id="referenceNumber" maxlength="120"></div>
+<div class="field"><label for="confidentiality">سطح محرمانگی</label><select id="confidentiality"><option value="confidential" selected>محرمانه</option><option value="normal">عادی</option><option value="restricted">محدود</option></select></div>
+<div class="field full"><label for="documentDescription">توضیحات</label><textarea id="documentDescription" rows="3" maxlength="5000"></textarea></div>
+<p class="action-help">هیچ فایل، لینک دانلود، مسیر ذخیره‌سازی یا محتوای باینری ثبت نمی‌شود. تمام رکوردها فقط برای دفتر واردشده قابل مشاهده‌اند.</p>
+<div class="form-actions"><button class="primary" id="saveDocument" type="submit">ثبت مشخصات سند</button><button class="secondary-btn" id="cancelDocumentEdit" type="button" hidden>لغو ویرایش</button></div>
+</form></div>
+<div class="card"><div class="section-head"><h3>فهرست اسناد</h3><button class="secondary-btn" id="refreshDocuments" type="button">به‌روزرسانی</button></div>
+<div class="action-table-wrap"><table class="action-table"><thead><tr><th>سند / پرونده</th><th>نوع</th><th>تاریخ</th><th>محرمانگی</th><th>عملیات</th></tr></thead><tbody id="documentsBody"><tr><td colspan="5" class="empty-state">در حال دریافت اسناد...</td></tr></tbody></table></div></div>
+</section></main></div>
+<style>
+.document-layout{display:grid;grid-template-columns:minmax(280px, .85fr) minmax(0,1.5fr);gap:16px;margin-top:18px}
+.document-layout .action-form{display:grid;gap:13px}
+.document-layout .field.full{grid-column:1/-1}
+.document-layout .action-table{min-width:760px}
+.document-layout .action-table-wrap{overflow-x:auto}
+.document-row-title{font-weight:700}
+.document-note{color:var(--muted);font-size:12px}
+@media(max-width:1000px){.document-layout{grid-template-columns:1fr}}
+</style>
+<script src="app.js"></script><script src="documents.js?v=1"></script></body></html>
