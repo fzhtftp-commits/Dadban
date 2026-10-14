@@ -339,6 +339,37 @@ const requireCsrf = (req, res, next) => {
   next();
 };
 
+const createRateLimiter = ({ windowMs, maxRequests }) => {
+  const clients = new Map();
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = req.ip || req.socket.remoteAddress || "unknown";
+    for (const [clientKey, entry] of clients) {
+      if (entry.resetAt <= now) clients.delete(clientKey);
+    }
+    if (!clients.has(key) && clients.size >= 10000) {
+      const oldestKey = clients.keys().next().value;
+      if (oldestKey !== undefined) clients.delete(oldestKey);
+    }
+    let entry = clients.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowMs };
+      clients.set(key, entry);
+    }
+    entry.count += 1;
+    res.setHeader("RateLimit-Limit", String(maxRequests));
+    res.setHeader("RateLimit-Remaining", String(Math.max(0, maxRequests - entry.count)));
+    if (entry.count > maxRequests) {
+      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((entry.resetAt - now) / 1000))));
+      return res.status(429).json({ error: "rate_limit_exceeded" });
+    }
+    next();
+  };
+};
+
+const loginRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 10 });
+const createDocumentRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 12 });
+
 const syncCaseNextHearing = async (client, officeId, caseId) => {
   await client.query(
     `
@@ -456,7 +487,7 @@ app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
   }
 });
 
-app.post("/api/auth/login", requireTrustedOrigin, async (req, res) => {
+app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_login" });
 
@@ -1586,15 +1617,26 @@ app.get("/api/case-documents/:id", requireAuth, async (req,res) => {
     if(!q.rowCount)return res.status(404).json({error:"document_not_found"});return res.json({data:q.rows[0]});
   }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
-app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
-  const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;let c;
-  try{c=await pool.connect();
-    await c.query("begin");const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
-    if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
-    const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11) returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,req.auth.userId]);
-    const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{case_id:doc.case_id,storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
-  }catch(error){await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
-});
+app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, createDocumentRateLimit, async(req,res)=>{
+   const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;
+   const idempotencyKey=req.get("idempotency-key");
+   if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
+   const fingerprint=hashToken(JSON.stringify(d));let c;
+   try{c=await pool.connect();
+     await c.query("begin");const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
+     if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
+     const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
+     if(!q.rowCount && idempotencyKey){
+       const existing=await c.query("select id,request_fingerprint,deleted_at from case_documents where office_id=$1 and created_by=$2 and idempotency_key=$3",[req.auth.officeId,req.auth.userId,idempotencyKey]);
+       if(existing.rowCount && existing.rows[0].request_fingerprint===fingerprint && !existing.rows[0].deleted_at){
+         const replay=await c.query("select id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at from case_documents where id=$1",[existing.rows[0].id]);
+         await c.query("commit");return res.status(200).json({data:replay.rows[0],idempotent_replay:true});
+       }
+       await rollbackQuietly(c,"idempotency key conflict");return res.status(409).json({error:"idempotency_key_reused"});
+     }
+     const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{case_id:doc.case_id,storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
+   }catch(error){await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+ });
 app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
   const fields=["title","document_type","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
