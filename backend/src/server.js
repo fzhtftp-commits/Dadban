@@ -1339,8 +1339,8 @@ app.get("/api/documents", requireAuth, async (req, res) => {
   const { case_id, document_type, limit } = parsed.data;
   const values = [req.auth.officeId];
   const conditions = ["d.office_id = $1", "d.deleted_at is null", "c.office_id = d.office_id", "c.deleted_at is null"];
-  if (case_id) { values.push(case_id); conditions.push(`d.case_id = ${values.length}`); }
-  if (document_type) { values.push(document_type); conditions.push(`d.document_type = ${values.length}`); }
+  if (case_id) { values.push(case_id); conditions.push("d.case_id = $" + values.length); }
+  if (document_type) { values.push(document_type); conditions.push("d.document_type = $" + values.length); }
   values.push(limit);
   try {
     const result = await pool.query(`
@@ -1352,8 +1352,7 @@ app.get("/api/documents", requireAuth, async (req, res) => {
       join cases c on c.id = d.case_id and c.office_id = d.office_id
       where ${conditions.join(" and ")}
       order by d.document_date desc nulls last, d.created_at desc
-      limit ${values.length}
-    `, values);
+      limit $` + values.length, values);
     return res.json({ data: result.rows, pagination: { limit, returned: result.rows.length } });
   } catch (error) {
     console.error("List case documents failed:", error);
@@ -1458,16 +1457,16 @@ app.patch("/api/documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
     for (const field of allowed) {
       if (Object.hasOwn(data, field)) {
         values.push(data[field] ?? null);
-        sets.push(`${field} = ${values.length}`);
+        sets.push(field + " = $" + values.length);
       }
     }
     values.push(req.auth.userId);
-    sets.push(`updated_by = ${values.length}`);
+    sets.push("updated_by = $" + values.length);
     sets.push("updated_at = now()");
     values.push(id.data, req.auth.officeId);
     const result = await client.query(`
       update case_documents set ${sets.join(", ")}
-      where id = ${values.length - 1} and office_id = ${values.length} and deleted_at is null
+      where id = $` + (values.length - 1) + " and office_id = $" + values.length + ` and deleted_at is null
       returning id, office_id, case_id, title, document_type, description, document_date,
                 reference_number, confidentiality, storage_status, created_at, updated_at
     `, values);
