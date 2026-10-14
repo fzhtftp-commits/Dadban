@@ -529,6 +529,20 @@ BEGIN
     RAISE EXCEPTION 'FK/CHECK validation or inheritance flags differ from migration contract';
   END IF;
 
+  -- This migration creates a standalone table; constraints must be local rather
+  -- than inherited/partition-parent constraints. Assert catalog provenance too.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND (
+        NOT c.conislocal
+        OR c.coninhcount <> 0
+        OR c.conparentid <> 0
+      )
+  ) THEN
+    RAISE EXCEPTION 'constraint locality/inheritance provenance differs from migration contract';
+  END IF;
+
   -- Validate every CHECK expression semantically against its expected expression
   -- after removing PostgreSQL's presentation-only whitespace and parentheses.
   IF EXISTS (
