@@ -41,6 +41,11 @@ const headersA = { cookie: cookie(tokenA, csrfA), origin, "x-csrf-token": csrfA,
 const headersB = { cookie: cookie(tokenB, csrfB), origin, "x-csrf-token": csrfB, "content-type": "application/json" };
 const future = (days) => new Date(Date.now() + days * 86400000);
 const iso = (date) => date.toISOString();
+async function assertStatus(response, expected) {
+  if (response.status !== expected) {
+    throw new Error(`Expected HTTP ${expected}, got ${response.status}: ${await response.text()}`);
+  }
+}
 async function api(route, { method = "GET", headers = headersA, body } = {}) {
   return fetch(baseUrl + route, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
 }
@@ -94,7 +99,7 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
       method: "POST",
       body: { case_id: ids.caseA1, hearing_at: iso(hearingAt), hearing_type: "جلسه آزمون", reminder_minutes: 1440 }
     });
-    assert.equal(response.status, 201, await response.text());
+    await assertStatus(response, 201);
     const result = await response.json();
     hearingId = result.data.id;
     assert.equal(result.data.case_id, ids.caseA1);
@@ -111,7 +116,7 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
     const from = new Date(Date.now() + 2 * 86400000);
     const to = new Date(Date.now() + 4 * 86400000);
     const filtered = await api("/api/hearings?from=" + encodeURIComponent(iso(from)) + "&to=" + encodeURIComponent(iso(to)) + "&status=scheduled");
-    assert.equal(filtered.status, 200, await filtered.text());
+    await assertStatus(filtered, 200);
     assert.equal((await filtered.json()).data.length, 1);
     const reversed = await api("/api/hearings?from=" + encodeURIComponent(iso(to)) + "&to=" + encodeURIComponent(iso(from)));
     assert.equal(reversed.status, 400);
@@ -123,7 +128,7 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
     const response = await api("/api/hearings/" + hearingId, {
       method: "PATCH", body: { hearing_at: iso(movedTo), status: "postponed" }
     });
-    assert.equal(response.status, 200, await response.text());
+    await assertStatus(response, 200);
     const caseResult = await db.query("select next_hearing_at from cases where id = $1", [ids.caseA1]);
     assert.ok(Math.abs(new Date(caseResult.rows[0].next_hearing_at).getTime() - movedTo.getTime()) < 1500);
   });
@@ -133,13 +138,13 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
     const moved = await api("/api/hearings/" + hearingId, {
       method: "PATCH", body: { case_id: ids.caseA2, hearing_at: iso(movedTo), status: "scheduled" }
     });
-    assert.equal(moved.status, 200, await moved.text());
+    await assertStatus(moved, 200);
     const oldCase = await db.query("select next_hearing_at from cases where id = $1", [ids.caseA1]);
     const newCase = await db.query("select next_hearing_at from cases where id = $1", [ids.caseA2]);
     assert.equal(oldCase.rows[0].next_hearing_at, null);
     assert.ok(Math.abs(new Date(newCase.rows[0].next_hearing_at).getTime() - movedTo.getTime()) < 1500);
     const cancelled = await api("/api/hearings/" + hearingId, { method: "PATCH", body: { status: "cancelled" } });
-    assert.equal(cancelled.status, 200, await cancelled.text());
+    await assertStatus(cancelled, 200);
     const cancelledCase = await db.query("select next_hearing_at from cases where id = $1", [ids.caseA2]);
     assert.equal(cancelledCase.rows[0].next_hearing_at, null);
   });
@@ -149,7 +154,7 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
       method: "POST", headers: headersA,
       body: { case_id: ids.caseA1, hearing_at: iso(future(7)), hearing_type: "جلسه جداسازی" }
     });
-    assert.equal(newResponse.status, 201, await newResponse.text());
+    await assertStatus(newResponse, 201);
     const officeAHearingId = (await newResponse.json()).data.id;
     const listB = await api("/api/hearings", { headers: headersB });
     assert.equal(listB.status, 200);
@@ -172,7 +177,7 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
     const create = await api("/api/hearings", {
       method: "POST", body: { case_id: ids.caseA2, hearing_at: iso(future(9)), hearing_type: "جلسه حذف نرم" }
     });
-    assert.equal(create.status, 201, await create.text());
+    await assertStatus(create, 201);
     const id = (await create.json()).data.id;
     const del = await api("/api/hearings/" + id, { method: "DELETE" });
     assert.equal(del.status, 204);
