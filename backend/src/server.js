@@ -6,7 +6,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { rollbackQuietly, releaseClient } from "./document-transaction.js";
+import { acquireClient, rollbackQuietly, releaseClient } from "./document-transaction.js";
 
 const { Pool } = pg;
 const scrypt = promisify(crypto.scrypt);
@@ -1626,7 +1626,7 @@ app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, 
    const idempotencyKey=req.get("idempotency-key");
    if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
    const fingerprint=hashToken(JSON.stringify(d));let c;
-   try{c=await pool.connect();
+   try{c=await acquireClient(pool);
      await c.query("begin");const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
      if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
      const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
@@ -1646,14 +1646,14 @@ app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireC
   const fields=["title","document_type","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
   for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
   v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);let c;
-  try{c=await pool.connect();await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);
+  try{c=await acquireClient(pool);await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);
     if(!q.rowCount){await rollbackQuietly(c,"update missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"update","case_document",id.data,req,{fields:Object.keys(p.data)});await c.query("commit");return res.json({data:q.rows[0]});
   }catch(error){await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 app.delete("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});let c;
-  try{c=await pool.connect();await c.query("begin");const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
+  try{c=await acquireClient(pool);await c.query("begin");const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);await c.query("commit");return res.status(204).send();
   }catch(error){await rollbackQuietly(c,"delete case document");logSafeError("Delete case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
