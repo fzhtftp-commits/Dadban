@@ -133,6 +133,16 @@ try {
   outageServer.kill("SIGTERM");
   outageServer = null;
 
+  const unauthenticated = await fetch(`http://127.0.0.1:${port}/api/case-documents`);
+  assert.equal(unauthenticated.status, 401, "document listing must require a valid session");
+  assert.deepEqual(await unauthenticated.json(), { error: "authentication_required" }, "unauthenticated response must remain generic");
+  const invalidCsrf = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", csrfHeader: false,
+    body: { case_id: ids.caseA, title: "Missing CSRF regression" }
+  });
+  assert.equal(invalidCsrf.status, 403, "mutation without CSRF token must be rejected");
+  assert.deepEqual(invalidCsrf.body, { error: "csrf_token_required" }, "CSRF response must not reveal session internals");
+
   const wrongOrigin = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST", originHeader: "https://attacker.example",
     body: { case_id: ids.caseA, title: "Rejected origin document" }
@@ -385,6 +395,11 @@ try {
   console.log("PASS: repeated soft delete does not duplicate audit events");
   console.log("PASS: concurrent update/delete requests remain consistent with exactly one delete audit");
   console.log("PASS: database statement timeout rolls back mutation and returns sanitized error");
+  assert.equal(serverOutput.includes("forced audit failure"), false, "server logs must not include raw database exception messages");
+  assert.equal(serverOutput.includes("statement timeout"), false, "server logs must not include raw statement timeout details");
+  assert.equal(timeoutServerOutput.includes("statement timeout"), false, "timeout-server logs must not disclose raw database errors");
+  console.log("PASS: authentication and CSRF negatives are rejected with generic responses");
+  console.log("PASS: server logs omit raw database exception details");
   console.log("PASS: cross-office read rejected");
   console.log("PASS: cross-office update rejected without mutation");
   console.log("PASS: cross-office delete rejected without mutation");
