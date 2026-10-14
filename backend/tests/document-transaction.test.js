@@ -42,3 +42,26 @@ test("rollback helper safely handles a missing client", async () => {
   assert.equal(await rollbackQuietly(null, "no connection"), false);
   releaseClient(null);
 });
+
+
+test("rollback failure logs omit raw exception messages", async () => {
+  const secret = "postgres://private-user:private-password@db.internal/private-db";
+  const rollbackError = new Error(secret);
+  rollbackError.code = "08006";
+  const captured = [];
+  const original = console.error;
+  console.error = (...args) => captured.push(args.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(" "));
+  const client = {
+    async query() { throw rollbackError; },
+    release() {}
+  };
+  try {
+    assert.equal(await rollbackQuietly(client, "log-redaction regression"), false);
+  } finally {
+    console.error = original;
+  }
+  const output = captured.join("\\n");
+  assert.equal(output.includes(secret), false, "raw database connection details must not be logged");
+  assert.equal(output.includes("08006"), true, "safe database error code may be retained for diagnostics");
+  assert.equal(output.includes("private-password"), false);
+});
