@@ -46,7 +46,7 @@ async function waitForServer(portToCheck = port) {
   throw new Error("Dadban API did not become healthy in time");
 }
 
-async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true } = {}) {
+async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true, idempotencyKey } = {}) {
   const headers = { origin: originHeader, cookie: `dadban_session=${token}; dadban_csrf=${csrf}` };
   if (csrfHeader && ["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
     headers["x-csrf-token"] = csrf;
@@ -54,6 +54,7 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
   if (body !== undefined) {
     headers["content-type"] = "application/json";
   }
+  if (idempotencyKey !== undefined) headers["idempotency-key"] = idempotencyKey;
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body)
   });
@@ -254,6 +255,32 @@ try {
   const createAudit = await pool.query("select action, entity_id from audit_logs where entity_type='case_document' and entity_id=$1", [documentId]);
   assert.equal(createAudit.rows.filter(row => row.action === "create").length, 1, "successful create must be audited once");
 
+  const idempotentPayload = { case_id: ids.caseA, title: "Idempotent retry regression", document_type: "evidence" };
+  const idempotentFirst = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-key-12345678", body: idempotentPayload
+  });
+  assert.equal(idempotentFirst.status, 201, "first idempotent create should create the document");
+  const idempotentReplay = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-key-12345678", body: idempotentPayload
+  });
+  assert.equal(idempotentReplay.status, 200, "retry with same key and payload should return prior result");
+  assert.equal(idempotentReplay.body.data.id, idempotentFirst.body.data.id, "retry must not create a second document");
+  assert.equal(idempotentReplay.body.idempotent_replay, true);
+  const idempotentAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [idempotentFirst.body.data.id]);
+  assert.equal(idempotentAudit.rows[0].count, 1, "idempotent retry must not duplicate audit records");
+  const keyReuse = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-key-12345678",
+    body: { ...idempotentPayload, title: "Different payload under same key" }
+  });
+  assert.equal(keyReuse.status, 409, "same idempotency key with different payload must be rejected");
+  assert.deepEqual(keyReuse.body, { error: "idempotency_key_reused" });
+  const invalidKey = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "bad key",
+    body: idempotentPayload
+  });
+  assert.equal(invalidKey.status, 400, "malformed idempotency keys must be rejected");
+
+
   await pool.query(`
     create or replace function reject_document_mutation_audit() returns trigger language plpgsql as $fn$
     begin
@@ -412,6 +439,31 @@ try {
   console.log("PASS: cross-office read rejected");
   console.log("PASS: cross-office update rejected without mutation");
   console.log("PASS: cross-office delete rejected without mutation");
+
+  let rateLimited = false;
+  for (let i = 0; i < 13; i++) {
+    const limited = await request("/api/case-documents", {
+      token: tokenA, csrf: csrfA, method: "POST",
+      idempotencyKey: `rate-limit-key-${String(i).padStart(2,"0")}`,
+      body: { case_id: ids.caseA, title: `Rate limit test ${i}` }
+    });
+    if (limited.status === 429) {
+      rateLimited = true;
+      assert.deepEqual(limited.body, { error: "rate_limit_exceeded" });
+      assert.ok(Number(limited.headers?.["retry-after"] || 1) >= 1);
+    }
+  }
+  assert.equal(rateLimited, true, "document create requests must be rate-limited");
+  console.log("PASS: idempotency retries do not duplicate documents or audit rows");
+  console.log("PASS: document create rate limit returns sanitized 429");
+
+  const expiredSession = await pool.query("update auth_sessions set expires_at=now()-interval '1 minute' where token_hash=$1", [hash(tokenA)]);
+  assert.equal(expiredSession.rowCount, 1, "test fixture session should exist before expiry test");
+  const expiredRequest = await request("/api/case-documents", { token: tokenA, csrf: csrfA });
+  assert.equal(expiredRequest.status, 401, "expired session must no longer authorize API access");
+  assert.deepEqual(expiredRequest.body, { error: "authentication_required" });
+  console.log("PASS: expired session is rejected");
+
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
