@@ -66,6 +66,20 @@ test("unhandled and oversized request errors return sanitized JSON", () => {
  assert.match(server, /error: "internal_server_error"/);
 });
 
+test("server error logging records only safe error metadata", () => {
+ assert.match(server, /const logSafeError = \(context, error\) =>/);
+ assert.match(server, /console\.error\(context, safe\)/);
+ assert.doesNotMatch(server, /console\.error\([^\\n]*,\s*error\s*\)/);
+ assert.match(transactionHelper, /rollbackError\?\.code/);
+ assert.doesNotMatch(transactionHelper, /console\.error\([^\\n]*,\s*rollbackError\s*\)/);
+});
+
+test("document migration has office-scoped partial indexes for active-document listing", () => {
+ assert.match(migration, /case_documents_office_case_created_idx on case_documents \(office_id, case_id, created_at desc\) where deleted_at is null/);
+ assert.match(migration, /case_documents_office_created_idx on case_documents \(office_id, created_at desc\) where deleted_at is null/);
+ assert.match(migration, /case_documents_updated_by_same_office_fk/);
+});
+
 test("database connections and statements have bounded timeouts", () => {
  assert.match(server, /max: 10/);
  assert.match(server, /connectionTimeoutMillis: 10000/);
