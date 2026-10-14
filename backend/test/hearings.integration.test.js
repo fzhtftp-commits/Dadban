@@ -66,25 +66,11 @@ before(async () => {
   await db.connect();
   const schema = await readFile(path.join(root, "database/schema.sql"), "utf8");
   await db.query(schema);
-  await db.query(`
-    insert into offices (id, name) values ($1, 'دفتر آزمایشی الف'), ($2, 'دفتر آزمایشی ب');
-    insert into users (id, office_id, full_name, email, role) values
-      ($3, $1, 'کاربر آزمایشی الف', 'office-a@example.test', 'owner'),
-      ($4, $2, 'کاربر آزمایشی ب', 'office-b@example.test', 'owner');
-    insert into clients (id, office_id, client_type, full_name, national_id) values
-      ($5, $1, 'individual', 'موکل الف', '0012345678'),
-      ($6, $2, 'individual', 'موکل ب', '0012345679');
-    insert into cases (id, office_id, client_id, case_number, title) values
-      ($7, $1, $5, 'A-001', 'پرونده آزمایشی اول'),
-      ($8, $1, $5, 'A-002', 'پرونده آزمایشی دوم'),
-      ($9, $2, $6, 'B-001', 'پرونده دفتر دیگر');
-    insert into auth_sessions (user_id, office_id, token_hash, csrf_hash, expires_at) values
-      ($3, $1, $10, $11, now() + interval '1 hour'),
-      ($4, $2, $12, $13, now() + interval '1 hour');
-  `, [
-    ids.officeA, ids.officeB, ids.userA, ids.userB, ids.clientA, ids.clientB,
-    ids.caseA1, ids.caseA2, ids.caseB, hash(tokenA), hash(csrfA), hash(tokenB), hash(csrfB)
-  ]);
+  await db.query("insert into offices (id, name) values ($1, $2), ($3, $4)", [ids.officeA, "دفتر آزمایشی الف", ids.officeB, "دفتر آزمایشی ب"]);
+  await db.query("insert into users (id, office_id, full_name, email, role) values ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)", [ids.userA, ids.officeA, "کاربر آزمایشی الف", "office-a@example.test", "owner", ids.userB, ids.officeB, "کاربر آزمایشی ب", "office-b@example.test", "owner"]);
+  await db.query("insert into clients (id, office_id, client_type, full_name, national_id) values ($1, $2, 'individual', $3, $4), ($5, $6, 'individual', $7, $8)", [ids.clientA, ids.officeA, "موکل الف", "0012345678", ids.clientB, ids.officeB, "موکل ب", "0012345679"]);
+  await db.query("insert into cases (id, office_id, client_id, case_number, title) values ($1, $2, $3, $4, $5), ($6, $2, $3, $7, $8), ($9, $10, $11, $12, $13)", [ids.caseA1, ids.officeA, ids.clientA, "A-001", "پرونده آزمایشی اول", ids.caseA2, "A-002", "پرونده آزمایشی دوم", ids.caseB, ids.officeB, ids.clientB, "B-001", "پرونده دفتر دیگر"]);
+  await db.query("insert into auth_sessions (user_id, office_id, token_hash, csrf_hash, expires_at) values ($1, $2, $3, $4, now() + interval '1 hour'), ($5, $6, $7, $8, now() + interval '1 hour')", [ids.userA, ids.officeA, hash(tokenA), hash(csrfA), ids.userB, ids.officeB, hash(tokenB), hash(csrfB)]);
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: path.join(root, "backend"),
     env: { ...process.env, DATABASE_URL: databaseUrl, NODE_ENV: "test", CORS_ORIGIN: origin, PORT: String(port) },
