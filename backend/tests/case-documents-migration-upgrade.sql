@@ -60,6 +60,55 @@ begin
     end if;
   end loop;
 
+  -- Names alone are not sufficient: assert each constraint's actual columns/definition.
+  if not exists (
+    select 1 from pg_constraint c
+    where c.conrelid = 'public.case_documents'::regclass
+      and c.conname = 'case_documents_case_same_office_fk'
+      and c.contype = 'f'
+      and pg_get_constraintdef(c.oid) ilike '%FOREIGN KEY (case_id, office_id) REFERENCES cases(id, office_id)%'
+  ) then
+    raise exception 'Case FK name exists but definition is not office-scoped as expected';
+  end if;
+  if not exists (
+    select 1 from pg_constraint c
+    where c.conrelid = 'public.case_documents'::regclass
+      and c.conname = 'case_documents_created_by_same_office_fk'
+      and c.contype = 'f'
+      and pg_get_constraintdef(c.oid) ilike '%FOREIGN KEY (created_by, office_id) REFERENCES users(id, office_id)%'
+  ) then
+    raise exception 'Created-by FK name exists but definition is incorrect';
+  end if;
+  if not exists (
+    select 1 from pg_constraint c
+    where c.conrelid = 'public.case_documents'::regclass
+      and c.conname = 'case_documents_updated_by_same_office_fk'
+      and c.contype = 'f'
+      and pg_get_constraintdef(c.oid) ilike '%FOREIGN KEY (updated_by, office_id) REFERENCES users(id, office_id)%'
+  ) then
+    raise exception 'Updated-by FK name exists but definition is incorrect';
+  end if;
+  if not exists (
+    select 1 from pg_constraint c
+    where c.conrelid = 'public.case_documents'::regclass
+      and c.conname = 'case_documents_storage_metadata_consistency'
+      and c.contype = 'c'
+      and pg_get_constraintdef(c.oid) ilike '%storage_status = ''metadata_only''%'
+      and pg_get_constraintdef(c.oid) ilike '%storage_key IS NULL%'
+  ) then
+    raise exception 'Storage consistency constraint name exists but definition is incorrect';
+  end if;
+  if not exists (
+    select 1 from pg_constraint c
+    where c.conrelid = 'public.case_documents'::regclass
+      and c.conname = 'case_documents_idempotency_pair'
+      and c.contype = 'c'
+      and pg_get_constraintdef(c.oid) ilike '%idempotency_key IS NULL%'
+      and pg_get_constraintdef(c.oid) ilike '%request_fingerprint IS NULL%'
+  ) then
+    raise exception 'Idempotency constraint name exists but definition is incorrect';
+  end if;
+
   if not exists (select 1 from pg_indexes where schemaname='public' and indexname='case_documents_idempotency_unique_idx'
     and indexdef ilike '%UNIQUE INDEX%ON public.case_documents USING btree (office_id, created_by, idempotency_key)%'
     and indexdef ilike '%WHERE (idempotency_key IS NOT NULL)%') then
