@@ -95,6 +95,28 @@ BEGIN
     END IF;
   END LOOP;
 
+  -- Collation is part of the column catalog contract too: collatable columns
+  -- must retain the database DEFAULT collation, while non-collatable types
+  -- must have no collation. This catches same-typed columns with altered locale.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_attribute a
+    JOIN pg_type ty ON ty.oid = a.atttypid
+    JOIN pg_class t ON t.oid = a.attrelid
+    JOIN pg_namespace tn ON tn.oid = t.relnamespace
+    LEFT JOIN pg_collation c ON c.oid = a.attcollation
+    LEFT JOIN pg_namespace cn ON cn.oid = c.collnamespace
+    WHERE tn.nspname = '${expected_schema}' AND t.relname = 'case_documents'
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND (
+        (ty.typcollation = 0 AND a.attcollation <> 0)
+        OR
+        (ty.typcollation <> 0 AND NOT (c.collname = 'default' AND cn.nspname = 'pg_catalog'))
+      )
+  ) THEN
+    RAISE EXCEPTION 'column collation differs from the default migration contract';
+  END IF;
+
   -- Assert the exact default-expression inventory, not only the presence of expected fragments.
   FOR col IN SELECT * FROM (VALUES
     ('id','gen_random_uuid()'),
