@@ -188,14 +188,14 @@ try {
   assert.equal(createAudit.rows.filter(row => row.action === "create").length, 1, "successful create must be audited once");
 
   await pool.query(`
-    create or replace function reject_document_mutation_audit() returns trigger language plpgsql as $
+    create or replace function reject_document_mutation_audit() returns trigger language plpgsql as $fn$
     begin
       if new.entity_type = 'case_document' and new.action in ('update','delete') then
         raise exception 'forced audit failure for rollback test';
       end if;
       return new;
     end;
-    $;
+    $fn$;
     create trigger reject_document_mutation_audit_trigger
       before insert on audit_logs for each row execute function reject_document_mutation_audit();
   `);
