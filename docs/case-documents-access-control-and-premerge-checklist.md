@@ -8,8 +8,8 @@ Scope: case-document metadata only. This checklist does not authorize file uploa
 - Pull request: [#4](https://github.com/fzhtftp-commits/Dadban/pull/4)
 - Head branch: `feature/case-documents-metadata`
 - Base branch: `feature/case-actions`
-- Verified head commit at this review: `55bc9798ac8403e6bf054b9056de729fb8618ef3`
-- GitHub Actions run #94: [success](https://github.com/fzhtftp-commits/Dadban/actions/runs/38591210901). Its `head_sha` exactly matches the PR head SHA above.
+- Verified code/test head before this documentation refresh: `64e90f6c0e7e7541c337714cde144c846481de92`
+- GitHub Actions run #104: [success](https://github.com/fzhtftp-commits/Dadban/actions/runs/38594257374). Its `head_sha` exactly matches code/test head `64e90f6c0e7e7541c337714cde144c846481de92`.
 - The completed job passed `npm install`, `npm test`, syntax checks for the server/UI, metadata migration and office-isolation checks in disposable PostgreSQL, and two-office HTTP integration checks.
 - PR #4 was verified open, Draft, and not merged; its base remains `feature/case-actions`. No production deployment or operational database migration was performed.
 - After any new commit, re-check the latest run and require its `head_sha` to equal the current PR head. A green run for an older SHA is not evidence that the current head passed.
@@ -48,8 +48,8 @@ Implementation notes:
 ## Pre-merge checklist
 
 ### Automated checks
-- [x] Latest GitHub Actions run #94 is successful and its `head_sha` equals the reviewed PR head SHA `236f905670f4a98a7bb9b5acf00f1ffacf666e0b`.
-- [x] Unit tests, JavaScript syntax checks, migration checks, and two-office HTTP integration tests passed on that exact SHA.
+- [x] GitHub Actions run #104 passed on code/test head `64e90f6c0e7e7541c337714cde144c846481de92`; a new CI run is required for this documentation refresh.
+- [x] Unit tests, JavaScript syntax checks, migration checks, two-office HTTP integration tests, and all five role/action matrix cases passed on that exact SHA.
 - [ ] After this checklist update, verify the new branch head and its own Actions result before marking CI current again.
 - [x] Add positive and negative role/action integration tests for all five roles; confirm the latest CI run passes on the exact current head SHA.
 - [ ] Regression coverage remains for session expiry/revocation, Origin/CSRF failures, office isolation, soft deletion, audit atomicity, idempotency/replay, rollback failure, pool-client reuse, connection acquisition failure, sequential requests, and concurrent requests.
