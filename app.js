@@ -174,6 +174,7 @@ async function loadDashboard() {
           <b>${escapeHtml(item.title || "جلسه پرونده")}</b>
           <span>${escapeHtml(formatDateTime(item.next_hearing_at))}</span>
           <small>${escapeHtml(location)} · پرونده ${escapeHtml(item.case_number || "—")}</small>
+          <a href="calendar.html?case_id=${encodeURIComponent(item.id)}">مشاهده جلسات پرونده</a>
         </div>`;
       }).join("");
     }

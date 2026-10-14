@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>دادبان | تقویم و جلسات</title><link rel="stylesheet" href="styles.css">
+<style>
+.calendar-toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin-bottom:18px}.calendar-toolbar .field{min-width:170px;flex:1}.calendar-layout{display:grid;grid-template-columns:minmax(280px,360px) minmax(0,1fr);gap:18px}.calendar-layout .card{min-width:0}.calendar-form .field{margin-bottom:13px}.calendar-form label{display:block;margin-bottom:7px;font-size:13px;font-weight:700}.calendar-form input,.calendar-form select,.calendar-form textarea,.calendar-toolbar input,.calendar-toolbar select{width:100%;padding:11px;border:1px solid var(--line);border-radius:9px;background:#fff;font:inherit;color:var(--text)}.calendar-form textarea{resize:vertical}.calendar-form .form-actions{display:flex;gap:10px;flex-wrap:wrap}.calendar-table-wrap{overflow:auto}.calendar-table{width:100%;border-collapse:collapse;min-width:720px}.calendar-table th,.calendar-table td{text-align:right;padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}.calendar-table th{font-size:12px;color:var(--muted);background:#f8fafc}.calendar-table td{font-size:13px}.calendar-actions{display:flex;gap:6px;flex-wrap:wrap}.calendar-actions button{border:1px solid var(--line);border-radius:7px;background:#fff;padding:6px 9px;cursor:pointer;font:inherit}.calendar-actions .delete-hearing{color:#a53b3b}.calendar-help{font-size:12px;color:var(--muted);line-height:1.8}.calendar-message{margin:12px 0;padding:10px 12px;border-radius:8px;background:#f1f5f9}.calendar-message.error{color:#a53b3b;background:#fff1f1}.calendar-message.success{color:#286746;background:#effaf3}.calendar-stat{display:flex;gap:10px;align-items:center}.calendar-stat strong{font-size:22px;color:var(--navy)}@media(max-width:950px){.calendar-layout{grid-template-columns:1fr}} 
+</style></head>
+<body><div class="app-shell">
+<aside class="sidebar"><div class="brand"><div class="brand-mark">⚖</div><div><strong>دادبان</strong><span>مدیریت دفتر وکالت</span></div></div>
+<nav><a href="index.html">⌂ داشبورد</a><a href="clients.html">👥 موکل‌ها</a><a href="cases.html">▣ پرونده‌ها</a><a class="active" href="calendar.html">◷ تقویم و جلسات</a><a href="#">✓ اقدامات پرونده</a><a href="#">▤ اسناد و مدارک</a><a href="#">﷼ امور مالی</a><a href="#">▥ گزارش‌ها</a></nav>
+<div class="side-bottom"><a href="#">⚙ تنظیمات</a><button class="logout-btn" id="logoutBtn" type="button">⇥ خروج از برنامه</button><div class="secure">🔒 امنیت چندلایه فعال</div></div></aside>
+<main><header class="topbar"><div><div class="eyebrow">مدیریت دفتر وکالت</div><h1>تقویم و جلسات دادرسی</h1></div><div class="top-actions"><div class="user"><div class="avatar">و</div><div><b>مدیر دفتر</b><small>در حال بررسی نشست</small></div></div></div></header>
+<section class="hero"><div><span class="badge">● مدیریت جلسات</span><h2>جلسات دفتر را یک‌جا مدیریت کنید</h2><p>ثبت جلسه، اتصال به پرونده، یادداشت و پیگیری وضعیت جلسه.</p></div><div class="calendar-stat"><strong id="hearingCount">—</strong><span>جلسه در فهرست</span></div></section>
+<div id="pageMessage" class="calendar-message" hidden></div>
+<section class="calendar-toolbar">
+<div class="field"><label for="filterCaseId">پرونده</label><select id="filterCaseId"><option value="">همه پرونده‌ها</option></select></div>
+<div class="field"><label for="filterStatus">وضعیت جلسه</label><select id="filterStatus"><option value="">همه وضعیت‌ها</option><option value="scheduled">برنامه‌ریزی‌شده</option><option value="completed">برگزارشده</option><option value="postponed">به تعویق افتاده</option><option value="cancelled">لغوشده</option></select></div>
+<div class="field"><label for="filterFrom">از تاریخ</label><input id="filterFrom" type="date"></div>
+<div class="field"><label for="filterTo">تا تاریخ</label><input id="filterTo" type="date"></div>
+<button class="secondary-btn" id="clearFilters" type="button">پاک‌کردن فیلترها</button>
+</section>
+<section class="calendar-layout">
+<div class="card"><div class="section-head"><h3 id="formTitle">ثبت جلسه جدید</h3></div>
+<form id="hearingForm" class="calendar-form">
+<input type="hidden" id="hearingId">
+<div class="field"><label for="caseId">پرونده مرتبط *</label><select id="caseId" required><option value="">در حال دریافت پرونده‌ها...</option></select></div>
+<div class="field"><label for="hearingAt">تاریخ و ساعت جلسه *</label><input id="hearingAt" type="datetime-local" required></div>
+<div class="field"><label for="hearingType">نوع جلسه *</label><input id="hearingType" maxlength="60" value="جلسه دادرسی" required></div>
+<div class="field"><label for="courtName">مرجع قضایی</label><input id="courtName" maxlength="200"></div>
+<div class="field"><label for="branchName">شعبه</label><input id="branchName" maxlength="120"></div>
+<div class="field"><label for="hearingStatus">وضعیت</label><select id="hearingStatus"><option value="scheduled">برنامه‌ریزی‌شده</option><option value="completed">برگزارشده</option><option value="postponed">به تعویق افتاده</option><option value="cancelled">لغوشده</option></select></div>
+<div class="field"><label for="reminderMinutes">یادآوری پیش از جلسه</label><select id="reminderMinutes"><option value="0">بدون یادآوری</option><option value="60">۱ ساعت</option><option value="1440" selected>۱ روز</option><option value="2880">۲ روز</option><option value="10080">۱ هفته</option></select><p class="calendar-help">در این نسخه زمان یادآوری ذخیره می‌شود؛ ارسال اعلان خودکار در مرحلهٔ بعدی تکمیل خواهد شد.</p></div>
+<div class="field"><label for="hearingNotes">یادداشت</label><textarea id="hearingNotes" rows="3" maxlength="5000"></textarea></div>
+<div class="form-actions"><button class="primary" id="saveHearing" type="submit">ثبت جلسه</button><button class="secondary-btn" id="cancelEdit" type="button" hidden>لغو ویرایش</button></div>
+</form></div>
+<div class="card"><div class="section-head"><h3>فهرست جلسات</h3><button class="secondary-btn" id="refreshHearings" type="button">بروزرسانی</button></div>
+<div class="calendar-table-wrap"><table class="calendar-table"><thead><tr><th>تاریخ و ساعت</th><th>پرونده / موکل</th><th>مرجع و شعبه</th><th>وضعیت</th><th>یادآوری</th><th>عملیات</th></tr></thead><tbody id="hearingsBody"><tr><td colspan="6" class="empty-state">در حال دریافت جلسات...</td></tr></tbody></table></div>
+</div></section>
+</main></div><script src="app.js"></script><script src="hearings.js"></script></body></html>
