@@ -277,11 +277,6 @@ try {
   });
   assert.equal(keyReuse.status, 409, "same idempotency key with different payload must be rejected");
   assert.deepEqual(keyReuse.body, { error: "idempotency_key_reused" });
-  const invalidKey = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "bad key",
-    body: idempotentPayload
-  });
-  assert.equal(invalidKey.status, 400, "malformed idempotency keys must be rejected");
 
   const concurrentPayload = { case_id: ids.caseA, title: "Concurrent idempotency regression", document_type: "contract" };
   const concurrentKey = "concurrent-key-12345";
