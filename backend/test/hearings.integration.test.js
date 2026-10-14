@@ -41,7 +41,7 @@ let hearingId;
 const cookie = (token, csrf) => `dadban_session=${token}; dadban_csrf=${csrf}`;
 const headersA = { cookie: cookie(tokenA, csrfA), origin, "x-csrf-token": csrfA, "content-type": "application/json" };
 const headersB = { cookie: cookie(tokenB, csrfB), origin, "x-csrf-token": csrfB, "content-type": "application/json" };
-const headersBadCsrf = { ...headersA, "x-csrf-token": "incorrect-csrf-token" };
+const headersBadCsrf = { ...headersA, cookie: cookie(tokenA, "incorrect-csrf-token"), "x-csrf-token": "incorrect-csrf-token" };
 const headersBadOrigin = { ...headersA, origin: "https://attacker.example" };
 const headersExpired = { cookie: cookie(tokenExpired, csrfExpired), origin, "x-csrf-token": csrfExpired, "content-type": "application/json" };
 const future = (days) => new Date(Date.now() + days * 86400000);
