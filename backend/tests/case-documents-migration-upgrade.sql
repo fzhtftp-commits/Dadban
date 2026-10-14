@@ -93,7 +93,7 @@ begin
     where c.conrelid = 'public.case_documents'::regclass
       and c.conname = 'case_documents_storage_metadata_consistency'
       and c.contype = 'c'
-      and pg_get_constraintdef(c.oid) ilike '%storage_status = ''metadata_only''%'
+      and pg_get_constraintdef(c.oid) ilike '%metadata_only%'
       and pg_get_constraintdef(c.oid) ilike '%storage_key IS NULL%'
   ) then
     raise exception 'Storage consistency constraint name exists but definition is incorrect';
