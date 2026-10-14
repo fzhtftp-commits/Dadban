@@ -630,8 +630,12 @@ BEGIN
     JOIN pg_namespace n ON n.oid=t.relnamespace
     WHERE n.nspname='${expected_schema}' AND t.relname='case_documents'
       AND t.relkind='r' AND t.relpersistence='p' AND NOT t.relispartition
+      AND t.relam = (
+        SELECT am.oid FROM pg_am am
+        WHERE am.amname = current_setting('default_table_access_method')
+      )
   ) THEN
-    RAISE EXCEPTION 'table relation kind, persistence, or partition status differs from migration contract';
+    RAISE EXCEPTION 'table relation kind, persistence, partition status, or access method differs from migration contract';
   END IF;
 
   -- Each index is also a pg_class relation. The migration creates ordinary
