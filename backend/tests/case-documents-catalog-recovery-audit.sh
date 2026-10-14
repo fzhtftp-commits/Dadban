@@ -540,6 +540,18 @@ BEGIN
     RAISE EXCEPTION 'table relation kind or persistence differs from migration contract';
   END IF;
 
+  -- Migration 004 does not enable row-level security or change replica identity.
+  -- These flags alter row visibility/enforcement and logical-replication behavior
+  -- without changing the column, constraint, or index inventories.
+  IF EXISTS (
+    SELECT 1 FROM pg_class t
+    JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname='${expected_schema}' AND t.relname='case_documents'
+      AND (t.relrowsecurity OR t.relforcerowsecurity OR t.relreplident <> 'd')
+  ) THEN
+    RAISE EXCEPTION 'row-security or replica-identity flags differ from migration contract';
+  END IF;
+
   IF EXISTS (
     SELECT 1 FROM pg_constraint c
     WHERE c.conrelid='${expected_schema}.case_documents'::regclass
