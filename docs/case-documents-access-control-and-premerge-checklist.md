@@ -157,3 +157,12 @@ Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/t
 - Exact tested head SHA: 787f35fcb7b1e926758fbd91ade558d2c4dab72e; this matched PR #4's head when verified. The run's backend-tests check completed with conclusion success; npm tests, migration upgrade/rollback, the new incompatible-table negative test, and two-office HTTP isolation all passed.
 - The expected SQL failure is caught by the shell harness and reported as a passing negative test; it does not intentionally leave the workflow red. The test is limited to the disposable PostgreSQL service.
 - This report update creates a new commit, so the latest Actions result must be checked against the new exact PR head before saying the branch's final CI is current.
+
+### Negative test for an incompatible same-named index — 2026-10-14
+
+- Added `backend/tests/case-documents-negative-index-migration.sh` as a complement to the existing incompatible-table test.
+- The script creates a dedicated disposable schema and `case_documents` fixture, then creates `case_documents_office_created_idx` with the deliberately wrong indexed column (`title`). It extracts the exact one-line `CREATE INDEX case_documents_office_created_idx` statement from migration 004 and executes it with the probe schema first in `search_path`.
+- PostgreSQL must reject the statement because that index name already exists in the probe schema. The harness catches the expected nonzero exit and reports PASS; if PostgreSQL unexpectedly accepts it, the test exits nonzero. A cleanup trap drops only the probe schema and removes the temporary SQL file.
+- **Coverage boundary:** this is a focused test of the actual index-creation statement, not a claim that the full migration runs from start to finish against an already-created compatible table. The separate negative-table test exercises the full migration's table-conflict path. Both use only the GitHub Actions disposable PostgreSQL service.
+- The workflow now runs both negative tests before HTTP integration tests. Do not mark the new index test CI-verified until the latest Actions run completes successfully with a `head_sha` exactly matching PR #4's current head. PR #4 must remain Draft and unmerged; no `main`, operational database, or Render changes are in scope.
+
