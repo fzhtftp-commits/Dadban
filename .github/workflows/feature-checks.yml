@@ -26,7 +26,9 @@ jobs:
       - name: Install backend dependencies
         run: npm install --prefix backend
       - name: Check integration test syntax
-        run: node --check backend/test/hearings.integration.test.js
+        run: |
+          node --check backend/test/hearings.integration.test.js
+          node --check backend/test/hearings-ui-contract.test.js
   hearings-integration:
     runs-on: ubuntu-latest
     services:
