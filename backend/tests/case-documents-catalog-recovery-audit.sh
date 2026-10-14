@@ -551,6 +551,24 @@ BEGIN
     RAISE EXCEPTION 'FK/CHECK validation or inheritance flags differ from migration contract';
   END IF;
 
+  -- Migration 004 declares no triggers or rewrite rules. Unexpected user
+  -- triggers/rules could add hidden side effects even if columns and indexes
+  -- still match, so audit their catalog inventory explicitly.
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger tr
+    WHERE tr.tgrelid='${expected_schema}.case_documents'::regclass
+      AND NOT tr.tgisinternal
+  ) THEN
+    RAISE EXCEPTION 'unexpected user-defined trigger on case_documents';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_rewrite rw
+    WHERE rw.ev_class='${expected_schema}.case_documents'::regclass
+  ) THEN
+    RAISE EXCEPTION 'unexpected rewrite rule on case_documents';
+  END IF;
+
   -- This migration creates a standalone table; constraints must be local rather
   -- than inherited/partition-parent constraints. Assert catalog provenance too.
   IF EXISTS (
