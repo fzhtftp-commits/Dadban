@@ -47,3 +47,20 @@ test("case_id list filter uses a bound SQL parameter and dates reject impossible
  assert.match(server, /where\.push\(\`d\.case_id = \$\$\{values\.length\}\`\)/);
  assert.match(server, /date\.toISOString\(\)\.slice\(0,10\) === value/);
 });
+
+test("document transactions guard rollback failures and always release acquired clients", () => {
+ assert.match(server, /const rollbackQuietly = async \(client, context\) =>/);
+ assert.match(server, /catch \(rollbackError\)[\s\S]*?Database rollback failed/);
+ const routeStart = server.indexOf('app.post("/api/case-documents"');
+ const routeEnd = server.indexOf('app.use\(\(_req, res\) =>', routeStart);
+ const routes = server.slice(routeStart, routeEnd);
+ assert.equal((routes.match(/finally\{if\(c\)c\.release\(\);\}/g) || []).length, 3);
+ assert.equal((routes.match(/try\{c=await pool\.connect\(\)/g) || []).length, 3);
+ assert.doesNotMatch(routes, /catch\(error\)\{await c\.query\("rollback"\)/);
+});
+test("unhandled and oversized request errors return sanitized JSON", () => {
+ assert.match(server, /app\.use\(\(error, _req, res, next\) =>/);
+ assert.match(server, /error: "request_too_large"/);
+ assert.match(server, /error: "invalid_json"/);
+ assert.match(server, /error: "internal_server_error"/);
+});
