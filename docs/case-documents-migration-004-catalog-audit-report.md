@@ -3,6 +3,13 @@
 Date: 2026-10-14
 Scope: `backend/migrations/004_case_documents_metadata.sql` on `feature/case-documents-metadata`
 
+## Latest verified continuation (2026-10-14)
+
+- Starting head verified before this change: `66e0f20ea85124f84ca3671cfb0fd69b7379d288`; PR #4 was open, Draft, unmerged, base `feature/case-actions`. Its matching report CI [Run 38627425595](https://github.com/fzhtftp-commits/Dadban/actions/runs/38627425595) completed `success` on that exact SHA; the preceding trigger/rule audit [Run 38627399692](https://github.com/fzhtftp-commits/Dadban/actions/runs/38627399692) also completed `success` on exact test SHA `da1e5015575051817a9f23dd10c36b432e3f1046`.
+- Next independent catalog gap added in test commit `967f4af06255a9bab82e9048f82b2fc98b033cfd`: check `pg_class.relrowsecurity`, `relforcerowsecurity`, and `relreplident`. Because migration 004 neither enables row-level security nor changes replica identity, the expected catalog state is RLS disabled, forced RLS disabled, and replica identity default (`'d'`). These flags affect row access/enforcement and replication semantics and are not covered by column, constraint, index, trigger, or rewrite-rule checks.
+- The migration SQL is unchanged. Test execution remains confined to the disposable PostgreSQL service in GitHub Actions. CI for this test commit and this report update must be verified by exact SHA before calling the change green.
+- No changes were made to `main`, any operational database, or Render. PR #4 must remain Draft and unmerged.
+
 ## Current PR and CI evidence
 
 - PR #4 is open, Draft, and unmerged; base branch is `feature/case-actions`.
