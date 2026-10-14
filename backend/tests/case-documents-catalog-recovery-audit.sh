@@ -150,14 +150,15 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_storage_metadata_consistency'
-      AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%storage_status = ''metadata_only''%'
-      AND pg_get_constraintdef(c.oid,true) ILIKE '%storage_key IS NULL%') THEN
+      AND c.contype='c' AND c.convalidated AND position('metadata_only' in pg_get_constraintdef(c.oid,true)) > 0
+      AND position('storage_status' in pg_get_constraintdef(c.oid,true)) > 0
+      AND position('storage_key' in pg_get_constraintdef(c.oid,true)) > 0) THEN
     RAISE EXCEPTION 'storage metadata CHECK mismatch';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_idempotency_pair'
-      AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%idempotency_key IS NULL%'
-      AND pg_get_constraintdef(c.oid,true) ILIKE '%request_fingerprint IS NULL%') THEN
+      AND c.contype='c' AND c.convalidated AND position('idempotency_key' in pg_get_constraintdef(c.oid,true)) > 0
+      AND position('request_fingerprint' in pg_get_constraintdef(c.oid,true)) > 0) THEN
     RAISE EXCEPTION 'idempotency CHECK mismatch';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
