@@ -19,6 +19,8 @@ const tokenA = "test-session-office-a-" + randomBytes(24).toString("hex");
 const csrfA = "test-csrf-office-a-" + randomBytes(24).toString("hex");
 const tokenB = "test-session-office-b-" + randomBytes(24).toString("hex");
 const csrfB = "test-csrf-office-b-" + randomBytes(24).toString("hex");
+const tokenExpired = "test-session-expired-" + randomBytes(24).toString("hex");
+const csrfExpired = "test-csrf-expired-" + randomBytes(24).toString("hex");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const ids = {
   officeA: "10000000-0000-4000-8000-000000000001",
@@ -39,6 +41,9 @@ let hearingId;
 const cookie = (token, csrf) => `dadban_session=${token}; dadban_csrf=${csrf}`;
 const headersA = { cookie: cookie(tokenA, csrfA), origin, "x-csrf-token": csrfA, "content-type": "application/json" };
 const headersB = { cookie: cookie(tokenB, csrfB), origin, "x-csrf-token": csrfB, "content-type": "application/json" };
+const headersBadCsrf = { ...headersA, "x-csrf-token": "incorrect-csrf-token" };
+const headersBadOrigin = { ...headersA, origin: "https://attacker.example" };
+const headersExpired = { cookie: cookie(tokenExpired, csrfExpired), origin, "x-csrf-token": csrfExpired, "content-type": "application/json" };
 const future = (days) => new Date(Date.now() + days * 86400000);
 const iso = (date) => date.toISOString();
 async function assertStatus(response, expected) {
@@ -76,6 +81,7 @@ before(async () => {
   await db.query("insert into clients (id, office_id, client_type, full_name, national_id) values ($1, $2, 'individual', $3, $4), ($5, $6, 'individual', $7, $8)", [ids.clientA, ids.officeA, "موکل الف", "0012345678", ids.clientB, ids.officeB, "موکل ب", "0012345679"]);
   await db.query("insert into cases (id, office_id, client_id, case_number, title) values ($1, $2, $3, $4, $5), ($6, $2, $3, $7, $8), ($9, $10, $11, $12, $13)", [ids.caseA1, ids.officeA, ids.clientA, "A-001", "پرونده آزمایشی اول", ids.caseA2, "A-002", "پرونده آزمایشی دوم", ids.caseB, ids.officeB, ids.clientB, "B-001", "پرونده دفتر دیگر"]);
   await db.query("insert into auth_sessions (user_id, office_id, token_hash, csrf_hash, expires_at) values ($1, $2, $3, $4, now() + interval '1 hour'), ($5, $6, $7, $8, now() + interval '1 hour')", [ids.userA, ids.officeA, hash(tokenA), hash(csrfA), ids.userB, ids.officeB, hash(tokenB), hash(csrfB)]);
+  await db.query("insert into auth_sessions (user_id, office_id, token_hash, csrf_hash, expires_at) values ($1, $2, $3, $4, $5)", [ids.userA, ids.officeA, hash(tokenExpired), hash(csrfExpired), new Date(Date.now() - 60000)]);
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: path.join(root, "backend"),
     env: { ...process.env, DATABASE_URL: databaseUrl, NODE_ENV: "test", CORS_ORIGIN: origin, PORT: String(port) },
@@ -171,6 +177,57 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
     });
     assert.equal(crossOfficeCreate.status, 400);
     assert.equal((await db.query("select deleted_at from hearings where id = $1", [officeAHearingId])).rows[0].deleted_at, null);
+  });
+
+
+  await t.test("expired sessions are rejected before hearing data is exposed", async () => {
+    const list = await api("/api/hearings", { headers: headersExpired });
+    assert.equal(list.status, 401);
+    assert.equal((await list.json()).error, "authentication_required");
+    const create = await api("/api/hearings", { method: "POST", headers: headersExpired, body: { case_id: ids.caseA1, hearing_at: iso(future(2)), hearing_type: "نشست منقضی" } });
+    assert.equal(create.status, 401);
+    assert.equal((await create.json()).error, "authentication_required");
+  });
+
+  await t.test("invalid CSRF token and untrusted origin reject mutations without changing records", async () => {
+    const created = await api("/api/hearings", { method: "POST", body: { case_id: ids.caseA1, hearing_at: iso(future(10)), hearing_type: "جلسه حفاظت CSRF" } });
+    await assertStatus(created, 201);
+    const id = (await created.json()).data.id;
+    const badCreate = await api("/api/hearings", { method: "POST", headers: headersBadCsrf, body: { case_id: ids.caseA1, hearing_at: iso(future(11)), hearing_type: "نباید ثبت شود" } });
+    assert.equal(badCreate.status, 403);
+    assert.equal((await badCreate.json()).error, "csrf_token_invalid");
+    const badPatch = await api("/api/hearings/" + id, { method: "PATCH", headers: headersBadCsrf, body: { hearing_type: "نباید تغییر کند" } });
+    assert.equal(badPatch.status, 403);
+    assert.equal((await badPatch.json()).error, "csrf_token_invalid");
+    const badDelete = await api("/api/hearings/" + id, { method: "DELETE", headers: headersBadCsrf });
+    assert.equal(badDelete.status, 403);
+    assert.equal((await badDelete.json()).error, "csrf_token_invalid");
+    const badOrigin = await api("/api/hearings/" + id, { method: "PATCH", headers: headersBadOrigin, body: { hearing_type: "origin نامعتبر" } });
+    assert.equal(badOrigin.status, 403);
+    assert.equal((await badOrigin.json()).error, "origin_not_allowed");
+    const unchanged = await db.query("select hearing_type, deleted_at from hearings where id = $1", [id]);
+    assert.equal(unchanged.rows[0].hearing_type, "جلسه حفاظت CSRF");
+    assert.equal(unchanged.rows[0].deleted_at, null);
+    const count = await db.query("select count(*)::int as n from hearings where office_id = $1 and hearing_type = $2 and deleted_at is null", [ids.officeA, "نباید ثبت شود"]);
+    assert.equal(count.rows[0].n, 0);
+  });
+
+  await t.test("invalid hearing identifiers and malformed payloads return controlled errors", async () => {
+    const get = await api("/api/hearings/not-a-uuid");
+    assert.equal(get.status, 400);
+    assert.equal((await get.json()).error, "invalid_hearing_id");
+    const patch = await api("/api/hearings/not-a-uuid", { method: "PATCH", body: { hearing_type: "نامعتبر" } });
+    assert.equal(patch.status, 400);
+    assert.equal((await patch.json()).error, "invalid_hearing_id");
+    const del = await api("/api/hearings/not-a-uuid", { method: "DELETE" });
+    assert.equal(del.status, 400);
+    assert.equal((await del.json()).error, "invalid_hearing_id");
+    const badPayload = await api("/api/hearings", { method: "POST", body: { case_id: "not-a-uuid", hearing_at: "tomorrow", hearing_type: "" } });
+    assert.equal(badPayload.status, 400);
+    assert.equal((await badPayload.json()).error, "invalid_hearing");
+    const missing = await api("/api/hearings/40000000-0000-4000-8000-000000000099", { method: "PATCH", body: { hearing_type: "جلسه" } });
+    assert.equal(missing.status, 404);
+    assert.equal((await missing.json()).error, "hearing_not_found");
   });
 
   await t.test("soft delete hides the hearing, writes audit history, and clears dashboard date", async () => {
