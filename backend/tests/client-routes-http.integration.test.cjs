@@ -128,7 +128,7 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
   await resetIsolatedSchema();
 
   server = spawn(process.execPath, ["src/server.js"], {
-    cwd: require("node:path").resolve(__dirname, "../.."),
+    cwd: require("node:path").resolve(__dirname, ".."),
     env: {
       ...process.env,
       NODE_ENV: "test",
