@@ -40,7 +40,10 @@ const pool = databaseUrl
   : null;
 
 app.disable("x-powered-by");
-app.set("trust proxy", 1);
+// Never trust client-supplied forwarding headers by default. Configure TRUST_PROXY_HOPS
+// only when the deployment edge overwrites forwarding headers and direct origin access is blocked.
+const trustProxyHops = process.env.TRUST_PROXY_HOPS;
+app.set("trust proxy", trustProxyHops && /^\\d+$/.test(trustProxyHops) ? Number(trustProxyHops) : false);
 app.use(helmet());
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: "100kb" }));
