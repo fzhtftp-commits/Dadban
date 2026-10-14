@@ -334,6 +334,65 @@ BEGIN
     RAISE EXCEPTION 'office listing index definition/state mismatch';
   END IF;
 
+  -- Assert exact key attribute order, sort direction, default opclasses, and no
+  -- expression/include columns; names and ILIKE fragments alone are insufficient.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indexrelid = '${expected_schema}.case_documents_idempotency_unique_idx'::regclass
+      AND i.indrelid = '${expected_schema}.case_documents'::regclass
+      AND i.indisunique AND i.indisvalid AND i.indisready
+      AND i.indnkeyatts = 3 AND i.indnatts = 3
+      AND i.indexprs IS NULL
+      AND i.indkey::text = (
+        SELECT string_agg(a.attnum::text, ' ' ORDER BY v.ord)
+        FROM (VALUES (1,'office_id'),(2,'created_by'),(3,'idempotency_key')) v(ord,attname)
+        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attname=v.attname
+      )
+      AND i.indoption::text = '0 0 0'
+      AND regexp_replace(regexp_replace(pg_get_expr(i.indpred,i.indrelid), '[[:space:]()]', '', 'g'), '::text', '', 'g')
+        = 'idempotency_keyISNOTNULL'
+  ) THEN
+    RAISE EXCEPTION 'idempotency index exact catalog definition mismatch';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indexrelid = '${expected_schema}.case_documents_office_case_created_idx'::regclass
+      AND i.indrelid = '${expected_schema}.case_documents'::regclass
+      AND NOT i.indisunique AND i.indisvalid AND i.indisready
+      AND i.indnkeyatts = 3 AND i.indnatts = 3
+      AND i.indexprs IS NULL
+      AND i.indkey::text = (
+        SELECT string_agg(a.attnum::text, ' ' ORDER BY v.ord)
+        FROM (VALUES (1,'office_id'),(2,'case_id'),(3,'created_at')) v(ord,attname)
+        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attname=v.attname
+      )
+      AND i.indoption::text = '0 0 1'
+      AND regexp_replace(regexp_replace(pg_get_expr(i.indpred,i.indrelid), '[[:space:]()]', '', 'g'), '::text', '', 'g')
+        = 'deleted_atISNULL'
+  ) THEN
+    RAISE EXCEPTION 'office/case index exact catalog definition mismatch';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indexrelid = '${expected_schema}.case_documents_office_created_idx'::regclass
+      AND i.indrelid = '${expected_schema}.case_documents'::regclass
+      AND NOT i.indisunique AND i.indisvalid AND i.indisready
+      AND i.indnkeyatts = 2 AND i.indnatts = 2
+      AND i.indexprs IS NULL
+      AND i.indkey::text = (
+        SELECT string_agg(a.attnum::text, ' ' ORDER BY v.ord)
+        FROM (VALUES (1,'office_id'),(2,'created_at')) v(ord,attname)
+        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attname=v.attname
+      )
+      AND i.indoption::text = '0 1'
+      AND regexp_replace(regexp_replace(pg_get_expr(i.indpred,i.indrelid), '[[:space:]()]', '', 'g'), '::text', '', 'g')
+        = 'deleted_atISNULL'
+  ) THEN
+    RAISE EXCEPTION 'office listing index exact catalog definition mismatch';
+  END IF;
+
   -- Prove the inspection logic detects same-named but structurally wrong objects.
   IF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid='${bad_schema}.case_documents'::regclass AND a.attname='case_id' AND a.atttypid='uuid'::regtype AND a.attnum>0 AND NOT a.attisdropped) THEN
     RAISE EXCEPTION 'incompatible table fixture was not detected';
