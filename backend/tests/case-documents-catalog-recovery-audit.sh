@@ -455,7 +455,7 @@ BEGIN
       SELECT 1
       FROM pg_index i
       JOIN pg_class idx ON idx.oid=i.indexrelid
-      JOIN pg_opclass opc ON opc.oid = (i.indclass::oid[])[expected.key_ordinal - 1]
+      JOIN pg_opclass opc ON opc.oid = i.indclass[expected.key_ordinal - 1]
       WHERE i.indrelid='${expected_schema}.case_documents'::regclass
         AND idx.relname=expected.index_name
         AND opc.opcname=expected.opclass_name
