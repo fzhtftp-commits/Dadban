@@ -74,7 +74,7 @@ This remains a repository audit with isolated controller tests, not a full brows
 - CI setup: disposable PostgreSQL 16 service with synthetic office, user, and session rows; the test starts the actual backend on a local runner port and calls it over HTTP.
 - Required assertions: invalid national-code checksum returns HTTP 400 on client POST and PATCH; invalid CSRF returns HTTP 403; valid client creation returns HTTP 201 and persists the client plus audit row; valid client edit returns HTTP 200 and persists normalized national code, changed name, and audit row.
 - Safety boundary: only the temporary CI service database is initialized/dropped. No production URL, Render service, or main-branch file is used by this test.
-- Verification status for the previous real-HTTP suite: successful on prior head `ddacb47e1dee8e04c52270f0360d01d228906343` (GitHub Actions runs #66 and #67). The newly added office-isolation and audit-failure rollback cases are **pending CI on the new exact head SHA**; do not infer their success from those earlier runs.
+- Verification status for the previous real-HTTP suite: successful on prior head `ddacb47e1dee8e04c52270f0360d01d228906343` (GitHub Actions runs #66 and #67). The newly added office-isolation and audit-failure rollback cases are pending CI on the current branch head; confirm the exact PR head SHA and both push/PR workflow runs before treating this extension as verified.
 
 
 ### CI follow-up: backend launch path correction
