@@ -197,4 +197,5 @@ async function loadDashboard() {
       actionsBody.innerHTML = '<div class="empty-state">دریافت پیگیری‌ها انجام نشد.</div>';
       console.error("Dashboard actions load failed:", error);
     }
-  }}
+  }
+}
