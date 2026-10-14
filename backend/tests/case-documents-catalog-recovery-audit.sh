@@ -1,92 +1,241 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Exercise the recovery runbook's catalog-detection logic against deliberately
-# incompatible objects in a disposable PostgreSQL schema only.
+# Comprehensive catalog audit in the GitHub Actions disposable PostgreSQL DB.
+# Requires the workflow's baseline schema; never point this script at a shared DB.
 : "${PGPASSWORD:?PGPASSWORD must be set for disposable PostgreSQL}"
 PSQL=(psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1)
-probe_schema="case_documents_catalog_audit_probe"
+expected_schema="case_documents_catalog_expected"
+bad_schema="case_documents_catalog_incompatible"
+migration_file="../migrations/004_case_documents_metadata.sql"
+sql_file="$(mktemp)"
 
 cleanup() {
-  "${PSQL[@]}" -c "DROP SCHEMA IF EXISTS ${probe_schema} CASCADE" >/dev/null
+  "${PSQL[@]}" -c "DROP SCHEMA IF EXISTS ${expected_schema} CASCADE; DROP SCHEMA IF EXISTS ${bad_schema} CASCADE" >/dev/null
+  rm -f "${sql_file}"
 }
 trap cleanup EXIT
 
 cleanup
-"${PSQL[@]}" -c "CREATE SCHEMA ${probe_schema}" >/dev/null
+"${PSQL[@]}" -c "CREATE SCHEMA ${expected_schema}; CREATE SCHEMA ${bad_schema}" >/dev/null
 
-# Same table name, but wrong columns; same constraint name, wrong expression;
-# same index name, wrong indexed column. This models a partial/incompatible apply.
+# Apply the actual migration to an isolated schema, resolving baseline parents
+# (offices/cases/users) from public. Do not duplicate the migration DDL here.
+{
+  printf 'SET search_path TO %s, public;\n' "${expected_schema}"
+  cat "${migration_file}"
+} > "${sql_file}"
+"${PSQL[@]}" -f "${sql_file}" >/dev/null
+
+# Build a deliberately incompatible partial-apply fixture in another schema.
 "${PSQL[@]}" <<SQL
-CREATE TABLE ${probe_schema}.case_documents (
+CREATE TABLE ${bad_schema}.case_documents (
   id integer NOT NULL,
   title text,
-  CONSTRAINT case_documents_storage_metadata_consistency CHECK (id > 0)
+  CONSTRAINT case_documents_storage_metadata_consistency CHECK (id > 0),
+  CONSTRAINT case_documents_case_same_office_fk FOREIGN KEY (id) REFERENCES public.offices(id)
 );
 CREATE INDEX case_documents_office_created_idx
-  ON ${probe_schema}.case_documents (title);
+  ON ${bad_schema}.case_documents (title);
 SQL
 
-# These assertions query PostgreSQL catalogs rather than trusting object names.
-# A zero exit means the inspection can distinguish all three mismatches.
+# Compare the full expected column inventory/order/type/nullability and defaults
+# against the actual migration-created table; then verify every FK/check/index
+# by definition, key order, target, predicate and validity—not just by name.
 "${PSQL[@]}" <<SQL
 DO \$audit\$
 DECLARE
-  table_has_expected_case_id boolean;
-  constraint_definition text;
-  index_definition text;
-  index_is_valid boolean;
-  index_is_ready boolean;
+  actual_count integer;
+  expected_count integer;
+  def text;
+  idx record;
+  expected_columns text[][] := ARRAY[
+    ARRAY['id','uuid','true'],
+    ARRAY['office_id','uuid','true'],
+    ARRAY['case_id','uuid','true'],
+    ARRAY['title','character varying(200)','true'],
+    ARRAY['document_type','character varying(32)','true'],
+    ARRAY['description','character varying(3000)','false'],
+    ARRAY['original_filename','character varying(255)','false'],
+    ARRAY['mime_type','character varying(127)','false'],
+    ARRAY['size_bytes','bigint','false'],
+    ARRAY['document_date','date','false'],
+    ARRAY['reference_number','character varying(100)','false'],
+    ARRAY['idempotency_key','character varying(128)','false'],
+    ARRAY['request_fingerprint','character(64)','false'],
+    ARRAY['storage_status','character varying(24)','true'],
+    ARRAY['storage_key','text','false'],
+    ARRAY['created_by','uuid','true'],
+    ARRAY['updated_by','uuid','true'],
+    ARRAY['created_at','timestamp with time zone','true'],
+    ARRAY['updated_at','timestamp with time zone','true'],
+    ARRAY['deleted_at','timestamp with time zone','false']
+  ];
+  col record;
 BEGIN
-  SELECT EXISTS (
-    SELECT 1
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    JOIN pg_attribute a ON a.attrelid = c.oid
-    WHERE n.nspname = '${probe_schema}'
-      AND c.relname = 'case_documents'
-      AND a.attname = 'case_id'
-      AND a.atttypid = 'uuid'::regtype
-      AND a.attnum > 0
-      AND NOT a.attisdropped
-  ) INTO table_has_expected_case_id;
-
-  IF table_has_expected_case_id THEN
-    RAISE EXCEPTION 'catalog audit missed incompatible table columns';
+  SELECT count(*) INTO actual_count
+  FROM pg_attribute a
+  JOIN pg_class t ON t.oid = a.attrelid
+  JOIN pg_namespace n ON n.oid = t.relnamespace
+  WHERE n.nspname = '${expected_schema}' AND t.relname = 'case_documents'
+    AND a.attnum > 0 AND NOT a.attisdropped;
+  expected_count := array_length(expected_columns, 1);
+  IF actual_count <> expected_count THEN
+    RAISE EXCEPTION 'column count mismatch: expected %, got %', expected_count, actual_count;
   END IF;
 
-  SELECT pg_get_constraintdef(con.oid, true)
-    INTO constraint_definition
-  FROM pg_constraint con
-  JOIN pg_class c ON c.oid = con.conrelid
-  JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = '${probe_schema}'
-    AND c.relname = 'case_documents'
-    AND con.conname = 'case_documents_storage_metadata_consistency';
+  FOR col IN SELECT x[1] AS name, x[2] AS typ, x[3] AS notnull
+             FROM unnest(expected_columns) AS x LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_attribute a
+      JOIN pg_class t ON t.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = '${expected_schema}' AND t.relname = 'case_documents'
+        AND a.attname = col.name AND format_type(a.atttypid, a.atttypmod) = col.typ
+        AND a.attnotnull = col.notnull::boolean
+        AND a.attnum = (SELECT min(a2.attnum) + (
+          SELECT count(*) FROM pg_attribute a3
+          WHERE a3.attrelid = a.attrelid AND a3.attnum > 0 AND NOT a3.attisdropped
+            AND a3.attnum < a.attnum
+        ) FROM pg_attribute a2 WHERE a2.attrelid = a.attrelid AND a2.attnum > 0 AND NOT a2.attisdropped)
+    ) THEN
+      RAISE EXCEPTION 'column missing or mismatched (name/type/nullability/order): % / % / %', col.name, col.typ, col.notnull;
+    END IF;
+  END LOOP;
 
-  IF constraint_definition IS NULL OR constraint_definition NOT LIKE '%id > 0%' THEN
-    RAISE EXCEPTION 'catalog audit failed to identify the mismatched constraint definition: %', constraint_definition;
+  -- Defaults are material to recovery compatibility; compare their catalog expressions.
+  IF (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname='id') NOT LIKE '%gen_random_uuid%' THEN
+    RAISE EXCEPTION 'id default mismatch';
+  END IF;
+  IF (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname='document_type') NOT LIKE '%other%' THEN
+    RAISE EXCEPTION 'document_type default mismatch';
+  END IF;
+  IF (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname='storage_status') NOT LIKE '%metadata_only%' THEN
+    RAISE EXCEPTION 'storage_status default mismatch';
+  END IF;
+  IF (SELECT count(*) FROM pg_attrdef d JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents') <> 4 THEN
+    RAISE EXCEPTION 'unexpected column default inventory';
   END IF;
 
-  SELECT pg_get_indexdef(i.indexrelid), i.indisvalid, i.indisready
-    INTO index_definition, index_is_valid, index_is_ready
-  FROM pg_index i
-  JOIN pg_class idx ON idx.oid = i.indexrelid
-  JOIN pg_namespace n ON n.oid = idx.relnamespace
-  WHERE n.nspname = '${probe_schema}'
-    AND idx.relname = 'case_documents_office_created_idx';
-
-  IF index_definition IS NULL OR index_definition NOT LIKE '%(title)%' THEN
-    RAISE EXCEPTION 'catalog audit failed to identify the mismatched index definition: %', index_definition;
+  -- Exact office-scoped foreign keys: ordered source columns and referenced table/columns.
+  FOR def IN SELECT pg_get_constraintdef(c.oid, true)
+    FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='f'
+  LOOP
+    NULL;
+  END LOOP;
+  IF (SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='f') <> 4 THEN
+    -- Three composite office-scoped FKs plus the direct office_id -> offices(id) FK.
+    RAISE EXCEPTION 'foreign key count mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_case_same_office_fk'
+      AND c.contype='f' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (case_id, office_id) REFERENCES public.cases(id, office_id)%') THEN
+    RAISE EXCEPTION 'case composite FK definition mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_created_by_same_office_fk'
+      AND c.contype='f' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (created_by, office_id) REFERENCES public.users(id, office_id)%') THEN
+    RAISE EXCEPTION 'created_by composite FK definition mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_updated_by_same_office_fk'
+      AND c.contype='f' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (updated_by, office_id) REFERENCES public.users(id, office_id)%') THEN
+    RAISE EXCEPTION 'updated_by composite FK definition mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='f'
+      AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (office_id) REFERENCES public.offices(id)%') THEN
+    RAISE EXCEPTION 'office_id FK definition mismatch';
   END IF;
 
-  IF NOT index_is_valid OR NOT index_is_ready THEN
-    RAISE EXCEPTION 'fixture index unexpectedly invalid/not-ready; expected a valid wrong-definition index';
+  -- Check every CHECK expression (including the inline type and size checks).
+  IF (SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='c') <> 4 THEN
+    RAISE EXCEPTION 'CHECK constraint count mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_storage_metadata_consistency'
+      AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%storage_status = ''metadata_only''%'
+      AND pg_get_constraintdef(c.oid,true) ILIKE '%storage_key IS NULL%') THEN
+    RAISE EXCEPTION 'storage metadata CHECK mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_idempotency_pair'
+      AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%idempotency_key IS NULL%'
+      AND pg_get_constraintdef(c.oid,true) ILIKE '%request_fingerprint IS NULL%') THEN
+    RAISE EXCEPTION 'idempotency CHECK mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_document_type_check'
+      AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%petition%'
+      AND pg_get_constraintdef(c.oid,true) ILIKE '%court_order%' AND pg_get_constraintdef(c.oid,true) ILIKE '%other%') THEN
+    RAISE EXCEPTION 'document_type CHECK mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_size_bytes_check'
+      AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%26214400%'
+      AND pg_get_constraintdef(c.oid,true) ILIKE '%size_bytes >= 0%') THEN
+    RAISE EXCEPTION 'size_bytes CHECK mismatch';
   END IF;
 
-  RAISE NOTICE 'PASS: catalog audit detected missing expected table column, mismatched same-named constraint, and mismatched same-named index';
+  -- PK must be on id; compare index key order, uniqueness, partial predicates,
+  -- validity/readiness, and index ownership rather than trusting index names.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.contype='p' AND c.convalidated AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='${expected_schema}.case_documents'::regclass AND attname='id')]::smallint[]) THEN
+    RAISE EXCEPTION 'primary key definition mismatch';
+  END IF;
+  IF (SELECT count(*) FROM pg_index i JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents') <> 4 THEN
+    RAISE EXCEPTION 'expected primary-key index plus three migration indexes';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND idx.relname='case_documents_idempotency_unique_idx'
+      AND i.indisunique AND i.indisvalid AND i.indisready AND i.indnkeyatts=3
+      AND pg_get_indexdef(i.indexrelid) ILIKE '%(office_id, created_by, idempotency_key)%'
+      AND pg_get_expr(i.indpred,i.indrelid) ILIKE '%idempotency_key IS NOT NULL%') THEN
+    RAISE EXCEPTION 'idempotency index definition/state mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND idx.relname='case_documents_office_case_created_idx'
+      AND NOT i.indisunique AND i.indisvalid AND i.indisready AND i.indnkeyatts=3
+      AND pg_get_indexdef(i.indexrelid) ILIKE '%(office_id, case_id, created_at DESC)%'
+      AND pg_get_expr(i.indpred,i.indrelid) ILIKE '%deleted_at IS NULL%') THEN
+    RAISE EXCEPTION 'office/case index definition/state mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND idx.relname='case_documents_office_created_idx'
+      AND NOT i.indisunique AND i.indisvalid AND i.indisready AND i.indnkeyatts=2
+      AND pg_get_indexdef(i.indexrelid) ILIKE '%(office_id, created_at DESC)%'
+      AND pg_get_expr(i.indpred,i.indrelid) ILIKE '%deleted_at IS NULL%') THEN
+    RAISE EXCEPTION 'office listing index definition/state mismatch';
+  END IF;
+
+  -- Prove the inspection logic detects same-named but structurally wrong objects.
+  IF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid='${bad_schema}.case_documents'::regclass AND a.attname='case_id' AND a.atttypid='uuid'::regtype AND a.attnum>0 AND NOT a.attisdropped) THEN
+    RAISE EXCEPTION 'incompatible table fixture was not detected';
+  END IF;
+  SELECT pg_get_constraintdef(c.oid,true) INTO def
+  FROM pg_constraint c WHERE c.conrelid='${bad_schema}.case_documents'::regclass AND c.conname='case_documents_storage_metadata_consistency';
+  IF def IS NULL OR def NOT ILIKE '%id > 0%' OR def ILIKE '%storage_status%' THEN
+    RAISE EXCEPTION 'incompatible CHECK fixture was not detected: %', def;
+  END IF;
+  SELECT pg_get_constraintdef(c.oid,true) INTO def
+  FROM pg_constraint c WHERE c.conrelid='${bad_schema}.case_documents'::regclass AND c.conname='case_documents_case_same_office_fk';
+  IF def IS NULL OR def NOT ILIKE '%FOREIGN KEY (id) REFERENCES public.offices(id)%' OR def ILIKE '%case_id, office_id%' THEN
+    RAISE EXCEPTION 'incompatible FK fixture was not detected: %', def;
+  END IF;
+  SELECT pg_get_indexdef(i.indexrelid) INTO def
+  FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid
+  WHERE i.indrelid='${bad_schema}.case_documents'::regclass AND idx.relname='case_documents_office_created_idx';
+  IF def IS NULL OR def NOT ILIKE '%(title)%' OR def ILIKE '%(office_id, created_at DESC)%' THEN
+    RAISE EXCEPTION 'incompatible index fixture was not detected: %', def;
+  END IF;
+
+  RAISE NOTICE 'PASS: full migration catalog matches expected columns/defaults/nullability/order, FK/CHECK definitions, PK and index keys/predicates/state; mismatched fixtures detected';
 END
 \$audit\$;
 SQL
 
-echo "PASS: catalog recovery audit detected all three deliberately incompatible objects"
+echo "PASS: comprehensive case_documents catalog audit"
