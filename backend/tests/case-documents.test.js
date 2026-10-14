@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
 const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
+const transactionHelper = await readFile(new URL("../src/document-transaction.js", import.meta.url), "utf8");
 test("schema defaults to metadata-only and enforces same-office foreign keys and size cap", () => {
  assert.match(migration, /storage_status varchar\(24\) not null default 'metadata_only'/);
  assert.match(migration, /size_bytes <= 26214400/);
@@ -49,12 +50,12 @@ test("case_id list filter uses a bound SQL parameter and dates reject impossible
 });
 
 test("document transactions guard rollback failures and always release acquired clients", () => {
- assert.match(server, /const rollbackQuietly = async \(client, context\) =>/);
- assert.match(server, /catch \(rollbackError\)[\s\S]*?Database rollback failed/);
+ assert.match(server, /import \{ rollbackQuietly, releaseClient \} from "\.\/document-transaction\.js"/);
+ assert.match(transactionHelper, /catch \(rollbackError\)[\s\S]*?Database rollback failed/);
  const routeStart = server.indexOf('app.post("/api/case-documents"');
  const routeEnd = server.indexOf('app.use\(\(_req, res\) =>', routeStart);
  const routes = server.slice(routeStart, routeEnd);
- assert.equal((routes.match(/finally\{if\(c\)c\.release\(\);\}/g) || []).length, 3);
+ assert.equal((routes.match(/finally\{releaseClient\(c\);\}/g) || []).length, 3);
  assert.equal((routes.match(/try\{c=await pool\.connect\(\)/g) || []).length, 3);
  assert.doesNotMatch(routes, /catch\(error\)\{await c\.query\("rollback"\)/);
 });
