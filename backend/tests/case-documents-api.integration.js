@@ -56,7 +56,8 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
   }
   if (idempotencyKey !== undefined) headers["idempotency-key"] = idempotencyKey;
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-    method, headers, body: body === undefined ? undefined : JSON.stringify(body)
+    method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(10000)
   });
   return { status: response.status, body: response.status === 204 ? null : await response.json(), headers: { "retry-after": response.headers.get("retry-after") } };
 }
