@@ -247,6 +247,7 @@ try {
     create trigger reject_document_mutation_audit_trigger
       before insert on audit_logs for each row execute function reject_document_mutation_audit();
   `);
+  const createAuditBeforeFailure = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
   const failedCreate = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST",
     body: { case_id: ids.caseA, title: "Create must roll back with audit" }
@@ -256,7 +257,7 @@ try {
   const failedCreateRow = await pool.query("select count(*)::int as count from case_documents where title='Create must roll back with audit'");
   assert.equal(failedCreateRow.rows[0].count, 0, "failed create must roll back the document row");
   const failedCreateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
-  assert.equal(failedCreateAudit.rows[0].count, 0, "failed create must not leave an audit row");
+  assert.equal(failedCreateAudit.rows[0].count, createAuditBeforeFailure.rows[0].count, "failed create must not leave an audit row");
 
   const failedUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Must Roll Back" }
