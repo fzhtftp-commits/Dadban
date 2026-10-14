@@ -185,7 +185,7 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
   });
 
   await t.test("POST /api/clients returns 403 for an invalid CSRF token", async () => {
-    const response = await request("/api/clients", "POST", validClient, { "x-csrf-token": "wrong-csrf-token" });
+    const response = await request("/api/clients", "POST", validClient, { cookie: `dadban_session=${sessionToken}; dadban_csrf=wrong-csrf-token`, "x-csrf-token": "wrong-csrf-token" });
     assert.equal(response.status, 403);
     assert.deepEqual(await response.json(), { error: "csrf_token_invalid" });
     assert.equal((await db.query("select count(*)::int as count from clients")).rows[0].count, 0);
