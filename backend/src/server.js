@@ -140,6 +140,27 @@ const hearingPatchSchema = z.object({
   notes: optionalText
 }).strict().refine((value) => Object.keys(value).length > 0, { message: "At least one field is required" });
 
+const actionCreateSchema = z.object({
+  case_id: z.string().uuid(),
+  title: z.string().trim().min(2).max(200),
+  description: optionalText,
+  due_at: z.string().datetime({ offset: true }).optional().nullable(),
+  status: z.enum(["todo", "in_progress", "completed", "cancelled"]).optional().default("todo"),
+  priority: z.enum(["low", "normal", "high", "urgent"]).optional().default("normal"),
+  assigned_to: z.string().uuid().optional().nullable()
+}).strict();
+
+const actionPatchSchema = z.object({
+  case_id: z.string().uuid().optional(),
+  title: z.string().trim().min(2).max(200).optional(),
+  description: optionalText,
+  due_at: z.string().datetime({ offset: true }).optional().nullable(),
+  status: z.enum(["todo", "in_progress", "completed", "cancelled"]).optional(),
+  priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
+  assigned_to: z.string().uuid().optional().nullable()
+}).strict().refine((value) => Object.keys(value).length > 0, { message: "At least one field is required" });
+
+
 
 const registerSchema = z.object({
   full_name: z.string().trim().min(2).max(160),
@@ -1278,6 +1299,233 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
   } catch (error) {
     await client.query("rollback");
     console.error("Delete hearing failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+
+app.get("/api/actions/assignees", requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `select id, full_name, role from users
+       where office_id = $1 and is_active = true and deleted_at is null
+       order by full_name asc limit 100`,
+      [req.auth.officeId]
+    );
+    return res.json({ data: result.rows });
+  } catch (error) {
+    console.error("List case action assignees failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+app.get("/api/actions", requireAuth, async (req, res) => {
+  const querySchema = z.object({
+    case_id: z.string().uuid().optional(),
+    status: z.enum(["todo", "in_progress", "completed", "cancelled"]).optional(),
+    due_before: z.string().datetime({ offset: true }).optional(),
+    due_after: z.string().datetime({ offset: true }).optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50)
+  }).strict();
+  const parsed = querySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_action_query" });
+  const { case_id, status, due_before, due_after, limit } = parsed.data;
+  if (due_before && due_after && new Date(due_after) > new Date(due_before)) {
+    return res.status(400).json({ error: "invalid_action_date_range" });
+  }
+  const values = [req.auth.officeId];
+  const conditions = ["a.office_id = $1", "a.deleted_at is null", "c.deleted_at is null"];
+  if (case_id) { values.push(case_id); conditions.push(`a.case_id = $${values.length}`); }
+  if (status) { values.push(status); conditions.push(`a.status = $${values.length}`); }
+  if (due_before) { values.push(due_before); conditions.push(`a.due_at <= $${values.length}`); }
+  if (due_after) { values.push(due_after); conditions.push(`a.due_at >= $${values.length}`); }
+  values.push(limit);
+  try {
+    const result = await pool.query(`
+      select a.id, a.case_id, a.title, a.description, a.due_at, a.status, a.priority,
+             a.assigned_to, a.completed_at, a.created_at, a.updated_at,
+              (a.due_at < now() and a.status in ('todo', 'in_progress')) as is_overdue,
+             c.case_number, c.title as case_title,
+             u.full_name as assignee_name
+      from case_actions a
+      join cases c on c.id = a.case_id and c.office_id = a.office_id
+      left join users u on u.id = a.assigned_to and u.office_id = a.office_id and u.deleted_at is null
+      where ${conditions.join(" and ")}
+      order by (a.due_at is null), a.due_at asc, a.created_at desc
+      limit $${values.length}
+    `, values);
+    return res.json({ data: result.rows });
+  } catch (error) {
+    console.error("List case actions failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
+app.get("/api/actions/:id", requireAuth, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  if (!id.success) return res.status(400).json({ error: "invalid_action_id" });
+  try {
+    const result = await pool.query(`
+      select a.*, c.case_number, c.title as case_title, u.full_name as assignee_name
+      from case_actions a
+      join cases c on c.id = a.case_id and c.office_id = a.office_id and c.deleted_at is null
+      left join users u on u.id = a.assigned_to and u.office_id = a.office_id and u.deleted_at is null
+      where a.id = $1 and a.office_id = $2 and a.deleted_at is null
+    `, [id.data, req.auth.officeId]);
+    if (!result.rowCount) return res.status(404).json({ error: "action_not_found" });
+    return res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error("Get case action failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
+app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const parsed = actionCreateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_action" });
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const related = await client.query(
+      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      [data.case_id, req.auth.officeId]
+    );
+    if (!related.rowCount) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_related_case" });
+    }
+    if (data.assigned_to) {
+      const assignee = await client.query(
+        "select id from users where id = $1 and office_id = $2 and is_active = true and deleted_at is null",
+        [data.assigned_to, req.auth.officeId]
+      );
+      if (!assignee.rowCount) {
+        await client.query("rollback");
+        return res.status(400).json({ error: "invalid_assignee" });
+      }
+    }
+    const result = await client.query(`
+      insert into case_actions
+        (office_id, case_id, title, description, due_at, status, priority, assigned_to,
+         created_by, updated_by, completed_at)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10)
+      returning *
+    `, [req.auth.officeId, data.case_id, data.title, data.description ?? null, data.due_at ?? null,
+      data.status, data.priority, data.assigned_to ?? null, req.auth.userId,
+      data.status === "completed" ? new Date() : null]);
+    const action = result.rows[0];
+    await writeAuditLog(client, req.auth, "create", "case_action", action.id, req, {
+      case_id: action.case_id, status: action.status
+    });
+    await client.query("commit");
+    return res.status(201).json({ data: action });
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Create case action failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  const parsed = actionPatchSchema.safeParse(req.body);
+  if (!id.success) return res.status(400).json({ error: "invalid_action_id" });
+  if (!parsed.success) return res.status(400).json({ error: "invalid_action_update" });
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const current = await client.query(
+      "select id, case_id, status from case_actions where id = $1 and office_id = $2 and deleted_at is null for update",
+      [id.data, req.auth.officeId]
+    );
+    if (!current.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "action_not_found" });
+    }
+    const nextCaseId = data.case_id ?? current.rows[0].case_id;
+    const related = await client.query(
+      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      [nextCaseId, req.auth.officeId]
+    );
+    if (!related.rowCount) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_related_case" });
+    }
+    if (Object.hasOwn(data, "assigned_to") && data.assigned_to) {
+      const assignee = await client.query(
+        "select id from users where id = $1 and office_id = $2 and is_active = true and deleted_at is null",
+        [data.assigned_to, req.auth.officeId]
+      );
+      if (!assignee.rowCount) {
+        await client.query("rollback");
+        return res.status(400).json({ error: "invalid_assignee" });
+      }
+    }
+    const fields = ["case_id", "title", "description", "due_at", "status", "priority", "assigned_to"];
+    const values = [];
+    const sets = [];
+    for (const field of fields) {
+      if (Object.hasOwn(data, field)) {
+        values.push(data[field] ?? null);
+        sets.push(`${field} = $${values.length}`);
+      }
+    }
+    if (Object.hasOwn(data, "status")) {
+      values.push(data.status === "completed" ? new Date() : null);
+      sets.push(`completed_at = $${values.length}`);
+    }
+    values.push(req.auth.userId);
+    sets.push(`updated_by = $${values.length}`);
+    values.push(id.data, req.auth.officeId);
+    const result = await client.query(
+      `update case_actions set ${sets.join(", ")}, updated_at = now()
+       where id = $${values.length - 1} and office_id = $${values.length} and deleted_at is null
+       returning *`,
+      values
+    );
+    await writeAuditLog(client, req.auth, "update", "case_action", id.data, req, { fields: Object.keys(data) });
+    await client.query("commit");
+    return res.json({ data: result.rows[0] });
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Update case action failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  if (!id.success) return res.status(400).json({ error: "invalid_action_id" });
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query(
+      "update case_actions set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id",
+      [id.data, req.auth.officeId, req.auth.userId]
+    );
+    if (!result.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "action_not_found" });
+    }
+    await writeAuditLog(client, req.auth, "delete", "case_action", id.data, req);
+    await client.query("commit");
+    return res.status(204).send();
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Delete case action failed:", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {

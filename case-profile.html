@@ -14,7 +14,7 @@
     <a href="clients.html">👥 موکل‌ها</a>
     <a class="active" href="cases.html">▣ پرونده‌ها</a>
     <a href="calendar.html">◷ تقویم و جلسات</a>
-    <a href="#">✓ اقدامات پرونده</a>
+    <a href="actions.html">✓ اقدامات پرونده</a>
     <a href="#">▤ اسناد و مدارک</a>
     <a href="#">﷼ امور مالی</a>
     <a href="#">▥ گزارش‌ها</a>
@@ -40,7 +40,7 @@
   <div class="profile-actions">
     <a class="primary" id="editCase" href="#">ویرایش پرونده</a>
     <button class="danger-btn" id="deleteCase" type="button">حذف پرونده</button>
-    <a class="secondary-btn" id="caseHearingsLink" href="calendar.html">◷ جلسات این پرونده</a><a class="secondary-btn" href="cases.html">← بازگشت به پرونده‌ها</a>
+    <a class="secondary-btn" id="caseHearingsLink" href="calendar.html">◷ جلسات این پرونده</a><a class="secondary-btn" id="caseActionsLink" href="actions.html">✓ اقدامات این پرونده</a><a class="secondary-btn" href="cases.html">← بازگشت به پرونده‌ها</a>
   </div>
 </section>
 
@@ -83,8 +83,25 @@
     <div class="profile-note" style="margin-top:0;padding-top:0;border-top:0"><b id="notes" class="case-text">—</b></div>
   </div>
 </section>
+<section class="profile-grid">
+  <div class="card case-actions-card">
+    <div class="section-head"><h3>پیگیری‌های این پرونده</h3><a id="caseActionsAllLink" href="actions.html">مدیریت همه اقدامات</a></div>
+    <div id="caseActionsSummary" class="case-actions-summary" aria-live="polite">در حال دریافت پیگیری‌ها...</div>
+    <div id="caseActionsList" class="case-actions-list"><div class="empty-state">در حال دریافت اطلاعات...</div></div>
+  </div>
+</section>
 </main>
 </div>
-<script src="case-profile.js?v=4"></script>
+<style>
+.case-actions-summary{font-size:13px;color:var(--muted);margin-bottom:10px}
+.case-actions-list{display:grid;gap:8px}
+.case-action-item{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:12px;border:1px solid var(--line);border-radius:9px}
+.case-action-item.overdue{border-color:#fecaca;background:#fff7f7}
+.case-action-item b{display:block}
+.case-action-item small{display:block;margin-top:5px;color:var(--muted)}
+.case-action-item .overdue-badge{display:inline-block;margin-top:6px;padding:2px 8px;border-radius:6px;background:#fee2e2;color:#991b1b;font-size:12px;font-weight:700}
+@media(max-width:600px){.case-action-item{display:block}}
+</style>
+<script src="case-profile.js?v=6"></script>
 </body>
 </html>

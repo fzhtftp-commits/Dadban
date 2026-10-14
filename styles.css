@@ -148,3 +148,8 @@ th{font-size:11.5px}
   .top-actions{gap:8px}
   .header-logout-btn{padding:9px 10px;font-size:11px}
 }
+
+/* Clear, accessible visual treatment for overdue case follow-ups */
+.overdue-summary{margin:0 0 12px;padding:10px 12px;border-radius:8px;background:#fff1f1;color:#991b1b;font-weight:700;font-size:13px}
+.overdue-event{border-right:4px solid #dc2626;background:#fff8f8;padding:10px;border-radius:8px}
+.overdue-badge{display:inline-block;width:max-content;margin:4px 0;padding:2px 8px;border-radius:6px;background:#fee2e2;color:#991b1b;font-size:12px;font-weight:700}

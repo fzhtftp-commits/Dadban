@@ -17,6 +17,32 @@ async function removeCase(){
   location.href="cases.html?deleted=1";
  }catch{deleteBtn.disabled=false;deleteBtn.textContent="حذف پرونده";$("caseStatus").textContent="حذف پرونده انجام نشد.";}
 }
+function escapeCaseText(value){
+ return String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[ch]));
+}
+async function loadCaseActions(){
+ const list=$("caseActionsList"), summary=$("caseActionsSummary");
+ if(!id){list.innerHTML='<div class="empty-state">شناسه پرونده نامعتبر است.</div>';return;}
+ try{
+  const r=await fetch(`${API}/api/actions?case_id=${encodeURIComponent(id)}&limit=50`,{credentials:"include"});
+  if(r.status===401){location.href="login.html";return;}
+  const payload=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error();
+  const items=Array.isArray(payload?.data)?payload.data:[];
+  const open=items.filter(a=>a.status==="todo"||a.status==="in_progress");
+  const overdue=open.filter(a=>Boolean(a.is_overdue));
+  summary.textContent=overdue.length?`${overdue.length} پیگیری عقب‌افتاده از ${open.length} پیگیری باز`:`${open.length} پیگیری باز؛ مورد عقب‌افتاده‌ای وجود ندارد.`;
+  if(!items.length){list.innerHTML='<div class="empty-state">برای این پرونده هنوز پیگیری ثبت نشده است.</div>';return;}
+  list.innerHTML=items.slice(0,10).map(a=>{
+   const late=Boolean(a.is_overdue)&&(a.status==="todo"||a.status==="in_progress");
+   const due=a.due_at?fmt(a.due_at):"بدون مهلت";
+   const status={todo:"انجام‌نشده",in_progress:"در حال انجام",completed:"انجام‌شده",cancelled:"لغوشده"}[a.status]||a.status;
+   return `<div class="case-action-item${late?" overdue":""}"><div><b>${escapeCaseText(a.title||"اقدام پرونده")}</b><small>${escapeCaseText(status)} · مهلت: ${escapeCaseText(due)}${a.assignee_name?" · مسئول: "+escapeCaseText(a.assignee_name):""}</small>${late?'<span class="overdue-badge">مهلت گذشته</span>':""}</div></div>`;
+  }).join("");
+  if(items.length>10)summary.textContent+=` نمایش ۱۰ مورد از ${items.length} اقدام.`;
+ }catch{summary.textContent="دریافت پیگیری‌های پرونده انجام نشد.";list.innerHTML='<div class="empty-state">برای تلاش دوباره، صفحه را تازه‌سازی کنید.</div>';}
+}
+
 async function load(){
  if(!id){ $("caseStatus").textContent="شناسه پرونده نامعتبر است."; editBtn.style.display="none"; deleteBtn.style.display="none"; return; }
  try{
@@ -30,6 +56,11 @@ async function load(){
   editBtn.href=`case-form.html?id=${encodeURIComponent(c.id)}`;
   const hearingsLink=$("caseHearingsLink");
   if(hearingsLink) hearingsLink.href=`calendar.html?case_id=${encodeURIComponent(c.id)}`;
+  const actionsLink=$("caseActionsLink");
+  if(actionsLink) actionsLink.href=`actions.html?case_id=${encodeURIComponent(c.id)}`;
+  const actionsAllLink=$("caseActionsAllLink");
+  if(actionsAllLink) actionsAllLink.href=`actions.html?case_id=${encodeURIComponent(c.id)}`;
+  await loadCaseActions();
   deleteBtn.disabled=false;
   $("caseStatus").textContent=`● ${statusLabel[c.status]||"پرونده"}`;
   $("caseNumber").textContent=c.case_number||"—";
