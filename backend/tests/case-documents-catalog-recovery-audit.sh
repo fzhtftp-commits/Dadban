@@ -459,6 +459,36 @@ BEGIN
     RAISE EXCEPTION 'idempotency unique index null semantics or key count mismatch';
   END IF;
 
+  -- The migration defines no exclusion constraints, and its PK/idempotency
+  -- uniqueness must be immediate rather than deferrable. These pg_index flags
+  -- are not implied by checking index names, key columns, opclasses, or NULLs.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_index i
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND i.indisexclusion
+  ) THEN
+    RAISE EXCEPTION 'unexpected exclusion index on case_documents';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_index i
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND i.indisunique
+      AND NOT i.indimmediate
+  ) THEN
+    RAISE EXCEPTION 'unique indexes must enforce uniqueness immediately';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.contype='p'
+      AND (c.condeferrable OR c.condeferred)
+  ) THEN
+    RAISE EXCEPTION 'primary-key constraint must not be deferrable or initially deferred';
+  END IF;
+
   -- Assert the operator class attached to each index key, not just its column number.
   IF EXISTS (
     SELECT 1
