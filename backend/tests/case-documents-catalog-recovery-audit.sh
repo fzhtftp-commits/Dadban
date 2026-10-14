@@ -444,7 +444,7 @@ BEGIN
       ('case_documents_pkey',1,'uuid_ops'),
       ('case_documents_idempotency_unique_idx',1,'uuid_ops'),
       ('case_documents_idempotency_unique_idx',2,'uuid_ops'),
-      ('case_documents_idempotency_unique_idx',3,'varchar_ops'),
+      ('case_documents_idempotency_unique_idx',3,'text_ops'),
       ('case_documents_office_case_created_idx',1,'uuid_ops'),
       ('case_documents_office_case_created_idx',2,'uuid_ops'),
       ('case_documents_office_case_created_idx',3,'timestamptz_ops'),
