@@ -23,8 +23,8 @@ const supabaseCa = fs.readFileSync(caPath, "utf8");
 const pool = databaseUrl
   ? new Pool({
       connectionString: databaseUrl,
-      max: 5,
-      connectionTimeoutMillis: 5000,
+      max: 10,
+      connectionTimeoutMillis: 10000,
       statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 15000),
       ssl: databaseUrl.includes("localhost")
         ? false
