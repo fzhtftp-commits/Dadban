@@ -179,4 +179,22 @@ async function loadDashboard() {
       }).join("");
     }
   }
-}
+  const actionsBody = document.getElementById("upcomingActionsBody");
+  if (actionsBody) {
+    try {
+      const actionsResponse = await fetch(`${API}/api/actions?limit=50`, { credentials: "include" });
+      if (actionsResponse.status === 401) { window.location.href = "login.html"; return; }
+      if (!actionsResponse.ok) throw new Error("actions_api_failed");
+      const actionsPayload = await actionsResponse.json();
+      const actions = (Array.isArray(actionsPayload?.data) ? actionsPayload.data : []).filter(item => item.status === "todo" || item.status === "in_progress").slice(0, 5);
+      actionsBody.innerHTML = actions.length ? actions.map(item => `<div class="event">
+        <b>${escapeHtml(item.title || "اقدام پرونده")}</b>
+        <span>${escapeHtml(item.due_at ? formatDateTime(item.due_at) : "بدون مهلت تعیین‌شده")}</span>
+        <small>پرونده ${escapeHtml(item.case_number || "—")} · ${escapeHtml(item.status === "in_progress" ? "در حال انجام" : "انجام‌نشده")}</small>
+        <a href="actions.html?case_id=${encodeURIComponent(item.case_id)}">مشاهده پیگیری‌های پرونده</a>
+      </div>`).join("") : '<div class="empty-state">پیگیری بازی وجود ندارد.</div>';
+    } catch (error) {
+      actionsBody.innerHTML = '<div class="empty-state">دریافت پیگیری‌ها انجام نشد.</div>';
+      console.error("Dashboard actions load failed:", error);
+    }
+  }}
