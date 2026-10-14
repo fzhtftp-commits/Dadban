@@ -1124,7 +1124,7 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
       left join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       where ${conditions.join(" and ")}
       order by h.hearing_at asc
-      limit ${values.length - 1} offset ${values.length}
+      limit $${values.length - 1} offset $${values.length}
     `, values);
     return res.json({ data: result.rows, pagination: { limit, offset, returned: result.rows.length } });
   } catch (error) {
