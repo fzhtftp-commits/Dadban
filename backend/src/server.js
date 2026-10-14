@@ -367,6 +367,7 @@ const createRateLimiter = ({ windowMs, maxRequests }) => {
   };
 };
 
+const registerRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 5 });
 const loginRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 10 });
 const createDocumentRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 20 });
 
@@ -426,7 +427,7 @@ app.get("/health/db", async (_req, res) => {
   }
 });
 
-app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
+app.post("/api/auth/register", requireTrustedOrigin, registerRateLimit, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "invalid_registration" });
