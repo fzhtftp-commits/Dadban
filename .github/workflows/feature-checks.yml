@@ -3,7 +3,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [feature/hearings-calendar]
+    branches: [feature/hearings-calendar, feature/case-actions]
 permissions:
   contents: read
 jobs:
@@ -18,6 +18,7 @@ jobs:
         run: node --check backend/src/server.js
       - name: Check frontend JavaScript syntax
         run: |
+          node --check actions.js
           node --check hearings.js
           node --check app.js
           node --check cases.js
@@ -29,6 +30,7 @@ jobs:
         run: |
           node --check backend/test/hearings.integration.test.js
           node --check backend/test/hearings-ui-contract.test.js
+          node --check backend/test/case-actions-ui-contract.test.js
   hearings-integration:
     runs-on: ubuntu-latest
     services:
@@ -55,4 +57,4 @@ jobs:
       - name: Install backend dependencies
         run: npm install --prefix backend
       - name: Run hearing API integration tests against disposable PostgreSQL
-        run: node --test backend/test/hearings.integration.test.js backend/test/hearings-ui-contract.test.js
+        run: node --test backend/test/hearings.integration.test.js backend/test/hearings-ui-contract.test.js backend/test/case-actions-ui-contract.test.js
