@@ -6,7 +6,8 @@ const {
   jalaliToGregorian,
   gregorianToJalali,
   isValidJalaliDate,
-  localDateTimeToIso
+  localDateTimeToIso,
+  isoToLocalDateTime
 } = require("../../form-validation.js");
 
 test("normalizes Persian and Arabic-Indic digits", () => {
@@ -42,4 +43,10 @@ test("converts local datetime-local values using local timezone and returns UTC 
   assert.equal(localDateTimeToIso(""), null);
   assert.throws(() => localDateTimeToIso("2026-02-30T09:30"), RangeError);
   assert.throws(() => localDateTimeToIso("2026-10-15"), RangeError);
+});
+
+test("round-trips ISO timestamps to the browser's local datetime-local representation", () => {
+  const localValue = "2026-10-15T09:30";
+  assert.equal(isoToLocalDateTime(localDateTimeToIso(localValue)), localValue);
+  assert.equal(isoToLocalDateTime("not-a-date"), "");
 });
