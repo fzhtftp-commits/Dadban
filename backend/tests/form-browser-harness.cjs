@@ -9,7 +9,7 @@ function createBrowser({ script, search = "", responses = [], initial = {}, csrf
   const listeners = new Map();
   const makeElement = (id = "") => ({
     id, value: initial[id] ?? "", textContent: "", innerHTML: "", hidden: false, disabled: false,
-    required: false, checked: false, href: "", className: "", type: "", name: "",
+    required: false, checked: false, href: "", className: "", type: "", name: "", style: {},
     classList: { add(){}, remove(){}, toggle(){} },
     addEventListener(type, fn) { const key = id + ":" + type; listeners.set(key, fn); },
     checkValidity() { return true; }, reportValidity(){}, focus(){},
