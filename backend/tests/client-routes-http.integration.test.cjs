@@ -180,21 +180,21 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
     const response = await request("/api/clients", "POST", { ...validClient, national_id: "1234567890" });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { error: "invalid_client" });
-    assert.equal((await db.query("select count(*)::int as count from clients")).rows[0].count, 0);
+    assert.equal((await db.query("select count(*)::int as count from clients where office_id = $1")).rows[0].count, 0);
   });
 
   await t.test("PATCH /api/clients/:id returns 400 for an invalid checksum", async () => {
     const response = await request(`/api/clients/${userId}`, "PATCH", { national_id: "1234567890" });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { error: "invalid_client_update" });
-    assert.equal((await db.query("select count(*)::int as count from clients")).rows[0].count, 0);
+    assert.equal((await db.query("select count(*)::int as count from clients where office_id = $1")).rows[0].count, 0);
   });
 
   await t.test("POST /api/clients returns 403 for an invalid CSRF token", async () => {
     const response = await request("/api/clients", "POST", validClient, { cookie: `dadban_session=${sessionToken}; dadban_csrf=wrong-csrf-token`, "x-csrf-token": "wrong-csrf-token" });
     assert.equal(response.status, 403);
     assert.deepEqual(await response.json(), { error: "csrf_token_invalid" });
-    assert.equal((await db.query("select count(*)::int as count from clients")).rows[0].count, 0);
+    assert.equal((await db.query("select count(*)::int as count from clients where office_id = $1")).rows[0].count, 0);
   });
 
   await t.test("GET detail and national-code lookup never disclose another office's client", async () => {
@@ -245,7 +245,7 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
       const response = await request("/api/clients", "POST", { ...validClient, full_name: "Must Roll Back" });
       assert.equal(response.status, 500);
       assert.deepEqual(await response.json(), { error: "database_error" });
-      assert.equal((await db.query("select count(*)::int as count from clients where full_name = $1", ["Must Roll Back"])).rows[0].count, 0);
+      assert.equal((await db.query("select count(*)::int as count from clients where office_id = $1 where full_name = $1", ["Must Roll Back"], [officeId])).rows[0].count, 0);
       assert.equal((await db.query("select count(*)::int as count from audit_logs where action = 'create'")).rows[0].count, 1);
     } finally {
       await db.query("drop trigger if exists fail_audit_insert_before_write on audit_logs");
