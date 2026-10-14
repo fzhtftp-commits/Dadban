@@ -58,7 +58,7 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body)
   });
-  return { status: response.status, body: response.status === 204 ? null : await response.json() };
+  return { status: response.status, body: response.status === 204 ? null : await response.json(), headers: { "retry-after": response.headers.get("retry-after") } };
 }
 
 try {
@@ -441,7 +441,7 @@ try {
   console.log("PASS: cross-office delete rejected without mutation");
 
   let rateLimited = false;
-  for (let i = 0; i < 13; i++) {
+  for (let i = 0; i < 41; i++) {
     const limited = await request("/api/case-documents", {
       token: tokenA, csrf: csrfA, method: "POST",
       idempotencyKey: `rate-limit-key-${String(i).padStart(2,"0")}`,
