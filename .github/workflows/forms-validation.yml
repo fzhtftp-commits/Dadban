@@ -14,4 +14,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - run: npm install --prefix backend --ignore-scripts --no-audit --no-fund
       - run: node --test backend/tests/forms-validation.test.cjs
