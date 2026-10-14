@@ -196,3 +196,47 @@ test("case edit loads a mock existing case and sends PATCH", async () => {
   assert.equal(b.calls[1].options.method, "PATCH");
   assert.equal(JSON.parse(b.calls[1].options.body).case_number, "CASE-OLD");
 });
+
+
+test("server client-create schema accepts a valid checksum and normalizes Persian digits", async () => {
+  const { clientCreateSchema } = await import("../../backend/src/client-schemas.js");
+  const result = clientCreateSchema.safeParse({
+    client_type: "individual",
+    full_name: "علی رضایی",
+    national_id: "۱۲۳۴۵۶۷۸۹۱",
+    mobile: "09123456789"
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.data.national_id, "1234567891");
+});
+
+test("server client-create schema rejects invalid checksum and repeated digits", async () => {
+  const { clientCreateSchema } = await import("../../backend/src/client-schemas.js");
+  for (const national_id of ["1234567890", "1111111111"]) {
+    const result = clientCreateSchema.safeParse({
+      client_type: "individual",
+      full_name: "علی رضایی",
+      national_id
+    });
+    assert.equal(result.success, false, "invalid national code must fail server schema");
+  }
+});
+
+test("server client-patch schema validates checksum when national_id is updated", async () => {
+  const { clientPatchSchema } = await import("../../backend/src/client-schemas.js");
+  assert.equal(clientPatchSchema.safeParse({ national_id: "1234567891" }).success, true);
+  assert.equal(clientPatchSchema.safeParse({ national_id: "1234567890" }).success, false);
+  assert.equal(clientPatchSchema.safeParse({ notes: "ویرایش بدون تغییر کد ملی" }).success, true);
+});
+
+test("client create and patch routes keep CSRF middleware before schema validation and return 400 for invalid payloads", () => {
+  const source = read("backend/src/server.js");
+  const createRoute = source.slice(source.indexOf('app.post("/api/clients"'), source.indexOf('app.get("/api/clients/lookup"'));
+  const patchRoute = source.slice(source.indexOf('app.patch("/api/clients/:id"'), source.indexOf('app.delete("/api/clients/:id"'));
+  assert.match(createRoute, /requireAuth, requireTrustedOrigin, requireCsrf/);
+  assert.match(createRoute, /clientCreateSchema\.safeParse\(req\.body\)/);
+  assert.match(createRoute, /res\.status\(400\)\.json\(\{ error: "invalid_client" \}\)/);
+  assert.match(patchRoute, /requireAuth, requireTrustedOrigin, requireCsrf/);
+  assert.match(patchRoute, /clientPatchSchema\.safeParse\(req\.body\)/);
+  assert.match(patchRoute, /res\.status\(400\)\.json\(\{ error: "invalid_client_update" \}\)/);
+});
