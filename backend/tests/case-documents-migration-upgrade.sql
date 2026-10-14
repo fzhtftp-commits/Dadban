@@ -16,10 +16,8 @@ begin
     join pg_namespace n on n.oid = t.relnamespace
     where n.nspname = 'public' and t.relname = 'cases'
       and i.indisunique
-      and (select array_agg(a.attname order by k.ordinality)
-           from unnest(i.indkey) with ordinality k(attnum, ordinality)
-           join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
-           where k.ordinality <= i.indnkeyatts) = array['id','office_id']::name[]
+      and i.indnkeyatts = 2
+      and pg_get_indexdef(i.indexrelid) ilike '%(id, office_id)%'
   ) then
     raise exception 'Missing exact unique index for cases(id, office_id)';
   end if;
@@ -29,10 +27,8 @@ begin
     join pg_namespace n on n.oid = t.relnamespace
     where n.nspname = 'public' and t.relname = 'users'
       and i.indisunique
-      and (select array_agg(a.attname order by k.ordinality)
-           from unnest(i.indkey) with ordinality k(attnum, ordinality)
-           join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
-           where k.ordinality <= i.indnkeyatts) = array['id','office_id']::name[]
+      and i.indnkeyatts = 2
+      and pg_get_indexdef(i.indexrelid) ilike '%(id, office_id)%'
   ) then
     raise exception 'Missing exact unique index for users(id, office_id)';
   end if;
