@@ -87,8 +87,6 @@ test("case form supports create/edit API paths, client lookup, CSRF and tested l
   assert.match(js, /isoToLocalDateTime\(c\.next_hearing_at\)/);
 });
 
-const test = require("node:test");
-const assert = require("node:assert/strict");
 const { createBrowser } = require("./form-browser-harness.cjs");
 
 async function submitClient({ mode = "", id = "", responses = [], csrf = "test-csrf", initial = {} } = {}) {
