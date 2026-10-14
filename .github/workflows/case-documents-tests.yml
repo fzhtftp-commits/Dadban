@@ -1,0 +1,84 @@
+name: Case document metadata checks
+on:
+  push:
+    branches:
+      - feature/case-documents-metadata
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dadban_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dadban_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+        working-directory: backend
+      - run: npm test
+        working-directory: backend
+      - run: node --check src/server.js && node --check ../documents.js
+        working-directory: backend
+      - name: Verify metadata migration and office isolation in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-isolation.sql
+        working-directory: backend
+
+      - name: Verify full baseline migration upgrade and transactional rollback in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-migration-upgrade.sql
+        working-directory: backend
+
+      - name: Verify forced migration failure rolls back all DDL in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-forced-rollback.sh
+        working-directory: backend
+
+      - name: Demonstrate out-of-transaction migration partial apply in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-out-of-transaction-partial-apply.sh
+        working-directory: backend
+
+      - name: Verify incompatible same-named table fails migration in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-negative-migration.sh
+        working-directory: backend
+
+      - name: Verify recovery catalog audit detects incompatible table, constraint, and index in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-catalog-recovery-audit.sh
+        working-directory: backend
+
+      - name: Verify incompatible same-named index fails migration statement in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-negative-index-migration.sh
+        working-directory: backend
+
+      - name: Verify two-office API isolation over HTTP
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
+        run: node tests/case-documents-api.integration.js
+        working-directory: backend
+
