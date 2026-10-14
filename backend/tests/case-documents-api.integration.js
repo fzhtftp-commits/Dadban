@@ -338,13 +338,6 @@ try {
   const failedUpdateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
   assert.equal(failedUpdateAudit.rows[0].count, 0, "failed update must not leave an audit row");
   await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
-  const retriedIdempotentCreate = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
-    body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
-  });
-  assert.equal(retriedIdempotentCreate.status, 201, "same idempotency key must be reusable after a rolled-back database failure");
-  const retriedIdempotentAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [retriedIdempotentCreate.body.data.id]);
-  assert.equal(retriedIdempotentAudit.rows[0].count, 1, "successful retry after database failure must be audited exactly once");
   const ownUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Updated by Office A" }
   });
@@ -444,6 +437,15 @@ try {
   await pool.query("drop function delay_target_document_update()");
   timeoutServer.kill("SIGTERM");
   timeoutServer = null;
+
+  const retriedIdempotentCreate = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
+    body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
+  });
+  assert.equal(retriedIdempotentCreate.status, 201, "same idempotency key must be reusable after a rolled-back database failure");
+  const retriedIdempotentAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [retriedIdempotentCreate.body.data.id]);
+  assert.equal(retriedIdempotentAudit.rows[0].count, 1, "successful retry after database failure must be audited exactly once");
+
 
 
 
