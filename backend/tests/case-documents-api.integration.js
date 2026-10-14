@@ -355,7 +355,6 @@ try {
   assert.equal(retriedIdempotentCreate.status, 201, "same idempotency key must be reusable after a rolled-back database failure");
   const retriedIdempotentAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [retriedIdempotentCreate.body.data.id]);
   assert.equal(retriedIdempotentAudit.rows[0].count, 1, "successful retry after database failure must be audited exactly once");
-  await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
   const ownUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Updated by Office A" }
   });
