@@ -141,3 +141,11 @@ Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/t
 - Run #116 completed successfully on exact head 90b6f418e5acbab4313169598e14389d54cc8694: https://github.com/fzhtftp-commits/Dadban/actions/runs/38596944490. All steps passed, including the full-baseline migration upgrade/rollback test.
 - The migration now deliberately fails on pre-existing case_documents table or named document indexes instead of silently accepting them via IF NOT EXISTS. This protects against falsely treating a same-named but incompatible object as a valid migration result. Inspect/reconcile partial prior attempts before retrying; do not expect a safe blind rerun.
 - This documentation update creates a new head; verify the next Actions run against that exact head before considering CI current. PR remains Draft and unmerged; no main, operational database, or Render changes.
+
+
+### Negative test for an incompatible same-named table — 2026-10-14
+
+- Added `backend/tests/case-documents-negative-migration.sh`. After the full-baseline rehearsal has created the expected public schema in the disposable PostgreSQL service, the script creates a dedicated probe schema containing an intentionally incompatible `case_documents(id integer)` table.
+- It runs the real migration 004 with that probe schema first in `search_path`, and treats a nonzero `psql` exit as the expected result. If migration 004 unexpectedly succeeds, the test fails the workflow. A shell trap drops only the probe schema; the test does not touch `main`, an operational database, or Render.
+- The workflow runs this negative test after the successful full-baseline migration test and before the two-office HTTP integration test. It tests the table-conflict path directly; same-named index conflicts are prevented by the migration's ordinary `CREATE INDEX` statements too, but this dedicated test does not claim to exercise that separate path.
+- This commit updates the branch head. Do not call this new negative test CI-verified until the newly triggered GitHub Actions run succeeds on the exact latest PR head SHA.
