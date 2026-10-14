@@ -1,0 +1,24 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
+const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
+test("schema defaults to metadata-only and enforces same-office foreign keys and size cap", () => {
+ assert.match(migration, /storage_status varchar\(24\) not null default 'metadata_only'/);
+ assert.match(migration, /size_bytes <= 26214400/);
+ assert.match(migration, /case_documents_case_same_office_fk/);
+ assert.match(migration, /case_documents_created_by_same_office_fk/);
+});
+test("CRUD endpoints require authentication and protect writes", () => {
+ assert.match(server, /app\.get\("\/api\/case-documents", requireAuth/);
+ assert.match(server, /app\.get\("\/api\/case-documents\/:id", requireAuth/);
+ assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /app\.patch\("\/api\/case-documents\/:id", requireAuth, requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /app\.delete\("\/api\/case-documents\/:id", requireAuth, requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /d\.office_id = \$1/);
+});
+test("metadata phase does not introduce file byte upload handling", () => {
+ assert.match(migration, /storage_key text/);
+ assert.match(migration, /storage_status = 'metadata_only' and storage_key is null/);
+ assert.doesNotMatch(server, /multer|busboy|presigned|signedUrl|uploadFile/i);
+});
