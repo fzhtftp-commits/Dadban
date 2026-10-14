@@ -563,7 +563,7 @@ try {
   // Owner/admin/lawyer may update; assistant/viewer must be denied.
   for (const account of roleAccounts) {
     const result = await request(`/api/case-documents/${documentId}`, {
-      token: account.token, csrf: account.csrf, method: "PATCH", portToUse: rolePort, portToUse: rolePort,
+      token: account.token, csrf: account.csrf, method: "PATCH", portToUse: rolePort,
       body: { description: `updated by ${account.role}` }
     });
     if (["owner", "admin", "lawyer"].includes(account.role)) {
@@ -578,7 +578,7 @@ try {
   for (const role of ["lawyer", "assistant", "viewer"]) {
     const account = roleAccounts.find(item => item.role === role);
     const result = await request(`/api/case-documents/${documentId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort, portToUse: rolePort
+      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort
     });
     assert.equal(result.status, 403, `${role} must be denied document deletion`);
     assert.deepEqual(result.body, { error: "document_role_forbidden" });
@@ -587,7 +587,7 @@ try {
     const account = roleAccounts.find(item => item.role === role);
     const targetId = roleCreatedDocuments.get(role);
     const result = await request(`/api/case-documents/${targetId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort, portToUse: rolePort
+      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort
     });
     assert.equal(result.status, 204, `${role} should be allowed to soft-delete metadata`);
   }
