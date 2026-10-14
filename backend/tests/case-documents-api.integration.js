@@ -43,9 +43,11 @@ async function waitForServer() {
 
 async function request(path, { token, csrf, method = "GET", body } = {}) {
   const headers = { origin, cookie: `dadban_session=${token}; dadban_csrf=${csrf}` };
+  if (["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
+    headers["x-csrf-token"] = csrf;
+  }
   if (body !== undefined) {
     headers["content-type"] = "application/json";
-    headers["x-csrf-token"] = csrf;
   }
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body)
