@@ -15,7 +15,19 @@ async function request(url, options={}) {
  if(response.status===401){location.href="login.html";throw new Error("نشست شما منقضی شده است؛ دوباره وارد شوید.");}
  if(response.status===204)return null;
  const data=await response.json().catch(()=>({}));
- if(!response.ok) throw new Error(data.error==="invalid_related_case"?"پرونده انتخاب‌شده معتبر نیست.":data.error==="hearing_not_found"?"جلسه پیدا نشد.":"عملیات انجام نشد؛ لطفاً اطلاعات را بررسی کنید.");
+ if(!response.ok) {
+  const errors={
+   csrf_token_required:"توکن امنیتی فرم موجود نیست؛ صفحه را تازه‌سازی کنید.",
+   csrf_token_invalid:"اعتبار امنیتی درخواست تأیید نشد؛ صفحه را تازه‌سازی کنید.",
+   origin_not_allowed:"مبدأ درخواست مجاز نیست.",
+   invalid_related_case:"پرونده انتخاب‌شده معتبر نیست یا به این دفتر تعلق ندارد.",
+   hearing_not_found:"جلسه پیدا نشد یا دیگر در دسترس نیست.",
+   invalid_hearing:"اطلاعات جلسه معتبر نیست؛ فیلدهای اجباری را بررسی کنید.",
+   invalid_hearing_query:"فیلترهای تقویم معتبر نیستند.",
+   invalid_date_range:"تاریخ شروع نباید بعد از تاریخ پایان باشد."
+  };
+  throw new Error(errors[data.error]||"عملیات انجام نشد؛ لطفاً اطلاعات را بررسی کنید.");
+}
  return data;
 }
 async function loadCases(){
