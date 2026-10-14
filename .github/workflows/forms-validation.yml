@@ -24,7 +24,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://dadban_test:dadban_test@127.0.0.1:5432/dadban_http_test
+      DATABASE_URL: postgres://dadban_test:dadban_test@localhost:5432/dadban_http_test
       DADBANTEST_PORT: 18765
     steps:
       - uses: actions/checkout@v4
