@@ -22,3 +22,23 @@ test("metadata phase does not introduce file byte upload handling", () => {
  assert.match(migration, /storage_status = 'metadata_only' and storage_key is null/);
  assert.doesNotMatch(server, /multer|busboy|presigned|signedUrl|uploadFile/i);
 });
+
+test("every document API route enforces office-scoped access predicates", () => {
+ const route = (start, end) => {
+   const i = server.indexOf(start);
+   assert.notEqual(i, -1, `route not found: ${start}`);
+   const j = server.indexOf(end, i);
+   assert.notEqual(j, -1, `route end not found: ${end}`);
+   return server.slice(i, j);
+ };
+ const list = route('app.get("/api/case-documents",', 'app.get("/api/case-documents/:id",');
+ const detail = route('app.get("/api/case-documents/:id",', 'app.post("/api/case-documents",');
+ const create = route('app.post("/api/case-documents",', 'app.patch("/api/case-documents/:id",');
+ const update = route('app.patch("/api/case-documents/:id",', 'app.delete("/api/case-documents/:id",');
+ const remove = route('app.delete("/api/case-documents/:id",', 'app.use((_req, res) =>');
+ assert.match(list, /d\.office_id = \$1/);
+ assert.match(detail, /d\.id=\$1 and d\.office_id=\$2/);
+ assert.match(create, /cases where id=\$1 and office_id=\$2/);
+ assert.match(update, /where id=\$\{v\.length-1\} and office_id=\$\{v\.length\}/);
+ assert.match(remove, /where id=\$1 and office_id=\$2 and deleted_at is null/);
+});
