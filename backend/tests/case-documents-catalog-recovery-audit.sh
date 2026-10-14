@@ -623,15 +623,15 @@ BEGIN
   END IF;
 
   -- Audit table-level catalog attributes and constraint validation/inheritance.
-  -- The migration contract expects an ordinary permanent table and validated,
-  -- inheritable FK/CHECK constraints; names alone must not mask catalog drift.
+  -- The migration contract expects an ordinary permanent, non-partition table
+  -- and validated FK/CHECK constraints; names alone must not mask catalog drift.
   IF NOT EXISTS (
     SELECT 1 FROM pg_class t
     JOIN pg_namespace n ON n.oid=t.relnamespace
     WHERE n.nspname='${expected_schema}' AND t.relname='case_documents'
-      AND t.relkind='r' AND t.relpersistence='p'
+      AND t.relkind='r' AND t.relpersistence='p' AND NOT t.relispartition
   ) THEN
-    RAISE EXCEPTION 'table relation kind or persistence differs from migration contract';
+    RAISE EXCEPTION 'table relation kind, persistence, or partition status differs from migration contract';
   END IF;
 
   -- Each index is also a pg_class relation. The migration creates ordinary
