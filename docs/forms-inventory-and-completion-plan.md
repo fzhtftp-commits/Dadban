@@ -72,3 +72,10 @@ This remains a repository audit with isolated controller tests, not a full brows
 - Required assertions: invalid national-code checksum returns HTTP 400 on client POST and PATCH; invalid CSRF returns HTTP 403; valid client creation returns HTTP 201 and persists the client plus audit row; valid client edit returns HTTP 200 and persists normalized national code, changed name, and audit row.
 - Safety boundary: only the temporary CI service database is initialized/dropped. No production URL, Render service, or main-branch file is used by this test.
 - Verification status: **pending until Actions completes for the exact current PR head SHA**. Do not infer success from older run #50 or from the pre-integration green run #52.
+
+
+### CI follow-up: backend launch path correction
+
+- The real-HTTP harness initially resolved its child-process working directory to the repository root while launching `src/server.js`, which is under `backend/`. That would prevent the backend from starting in CI.
+- Corrected the harness working directory to `backend/` (commit `d8a21e4a1a78c6d2861601d0e870c1f1a1dbf23f`).
+- Verification for this correction is pending the newest GitHub Actions run on the exact updated PR head SHA. The older in-progress runs on SHA `0729ae1793772c23cc8671d0b43b70b39e763e82` do not verify this fix.
