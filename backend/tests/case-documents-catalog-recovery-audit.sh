@@ -506,6 +506,27 @@ BEGIN
     RAISE EXCEPTION 'foreign key action, match mode, or deferrability mismatch';
   END IF;
 
+  -- Audit table-level catalog attributes and constraint validation/inheritance.
+  -- The migration contract expects an ordinary permanent table and validated,
+  -- inheritable FK/CHECK constraints; names alone must not mask catalog drift.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_class t
+    JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname='${expected_schema}' AND t.relname='case_documents'
+      AND t.relkind='r' AND t.relpersistence='p'
+  ) THEN
+    RAISE EXCEPTION 'table relation kind or persistence differs from migration contract';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.contype IN ('f','c')
+      AND (NOT c.convalidated OR c.connoinherit)
+  ) THEN
+    RAISE EXCEPTION 'FK/CHECK validation or inheritance flags differ from migration contract';
+  END IF;
+
   -- Validate every CHECK expression semantically against its expected expression
   -- after removing PostgreSQL's presentation-only whitespace and parentheses.
   IF EXISTS (
