@@ -7,8 +7,9 @@ import { readFile } from "node:fs/promises";
 
 const { Pool } = pg;
 const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl || !databaseUrl.includes("localhost")) {
-  throw new Error("Integration test requires a disposable localhost DATABASE_URL");
+const parsedDatabaseUrl = databaseUrl ? new URL(databaseUrl) : null;
+if (!parsedDatabaseUrl || !["localhost", "127.0.0.1"].includes(parsedDatabaseUrl.hostname) || parsedDatabaseUrl.pathname !== "/dadban_test") {
+  throw new Error("Integration test may only reset the dedicated localhost /dadban_test database");
 }
 const port = Number(process.env.DADBAN_TEST_PORT || 18127);
 const origin = "http://localhost:5500";
