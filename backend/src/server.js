@@ -1307,6 +1307,21 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
 });
 
 
+app.get("/api/actions/assignees", requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `select id, full_name, role from users
+       where office_id = $1 and is_active = true and deleted_at is null
+       order by full_name asc limit 100`,
+      [req.auth.officeId]
+    );
+    return res.json({ data: result.rows });
+  } catch (error) {
+    console.error("List case action assignees failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
 app.get("/api/actions", requireAuth, async (req, res) => {
   const querySchema = z.object({
     case_id: z.string().uuid().optional(),
@@ -1332,6 +1347,7 @@ app.get("/api/actions", requireAuth, async (req, res) => {
     const result = await pool.query(`
       select a.id, a.case_id, a.title, a.description, a.due_at, a.status, a.priority,
              a.assigned_to, a.completed_at, a.created_at, a.updated_at,
+              (a.due_at < now() and a.status in ('todo', 'in_progress')) as is_overdue,
              c.case_number, c.title as case_title,
              u.full_name as assignee_name
       from case_actions a
