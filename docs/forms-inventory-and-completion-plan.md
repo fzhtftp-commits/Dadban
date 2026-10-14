@@ -40,7 +40,7 @@ This report inventories the form-related UI and the open feature branches before
 - Shared browser/Node helpers normalize Persian/Arabic-Indic digits, validate Iranian national-code check digits, validate Jalali dates by round-trip conversion, and convert local `datetime-local` values to/from UTC ISO timestamps without silently accepting invalid calendar dates.
 - Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and static contracts for client/case create-edit routes, CSRF headers, client lookup, and script loading order.
 - GitHub Actions workflow `.github/workflows/forms-validation.yml` executes `node --test backend/tests/forms-validation.test.cjs` on matching PR changes.
-- Latest observed run: [Run #19](https://github.com/fzhtftp-commits/Dadban/actions/runs/38635505281), conclusion **success**, for head SHA `5ac10975c1c26df66137f90915fbf129040b520c`. The tests are unit and source-contract tests; they are not browser automation or a live API/database end-to-end test.
+- Recorded validation checkpoint (historical): [Run #19](https://github.com/fzhtftp-commits/Dadban/actions/runs/38635505281) succeeded for SHA `5ac10975c1c26df66137f90915fbf129040b520c`. For the current PR head and latest matching CI run, see the verification section in [PR #6](https://github.com/fzhtftp-commits/Dadban/pull/6). The tests are unit and source-contract tests; they are not browser automation or a live API/database end-to-end test.
 
 ## Open PR overlap that must be reconciled
 
