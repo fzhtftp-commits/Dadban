@@ -10,6 +10,8 @@ const schema = read("../../database/schema.sql");
 const migration = read("../../database/migrations/20261014_case_actions.sql");
 const server = read("../src/server.js");
 const workflow = read("../../.github/workflows/feature-checks.yml");
+const dashboardHtml = read("../../index.html");
+const dashboardJs = read("../../app.js");
 
 test("actions page is Persian, links to the current case, and exposes CRUD controls", () => {
   assert.match(page, /lang="fa" dir="rtl"/);
@@ -19,6 +21,9 @@ test("actions page is Persian, links to the current case, and exposes CRUD contr
   assert.match(profileHtml, /id="caseActionsLink"/);
   assert.ok(profileJs.includes("actions.html?case_id="));
   assert.ok(ui.includes('get("case_id")'));
+  assert.match(dashboardHtml, /id="upcomingActionsBody"/);
+  assert.ok(dashboardJs.includes("/api/actions?limit=50"));
+  assert.ok(dashboardJs.includes("actions.html?case_id="));
 });
 
 test("actions UI uses authenticated requests, CSRF for writes, and clear error messages", () => {
