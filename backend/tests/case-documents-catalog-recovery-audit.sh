@@ -393,6 +393,41 @@ BEGIN
     RAISE EXCEPTION 'office listing index exact catalog definition mismatch';
   END IF;
 
+  -- Verify index access method, primary-index identity, and unique NULL semantics.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_index i
+    JOIN pg_class idx ON idx.oid=i.indexrelid
+    JOIN pg_am am ON am.oid=idx.relam
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND am.amname <> 'btree'
+  ) THEN
+    RAISE EXCEPTION 'unexpected index access method';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+    JOIN pg_class idx ON idx.oid=i.indexrelid
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND idx.relname='case_documents_pkey'
+      AND i.indisprimary AND i.indisunique
+      AND i.indnullsnotdistinct = false
+      AND i.indnkeyatts=1 AND i.indnatts=1
+      AND i.indkey::text = (
+        SELECT a.attnum::text FROM pg_attribute a
+        WHERE a.attrelid=i.indrelid AND a.attname='id'
+      )
+  ) THEN
+    RAISE EXCEPTION 'primary-key index catalog attributes mismatch';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indexrelid='${expected_schema}.case_documents_idempotency_unique_idx'::regclass
+      AND i.indisunique AND NOT i.indnullsnotdistinct
+      AND i.indnkeyatts=3 AND i.indnatts=3
+  ) THEN
+    RAISE EXCEPTION 'idempotency unique index null semantics or key count mismatch';
+  END IF;
+
   -- Prove the inspection logic detects same-named but structurally wrong objects.
   IF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid='${bad_schema}.case_documents'::regclass AND a.attname='case_id' AND a.atttypid='uuid'::regtype AND a.attnum>0 AND NOT a.attisdropped) THEN
     RAISE EXCEPTION 'incompatible table fixture was not detected';
