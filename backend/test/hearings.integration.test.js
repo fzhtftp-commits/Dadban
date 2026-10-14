@@ -31,7 +31,8 @@ const ids = {
   clientB: "30000000-0000-4000-8000-000000000002",
   caseA1: "40000000-0000-4000-8000-000000000001",
   caseA2: "40000000-0000-4000-8000-000000000002",
-  caseB: "40000000-0000-4000-8000-000000000003"
+  caseB: "40000000-0000-4000-8000-000000000003",
+  userInactiveA: "20000000-0000-4000-8000-000000000003"
 };
 
 let db;
@@ -80,6 +81,7 @@ before(async () => {
   await db.query(caseActionsMigration);
   await db.query("insert into offices (id, name) values ($1, $2), ($3, $4)", [ids.officeA, "دفتر آزمایشی الف", ids.officeB, "دفتر آزمایشی ب"]);
   await db.query("insert into users (id, office_id, full_name, email, role) values ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)", [ids.userA, ids.officeA, "کاربر آزمایشی الف", "office-a@example.test", "owner", ids.userB, ids.officeB, "کاربر آزمایشی ب", "office-b@example.test", "owner"]);
+  await db.query("insert into users (id, office_id, full_name, email, role, is_active) values ($1, $2, $3, $4, false)", [ids.userInactiveA, ids.officeA, "کاربر غیرفعال", "inactive-a@example.test"]);
   await db.query("insert into clients (id, office_id, client_type, full_name, national_id) values ($1, $2, 'individual', $3, $4), ($5, $6, 'individual', $7, $8)", [ids.clientA, ids.officeA, "موکل الف", "0012345678", ids.clientB, ids.officeB, "موکل ب", "0012345679"]);
   await db.query("insert into cases (id, office_id, client_id, case_number, title) values ($1, $2, $3, $4, $5), ($6, $2, $3, $7, $8), ($9, $10, $11, $12, $13)", [ids.caseA1, ids.officeA, ids.clientA, "A-001", "پرونده آزمایشی اول", ids.caseA2, "A-002", "پرونده آزمایشی دوم", ids.caseB, ids.officeB, ids.clientB, "B-001", "پرونده دفتر دیگر"]);
   await db.query("insert into auth_sessions (user_id, office_id, token_hash, csrf_hash, expires_at) values ($1, $2, $3, $4, now() + interval '1 hour'), ($5, $6, $7, $8, now() + interval '1 hour')", [ids.userA, ids.officeA, hash(tokenA), hash(csrfA), ids.userB, ids.officeB, hash(tokenB), hash(csrfB)]);
@@ -254,6 +256,48 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
 
 test("case action API: CRUD, validation, audit, and office isolation", async (t) => {
   let actionId;
+  await t.test("assignee picker lists only active users from the authenticated office", async () => {
+    const response = await api("/api/actions/assignees");
+    await assertStatus(response, 200);
+    const rows = (await response.json()).data;
+    assert.ok(rows.some(user => user.id === ids.userA && user.role === "owner"));
+    assert.ok(!rows.some(user => user.id === ids.userB));
+    assert.ok(!rows.some(user => user.id === ids.userInactiveA));
+    const officeB = await api("/api/actions/assignees", { headers: headersB });
+    await assertStatus(officeB, 200);
+    const rowsB = (await officeB.json()).data;
+    assert.ok(rowsB.some(user => user.id === ids.userB));
+    assert.ok(!rowsB.some(user => user.id === ids.userA));
+  });
+
+  await t.test("expired sessions and invalid CSRF cannot list or mutate case actions", async () => {
+    const list = await api("/api/actions", { headers: headersExpired });
+    assert.equal(list.status, 401);
+    assert.equal((await list.json()).error, "authentication_required");
+    const assignees = await api("/api/actions/assignees", { headers: headersExpired });
+    assert.equal(assignees.status, 401);
+    const create = await api("/api/actions", { method: "POST", headers: headersExpired, body: { case_id: ids.caseA1, title: "نشست منقضی" } });
+    assert.equal(create.status, 401);
+    const badCsrf = await api("/api/actions", { method: "POST", headers: headersBadCsrf, body: { case_id: ids.caseA1, title: "توکن نامعتبر" } });
+    assert.equal(badCsrf.status, 403);
+    assert.equal((await badCsrf.json()).error, "csrf_token_invalid");
+  });
+
+  await t.test("rejects inactive same-office assignees and marks overdue open actions", async () => {
+    const invalid = await api("/api/actions", { method: "POST", body: { case_id: ids.caseA1, title: "مسئول غیرفعال", assigned_to: ids.userInactiveA } });
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error, "invalid_assignee");
+    const created = await api("/api/actions", { method: "POST", body: { case_id: ids.caseA1, title: "پیگیری عقب‌افتاده", assigned_to: ids.userA, due_at: iso(new Date(Date.now() - 86400000)) } });
+    await assertStatus(created, 201);
+    const action = (await created.json()).data;
+    assert.equal(action.assigned_to, ids.userA);
+    const list = await api("/api/actions?case_id=" + ids.caseA1);
+    await assertStatus(list, 200);
+    const listed = (await list.json()).data.find(item => item.id === action.id);
+    assert.equal(listed.assignee_name, "کاربر آزمایشی الف");
+    assert.equal(listed.is_overdue, true);
+    await api("/api/actions/" + action.id, { method: "DELETE" });
+  });
   await t.test("creates an action linked to an office-owned case", async () => {
     const response = await api("/api/actions", {
       method: "POST",
