@@ -2,13 +2,14 @@
 
 Date: 2026-10-14
 Scope: `backend/migrations/004_case_documents_metadata.sql` on `feature/case-documents-metadata`
-Status: automated catalog assertions added; CI result pending for the resulting branch head.
+Status: catalog assertion refinement in progress; the first push-triggered run of the expanded assertions failed, and the follow-up run must verify the normalization fix.
 
 ## Current PR and CI evidence
 
 - PR #4 is open, Draft, and unmerged; base branch is `feature/case-actions`.
 - Before this update, PR head was `caa5c9c916595b69d3bcc2e8cced7dd08d1cdd9d`.
-- GitHub's available commit-status endpoint returned no statuses for that SHA. The connected workflow-run listing returned no PR-triggered runs for that SHA; this endpoint filters to PR-triggered runs and therefore does not prove the absence of a push-triggered run.
+- Push-triggered workflow run `38615194007` ran against `d293366cb37d98c00d9798402181db2954ecf42f` and failed in step 13 (`Verify recovery catalog audit detects incompatible table, constraint, and index in disposable PostgreSQL`). The exact assertion failure was `CHECK expression differs from the full expected invariant`; preceding npm, syntax, migration-upgrade, rollback, and negative-migration steps passed.
+- The follow-up patch normalizes both `::character varying` and `::text` presentation casts before comparing the two full CHECK expressions. This is a test-harness normalization correction, not a migration/schema change.
 - This report is intentionally not marked CI-passing. The new head SHA must be checked independently and the run must complete against that exact SHA.
 
 ## Catalog contract checked
