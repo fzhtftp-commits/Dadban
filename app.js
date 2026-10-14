@@ -186,13 +186,21 @@ async function loadDashboard() {
       if (actionsResponse.status === 401) { window.location.href = "login.html"; return; }
       if (!actionsResponse.ok) throw new Error("actions_api_failed");
       const actionsPayload = await actionsResponse.json();
-      const actions = (Array.isArray(actionsPayload?.data) ? actionsPayload.data : []).filter(item => item.status === "todo" || item.status === "in_progress").slice(0, 5);
-      actionsBody.innerHTML = actions.length ? actions.map(item => `<div class="event">
+      const actions = (Array.isArray(actionsPayload?.data) ? actionsPayload.data : [])
+        .filter(item => item.status === "todo" || item.status === "in_progress")
+        .sort((a, b) => Number(Boolean(b.is_overdue)) - Number(Boolean(a.is_overdue)) || new Date(a.due_at || "9999-12-31").getTime() - new Date(b.due_at || "9999-12-31").getTime())
+        .slice(0, 5);
+      const overdueCount = actions.filter(item => item.is_overdue).length;
+      actionsBody.innerHTML = (overdueCount ? `<div class="overdue-summary" role="status">⚠ ${toFa(overdueCount)} پیگیری عقب‌افتاده در فهرست نمایش‌داده‌شده</div>` : "") + (actions.length ? actions.map(item => {
+        const overdue = Boolean(item.is_overdue);
+        return `<div class="event${overdue ? " overdue-event" : ""}">
         <b>${escapeHtml(item.title || "اقدام پرونده")}</b>
         <span>${escapeHtml(item.due_at ? formatDateTime(item.due_at) : "بدون مهلت تعیین‌شده")}</span>
         <small>پرونده ${escapeHtml(item.case_number || "—")} · ${escapeHtml(item.status === "in_progress" ? "در حال انجام" : "انجام‌نشده")}</small>
+        ${overdue ? '<strong class="overdue-badge">مهلت گذشته</strong>' : ""}
         <a href="actions.html?case_id=${encodeURIComponent(item.case_id)}">مشاهده پیگیری‌های پرونده</a>
-      </div>`).join("") : '<div class="empty-state">پیگیری بازی وجود ندارد.</div>';
+      </div>`;
+      }).join("") : '<div class="empty-state">پیگیری بازی وجود ندارد.</div>');
     } catch (error) {
       actionsBody.innerHTML = '<div class="empty-state">دریافت پیگیری‌ها انجام نشد.</div>';
       console.error("Dashboard actions load failed:", error);
