@@ -79,6 +79,8 @@ before(async () => {
   await db.query(schema);
   const caseActionsMigration = await readFile(path.join(root, "database/migrations/20261014_case_actions.sql"), "utf8");
   await db.query(caseActionsMigration);
+  const caseDocumentsMigration = await readFile(path.join(root, "database/migrations/20261014_case_documents_metadata.sql"), "utf8");
+  await db.query(caseDocumentsMigration);
   await db.query("insert into offices (id, name) values ($1, $2), ($3, $4)", [ids.officeA, "دفتر آزمایشی الف", ids.officeB, "دفتر آزمایشی ب"]);
   await db.query("insert into users (id, office_id, full_name, email, role) values ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)", [ids.userA, ids.officeA, "کاربر آزمایشی الف", "office-a@example.test", "owner", ids.userB, ids.officeB, "کاربر آزمایشی ب", "office-b@example.test", "owner"]);
   await db.query("insert into users (id, office_id, full_name, email, role, is_active) values ($1, $2, $3, $4, $5, false)", [ids.userInactiveA, ids.officeA, "کاربر غیرفعال", "inactive-a@example.test", "assistant"]);
@@ -389,5 +391,70 @@ test("case action API: CRUD, validation, audit, and office isolation", async (t)
     assert.ok(row.rows[0].deleted_at);
     const audit = await db.query("select count(*)::int as n from audit_logs where entity_type = 'case_action' and entity_id = $1 and action = 'delete'", [actionId]);
     assert.equal(audit.rows[0].n, 1);
+  });
+});
+
+
+test("case document metadata API: validation, office isolation, CSRF, audit and soft delete", async (t) => {
+  let documentId;
+  await t.test("creates metadata only for a case in the authenticated office", async () => {
+    const response = await api("/api/documents", {
+      method: "POST",
+      body: { case_id: ids.caseA1, title: "لایحه آزمایشی", document_type: "pleading", reference_number: "DOC-001", confidentiality: "confidential" }
+    });
+    await assertStatus(response, 201);
+    const data = (await response.json()).data;
+    documentId = data.id;
+    assert.equal(data.office_id, ids.officeA);
+    assert.equal(data.case_id, ids.caseA1);
+    assert.equal(data.storage_status, "metadata_only");
+    assert.equal(data.document_type, "pleading");
+  });
+
+  await t.test("lists only documents in the user's office and rejects foreign case references", async () => {
+    const listA = await api("/api/documents");
+    await assertStatus(listA, 200);
+    assert.ok((await listA.json()).data.some(d => d.id === documentId));
+    const listB = await api("/api/documents", { headers: headersB });
+    await assertStatus(listB, 200);
+    assert.equal((await listB.json()).data.length, 0);
+    const foreignCase = await api("/api/documents", {
+      method: "POST", body: { case_id: ids.caseB, title: "سند دفتر دیگر" }
+    });
+    assert.equal(foreignCase.status, 400);
+    assert.equal((await foreignCase.json()).error, "invalid_related_case");
+    const crossOfficeRead = await api("/api/documents/" + documentId, { headers: headersB });
+    assert.equal(crossOfficeRead.status, 404);
+  });
+
+  await t.test("rejects invalid metadata, unsupported upload fields, and invalid CSRF", async () => {
+    const invalid = await api("/api/documents", {
+      method: "POST", body: { case_id: ids.caseA1, title: "x", file_url: "https://example.test/file.pdf" }
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error, "invalid_document");
+    const badCsrf = await api("/api/documents/" + documentId, {
+      method: "PATCH", headers: headersBadCsrf, body: { title: "نباید ذخیره شود" }
+    });
+    assert.equal(badCsrf.status, 403);
+    assert.equal((await badCsrf.json()).error, "csrf_token_invalid");
+    const unchanged = await api("/api/documents/" + documentId);
+    assert.equal((await unchanged.json()).data.title, "لایحه آزمایشی");
+  });
+
+  await t.test("updates and soft-deletes metadata with audit records", async () => {
+    const update = await api("/api/documents/" + documentId, {
+      method: "PATCH", body: { title: "لایحه اصلاح‌شده", confidentiality: "restricted" }
+    });
+    await assertStatus(update, 200);
+    assert.equal((await update.json()).data.title, "لایحه اصلاح‌شده");
+    const remove = await api("/api/documents/" + documentId, { method: "DELETE" });
+    assert.equal(remove.status, 204);
+    const hidden = await api("/api/documents/" + documentId);
+    assert.equal(hidden.status, 404);
+    const row = await db.query("select deleted_at from case_documents where id = $1", [documentId]);
+    assert.ok(row.rows[0].deleted_at);
+    const audit = await db.query("select count(*)::int as n from audit_logs where entity_type = 'case_document' and entity_id = $1", [documentId]);
+    assert.ok(audit.rows[0].n >= 3);
   });
 });
