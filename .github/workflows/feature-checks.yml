@@ -1,0 +1,24 @@
+name: Dadban Feature Checks
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [feature/hearings-calendar]
+permissions:
+  contents: read
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check backend JavaScript syntax
+        run: node --check backend/src/server.js
+      - name: Check frontend JavaScript syntax
+        run: |
+          node --check hearings.js
+          node --check app.js
+          node --check cases.js
+          node --check clients.js
