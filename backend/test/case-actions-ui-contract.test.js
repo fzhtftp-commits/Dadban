@@ -24,6 +24,14 @@ test("actions page is Persian, links to the current case, and exposes CRUD contr
   assert.match(dashboardHtml, /id="upcomingActionsBody"/);
   assert.ok(dashboardJs.includes("/api/actions?limit=50"));
   assert.ok(dashboardJs.includes("actions.html?case_id="));
+  assert.ok(dashboardJs.includes("overdue-summary"));
+  assert.ok(dashboardJs.includes("overdue-event"));
+  assert.ok(dashboardJs.includes("is_overdue"));
+  assert.ok(profileHtml.includes('id="caseActionsList"'));
+  assert.ok(profileHtml.includes('id="caseActionsSummary"'));
+  assert.ok(profileJs.includes("/api/actions?case_id="));
+  assert.ok(profileJs.includes("مهلت گذشته"));
+  assert.ok(profileJs.includes("caseActionsAllLink"));
 });
 
 test("actions UI uses authenticated requests, CSRF for writes, and clear error messages", () => {
