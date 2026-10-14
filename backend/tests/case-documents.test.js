@@ -71,3 +71,11 @@ test("database connections and statements have bounded timeouts", () => {
  assert.match(server, /connectionTimeoutMillis: 10000/);
  assert.match(server, /statement_timeout: Number\(process\.env\.DB_STATEMENT_TIMEOUT_MS \|\| 15000\)/);
 });
+
+test("document metadata rejects client-controlled office/case/storage fields and impossible dates", () => {
+ assert.match(server, /const caseDocumentCreateSchema = z\.object\([\s\S]*?\)\.strict\(\)/);
+ assert.match(server, /caseDocumentCreateSchema\.omit\(\{case_id:true\}\)\.partial\(\)\.strict\(\)/);
+ assert.match(server, /date\.toISOString\(\)\.slice\(0,10\) === value/);
+ assert.match(server, /reference_number: z\.string\(\)\.trim\(\)\.max\(100\)/);
+ assert.match(migration, /storage_status = 'metadata_only' and storage_key is null/);
+});
