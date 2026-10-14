@@ -281,6 +281,23 @@ try {
   });
   assert.equal(invalidKey.status, 400, "malformed idempotency keys must be rejected");
 
+  const concurrentPayload = { case_id: ids.caseA, title: "Concurrent idempotency regression", document_type: "contract" };
+  const concurrentKey = "concurrent-key-12345";
+  const concurrentCreates = await Promise.all([
+    request("/api/case-documents", { token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: concurrentKey, body: concurrentPayload }),
+    request("/api/case-documents", { token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: concurrentKey, body: concurrentPayload })
+  ]);
+  assert.deepEqual(concurrentCreates.map(result => result.status).sort(), [200, 201],
+    "concurrent same-key creates should yield one creation and one replay");
+  assert.equal(concurrentCreates[0].body.data.id, concurrentCreates[1].body.data.id,
+    "concurrent idempotent requests must return the same document");
+  const concurrentAudit = await pool.query(
+    "select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'",
+    [concurrentCreates[0].body.data.id]
+  );
+  assert.equal(concurrentAudit.rows[0].count, 1, "concurrent retry must create exactly one audit event");
+  console.log("PASS: concurrent idempotency retries create one document and one audit event");
+
 
   await pool.query(`
     create or replace function reject_document_mutation_audit() returns trigger language plpgsql as $fn$
