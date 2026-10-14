@@ -196,11 +196,117 @@ BEGIN
     RAISE EXCEPTION 'storage_status CHECK mismatch';
   END IF;
 
+  -- Require the complete expected CHECK inventory, not just a count.
+  IF (SELECT array_agg(c.conname ORDER BY c.conname)
+      FROM pg_constraint c
+      WHERE c.conrelid='${expected_schema}.case_documents'::regclass AND c.contype='c')
+     <> ARRAY[
+       'case_documents_document_type_check',
+       'case_documents_idempotency_pair',
+       'case_documents_size_bytes_check',
+       'case_documents_storage_metadata_consistency',
+       'case_documents_storage_status_check'
+     ]::name[] THEN
+    RAISE EXCEPTION 'CHECK constraint inventory mismatch';
+  END IF;
+
+  -- Evaluate actual catalog CHECK expressions against allowed-value and boundary matrices.
+  -- This catches missing/extra enum members and weakened numeric/cross-field checks.
+  DECLARE
+    check_expr text;
+    probe_value text;
+    probe_ok boolean;
+  BEGIN
+    SELECT pg_get_expr(c.conbin,c.conrelid) INTO check_expr
+    FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.conname='case_documents_document_type_check';
+    FOREACH probe_value IN ARRAY ARRAY['petition','contract','evidence','court_order','correspondence','identity','receipt','other'] LOOP
+      EXECUTE 'SELECT (' || regexp_replace(check_expr, '\mdocument_type\M', quote_literal(probe_value), 'g') || ')' INTO probe_ok;
+      IF probe_ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'document_type CHECK rejected allowed value %', probe_value; END IF;
+    END LOOP;
+    EXECUTE 'SELECT (' || regexp_replace(check_expr, '\mdocument_type\M', quote_literal('__invalid__'), 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM false THEN RAISE EXCEPTION 'document_type CHECK accepted unexpected value'; END IF;
+
+    SELECT pg_get_expr(c.conbin,c.conrelid) INTO check_expr
+    FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.conname='case_documents_storage_status_check';
+    FOREACH probe_value IN ARRAY ARRAY['metadata_only','pending_storage','stored','quarantined'] LOOP
+      EXECUTE 'SELECT (' || regexp_replace(check_expr, '\mstorage_status\M', quote_literal(probe_value), 'g') || ')' INTO probe_ok;
+      IF probe_ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'storage_status CHECK rejected allowed value %', probe_value; END IF;
+    END LOOP;
+    EXECUTE 'SELECT (' || regexp_replace(check_expr, '\mstorage_status\M', quote_literal('__invalid__'), 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM false THEN RAISE EXCEPTION 'storage_status CHECK accepted unexpected value'; END IF;
+
+    SELECT pg_get_expr(c.conbin,c.conrelid) INTO check_expr
+    FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.conname='case_documents_size_bytes_check';
+    FOREACH probe_value IN ARRAY ARRAY['NULL','-1','0','26214400','26214401'] LOOP
+      EXECUTE 'SELECT (' || regexp_replace(check_expr, '\msize_bytes\M', probe_value, 'g') || ')' INTO probe_ok;
+      IF probe_value IN ('NULL','0','26214400') AND probe_ok IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'size_bytes CHECK rejected allowed boundary %', probe_value;
+      ELSIF probe_value IN ('-1','26214401') AND probe_ok IS DISTINCT FROM false THEN
+        RAISE EXCEPTION 'size_bytes CHECK accepted out-of-range value %', probe_value;
+      END IF;
+    END LOOP;
+
+    SELECT pg_get_expr(c.conbin,c.conrelid) INTO check_expr
+    FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.conname='case_documents_storage_metadata_consistency';
+    EXECUTE 'SELECT (' || regexp_replace(regexp_replace(check_expr, '\mstorage_status\M', quote_literal('metadata_only'), 'g'), '\mstorage_key\M', 'NULL::text', 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'metadata_only with null storage_key must pass'; END IF;
+    EXECUTE 'SELECT (' || regexp_replace(regexp_replace(check_expr, '\mstorage_status\M', quote_literal('metadata_only'), 'g'), '\mstorage_key\M', quote_literal('stored/key'), 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM false THEN RAISE EXCEPTION 'metadata_only with non-null storage_key must fail'; END IF;
+    EXECUTE 'SELECT (' || regexp_replace(regexp_replace(check_expr, '\mstorage_status\M', quote_literal('stored'), 'g'), '\mstorage_key\M', quote_literal('stored/key'), 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'stored status with storage_key must pass'; END IF;
+
+    SELECT pg_get_expr(c.conbin,c.conrelid) INTO check_expr
+    FROM pg_constraint c
+    WHERE c.conrelid='${expected_schema}.case_documents'::regclass
+      AND c.conname='case_documents_idempotency_pair';
+    EXECUTE 'SELECT (' || regexp_replace(regexp_replace(check_expr, '\midempotency_key\M', 'NULL::character varying', 'g'), '\mrequest_fingerprint\M', 'NULL::character', 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'both idempotency fields null must pass'; END IF;
+    EXECUTE 'SELECT (' || regexp_replace(regexp_replace(check_expr, '\midempotency_key\M', quote_literal('key-1'), 'g'), '\mrequest_fingerprint\M', quote_literal(repeat('a',64)), 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM true THEN RAISE EXCEPTION 'both idempotency fields populated must pass'; END IF;
+    EXECUTE 'SELECT (' || regexp_replace(regexp_replace(check_expr, '\midempotency_key\M', quote_literal('key-1'), 'g'), '\mrequest_fingerprint\M', 'NULL::character', 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM false THEN RAISE EXCEPTION 'idempotency key without fingerprint must fail'; END IF;
+    EXECUTE 'SELECT (' || regexp_replace(regexp_replace(check_expr, '\midempotency_key\M', 'NULL::character varying', 'g'), '\mrequest_fingerprint\M', quote_literal(repeat('a',64)), 'g') || ')' INTO probe_ok;
+    IF probe_ok IS DISTINCT FROM false THEN RAISE EXCEPTION 'fingerprint without idempotency key must fail'; END IF;
+  END;
+
+  -- Require exactly the expected foreign-key inventory, including direct office FK.
+  IF (SELECT array_agg(c.conname ORDER BY c.conname)
+      FROM pg_constraint c
+      WHERE c.conrelid='${expected_schema}.case_documents'::regclass AND c.contype='f')
+     <> ARRAY[
+       'case_documents_case_same_office_fk',
+       'case_documents_created_by_same_office_fk',
+       'case_documents_office_id_fkey',
+       'case_documents_updated_by_same_office_fk'
+     ]::name[] THEN
+    RAISE EXCEPTION 'foreign key inventory mismatch';
+  END IF;
+
   -- PK must be on id; compare index key order, uniqueness, partial predicates,
   -- validity/readiness, and index ownership rather than trusting index names.
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid='${expected_schema}.case_documents'::regclass
       AND c.contype='p' AND c.convalidated AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='${expected_schema}.case_documents'::regclass AND attname='id')]::smallint[]) THEN
     RAISE EXCEPTION 'primary key definition mismatch';
+  END IF;
+  IF (SELECT array_agg(idx.relname ORDER BY idx.relname)
+      FROM pg_index i
+      JOIN pg_class idx ON idx.oid=i.indexrelid
+      WHERE i.indrelid='${expected_schema}.case_documents'::regclass)
+     <> ARRAY[
+       'case_documents_idempotency_unique_idx',
+       'case_documents_office_case_created_idx',
+       'case_documents_office_created_idx',
+       'case_documents_pkey'
+     ]::name[] THEN
+    RAISE EXCEPTION 'index inventory mismatch';
   END IF;
   IF (SELECT count(*) FROM pg_index i JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents') <> 4 THEN
