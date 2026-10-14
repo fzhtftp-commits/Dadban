@@ -308,6 +308,27 @@ const requireCsrf = (req, res, next) => {
   next();
 };
 
+const syncCaseNextHearing = async (client, officeId, caseId) => {
+  await client.query(
+    `
+      update cases c
+      set next_hearing_at = (
+        select min(h.hearing_at)
+        from hearings h
+        where h.office_id = c.office_id
+          and h.case_id = c.id
+          and h.deleted_at is null
+          and h.status in ('scheduled', 'postponed')
+          and h.hearing_at >= now()
+      ),
+      updated_at = now()
+      where c.id = $1
+        and c.office_id = $2
+        and c.deleted_at is null
+    `,
+    [caseId, officeId]
+  );
+};
 const writeAuditLog = async (client, auth, action, entityType, entityId, req, metadata = null) => {
   await client.query(
     `
@@ -1161,6 +1182,7 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
       data.court_name ?? null, data.branch_name ?? null, data.status,
       data.reminder_minutes, data.notes ?? null, req.auth.userId]);
     const hearing = result.rows[0];
+    await syncCaseNextHearing(client, req.auth.officeId, hearing.case_id);
     await writeAuditLog(client, req.auth, "create", "hearing", hearing.id, req, { case_id: hearing.case_id });
     await client.query("commit");
     return res.status(201).json({ data: hearing });
@@ -1191,7 +1213,8 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       await client.query("rollback");
       return res.status(404).json({ error: "hearing_not_found" });
     }
-    const nextCaseId = data.case_id ?? current.rows[0].case_id;
+    const previousCaseId = current.rows[0].case_id;
+    const nextCaseId = data.case_id ?? previousCaseId;
     const related = await client.query(
       "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
       [nextCaseId, req.auth.officeId]
@@ -1217,6 +1240,10 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       `update hearings set ${sets.join(", ")} where id = ${values.length - 1} and office_id = ${values.length} and deleted_at is null returning *`,
       values
     );
+    await syncCaseNextHearing(client, req.auth.officeId, previousCaseId);
+    if (nextCaseId !== previousCaseId) {
+      await syncCaseNextHearing(client, req.auth.officeId, nextCaseId);
+    }
     await writeAuditLog(client, req.auth, "update", "hearing", id.data, req, { fields: Object.keys(data) });
     await client.query("commit");
     return res.json({ data: result.rows[0] });
@@ -1244,6 +1271,7 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
       await client.query("rollback");
       return res.status(404).json({ error: "hearing_not_found" });
     }
+    await syncCaseNextHearing(client, req.auth.officeId, result.rows[0].case_id);
     await writeAuditLog(client, req.auth, "delete", "hearing", id.data, req, { case_id: result.rows[0].case_id });
     await client.query("commit");
     return res.status(204).send();
