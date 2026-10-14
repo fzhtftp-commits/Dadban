@@ -146,6 +146,12 @@ try {
   const rejectedAudit = await pool.query("select count(*)::int as count from audit_logs where action='create' and entity_type='case_document'");
   assert.equal(rejectedAudit.rows[0].count, 0, "rejected writes must not create audit records");
 
+  const oversizedBody = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Oversized request", description: "x".repeat(110000) }
+  });
+  assert.equal(oversizedBody.status, 413, "oversized JSON request must receive 413");
+  assert.deepEqual(oversizedBody.body, { error: "request_too_large" }, "oversized request response must not disclose parser internals");
   const created = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST",
     body: { case_id: ids.caseA, title: "Confidential Office A document", document_type: "other" }
@@ -237,6 +243,11 @@ try {
   assert.equal(hiddenList.body.data.some(item => item.id === documentId), false, "soft-deleted document must be hidden from list API");
   const deleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
   assert.equal(deleteAudit.rows[0].count, 1, "successful soft delete must be audited once");
+  const repeatedDelete = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "DELETE" });
+  assert.equal(repeatedDelete.status, 404, "repeated soft delete must return not found");
+  const repeatDeleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
+  assert.equal(repeatDeleteAudit.rows[0].count, 1, "repeated delete must not create duplicate audit events");
+
 
   console.log("PASS: office A can read its own document");
   console.log("PASS: office B list does not disclose office A document");
@@ -246,6 +257,8 @@ try {
   console.log("PASS: audit failures roll back update and soft delete");
   console.log("PASS: soft-deleted document is hidden and audited once");
   console.log("PASS: title and size boundary inputs are rejected");
+  console.log("PASS: oversized JSON receives a sanitized 413 response");
+  console.log("PASS: repeated soft delete does not duplicate audit events");
   console.log("PASS: cross-office read rejected");
   console.log("PASS: cross-office update rejected without mutation");
   console.log("PASS: cross-office delete rejected without mutation");
