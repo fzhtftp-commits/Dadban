@@ -79,3 +79,36 @@ Implementation notes:
 - Automated CI passing means the covered tests passed; it is not a complete security audit.
 - The product-approved role-permission policy is recorded above and implemented with route guards; merge remains blocked until the latest exact-SHA CI result and remaining human review items are complete.
 - Remaining blockers include human role-policy review, schema/migration review, staging verification, deployment-topology validation, and explicit pre-merge approval.
+
+
+## Migration / index / rollback audit — 2026-10-14
+
+Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/tests/case-documents-isolation.sql`, `database/schema.sql`, `database/migrations/20261014_case_actions.sql`, and the branch-scoped workflow. This is a source review plus disposable-PostgreSQL CI evidence, not authorization to apply the migration to a shared or production database.
+
+### Findings
+
+- **Composite office-scoped foreign keys:** the document table ties `(case_id, office_id)` to `cases(id, office_id)`, and `(created_by, office_id)` / `(updated_by, office_id)` to `users(id, office_id)`. This prevents a document from linking to a case or actor in a different office, assuming the referenced composite unique keys exist.
+- **Prerequisite/order dependency:** `database/schema.sql` and `database/migrations/20261014_case_actions.sql` define `cases_id_office_unique` and `users_id_office_unique`. Migration `004_case_documents_metadata.sql` depends on those keys but does not create or preflight them itself. Before any use, verify that the approved baseline/preceding migration has been applied in the target environment; do not run this migration against an older schema and assume it is standalone.
+- **Coverage limitation in migration test:** `case-documents-isolation.sql` creates simplified fixture tables and their composite unique keys itself before including migration 004. It proves rejection of cross-office case/actor references and over-limit size in that fixture, but does **not** prove that a real upgraded database has the prerequisites in the correct migration order. Add a disposable full-baseline upgrade test before considering this migration release-ready.
+- **Indexes:** the partial unique index on `(office_id, created_by, idempotency_key)` protects keyed create retries per office/actor; the partial `(office_id, case_id, created_at DESC)` index supports active documents for a case; and `(office_id, created_at DESC)` supports active office listings. The first listing index also starts with the columns used by the composite case FK. There are no dedicated indexes beginning with `(office_id, created_by)` or `(office_id, updated_by)`; evaluate these if user deletion/update or actor-based reporting becomes a frequent operation, rather than adding indexes without workload evidence.
+- **Storage-state consistency:** the check prevents `metadata_only` rows from carrying a storage key, but permits `stored` with a null `storage_key`. Current API scope does not expose storage state or file bytes, so this is not currently a client-write path; before enabling storage, tighten and test the state machine (at minimum, a stored object must have a valid non-empty private storage key).
+- **Partial-apply risk:** migration 004 does not contain an explicit transaction wrapper. If the chosen migration runner does not wrap it in a transaction, an error after table creation could leave a partially applied schema. Confirm runner behavior or run it inside an explicit transaction after confirming all statements are transaction-compatible; do not retry blindly after a partial failure. The current CI includes it inside a disposable test transaction, which is not equivalent to testing every deployment runner's behavior.
+
+### Rollback / recovery runbook (not executed)
+
+1. **Before change:** confirm exact target database/environment, migration order, PostgreSQL version, expected schema objects, and a maintenance/read-only window appropriate to the application. Take a verified backup/snapshot and record its identifier and timestamp.
+2. **Prove recovery:** restore that backup into a separate disposable database and verify connectivity, row counts, critical constraints, and application smoke tests. A backup that has not been restored successfully is not a verified recovery path.
+3. **Preflight:** check that `offices`, `cases`, and `users` exist; confirm the composite unique keys `cases_id_office_unique` and `users_id_office_unique` cover exactly `(id, office_id)`; confirm no same-named index/constraint has a different definition; and inspect for an existing/partial `case_documents` table before applying anything.
+4. **Apply only in an approved non-production rehearsal first:** capture the migration output and verify the table, all three composite foreign keys, check constraints, and all three indexes by querying PostgreSQL catalogs. Run same-office success and cross-office rejection cases, idempotency conflict cases, and soft-delete listing checks.
+5. **On failure:** stop writes to the new feature and preserve logs. Inspect the catalog to determine exactly which statements committed. If the migration was transactionally rolled back, verify that no new objects remain before retrying. If partial objects remain, compare each object with the migration and repair deliberately; do not use `IF NOT EXISTS` as proof that an existing object has the right definition.
+6. **After successful shared-environment migration:** verify constraints are validated, index definitions match, API smoke tests and office-isolation checks pass, and audit records remain intact. Monitor errors before re-enabling normal writes.
+7. **Rollback choice:** prefer a forward fix or application feature-flag disablement. Do not automatically `DROP TABLE case_documents` after metadata has been written: that would destroy records. A destructive down migration is only acceptable before any real records exist, after an explicit backup and human approval. If records exist, preserve/export them and plan a reviewed data-preserving recovery.
+8. **Current boundary:** no migration was run against production/operational data, no Render deployment was performed, and no rollback/restore has been executed. The runbook is a plan, not evidence of a completed restore drill.
+
+### Required before PR #4 can leave Draft
+
+- [ ] Add CI coverage that builds the actual baseline schema, applies prerequisite migrations in documented order, then applies migration 004 to a fresh disposable PostgreSQL database.
+- [ ] Decide and document transaction handling in the migration runner; exercise a forced failure in a disposable database and confirm the resulting schema is fully rolled back or safely recoverable.
+- [ ] Add a catalog assertion for every expected FK/check/index, including the exact indexed columns and partial predicates; verify pre-existing same-named objects rather than relying on `IF NOT EXISTS`.
+- [ ] Resolve the `stored`/null-`storage_key` invariant before any file-storage capability is introduced.
+- [ ] Complete a backup restore rehearsal and have a human reviewer approve the recovery procedure before any shared-environment migration.
