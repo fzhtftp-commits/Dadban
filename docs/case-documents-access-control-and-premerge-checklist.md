@@ -149,3 +149,11 @@ Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/t
 - It runs the real migration 004 with that probe schema first in `search_path`, and treats a nonzero `psql` exit as the expected result. If migration 004 unexpectedly succeeds, the test fails the workflow. A shell trap drops only the probe schema; the test does not touch `main`, an operational database, or Render.
 - The workflow runs this negative test after the successful full-baseline migration test and before the two-office HTTP integration test. It tests the table-conflict path directly; same-named index conflicts are prevented by the migration's ordinary `CREATE INDEX` statements too, but this dedicated test does not claim to exercise that separate path.
 - This commit updates the branch head. Do not call this new negative test CI-verified until the newly triggered GitHub Actions run succeeds on the exact latest PR head SHA.
+
+
+### Negative migration test — CI result
+
+- The disposable PostgreSQL negative test completed successfully in GitHub Actions run #120: https://github.com/fzhtftp-commits/Dadban/actions/runs/38597768618.
+- Exact tested head SHA: 787f35fcb7b1e926758fbd91ade558d2c4dab72e; this matched PR #4's head when verified. The run's backend-tests check completed with conclusion success; npm tests, migration upgrade/rollback, the new incompatible-table negative test, and two-office HTTP isolation all passed.
+- The expected SQL failure is caught by the shell harness and reported as a passing negative test; it does not intentionally leave the workflow red. The test is limited to the disposable PostgreSQL service.
+- This report update creates a new commit, so the latest Actions result must be checked against the new exact PR head before saying the branch's final CI is current.
