@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rollbackQuietly, releaseClient } from "../src/document-transaction.js";
+import { acquireClient, rollbackQuietly, releaseClient } from "../src/document-transaction.js";
 
 test("successful rollback leaves client reusable until final release", async () => {
   let rollbackCalls = 0;
@@ -15,6 +15,23 @@ test("successful rollback leaves client reusable until final release", async () 
   releaseClient(client);
   releaseClient(client);
   assert.equal(releaseCalls, 1, "client should be released exactly once");
+});
+
+test("reused pool client can be released once per checkout", async () => {
+  let releaseCalls = 0;
+  const client = {
+    async query() {},
+    release() { releaseCalls++; }
+  };
+  const pool = { async connect() { return client; } };
+  const firstCheckout = await acquireClient(pool);
+  releaseClient(firstCheckout);
+  releaseClient(firstCheckout);
+  assert.equal(releaseCalls, 1, "duplicate cleanup in one checkout must be ignored");
+  const secondCheckout = await acquireClient(pool);
+  assert.equal(secondCheckout, client, "pool may reuse the same client object");
+  releaseClient(secondCheckout);
+  assert.equal(releaseCalls, 2, "reused client must be released for the new checkout");
 });
 
 test("rollback failure discards client and never throws to the request handler", async () => {
