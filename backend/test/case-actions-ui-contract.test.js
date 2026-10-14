@@ -15,7 +15,7 @@ const dashboardJs = read("../../app.js");
 
 test("actions page is Persian, links to the current case, and exposes CRUD controls", () => {
   assert.match(page, /lang="fa" dir="rtl"/);
-  for (const id of ["actionForm","caseId","actionTitle","actionDescription","dueAt","actionStatus","actionPriority","actionsBody","filterCaseId","filterStatus"]) {
+  for (const id of ["actionForm","caseId","assignedTo","actionTitle","actionDescription","dueAt","actionStatus","actionPriority","actionsBody","filterCaseId","filterStatus"]) {
     assert.match(page, new RegExp('id="' + id + '"'));
   }
   assert.match(profileHtml, /id="caseActionsLink"/);
@@ -30,9 +30,12 @@ test("actions UI uses authenticated requests, CSRF for writes, and clear error m
   assert.match(ui, /credentials:"include"/);
   assert.match(ui, /"x-csrf-token":csrf\(\)/);
   assert.match(ui, /response.status===401/);
-  for (const code of ["csrf_token_required","csrf_token_invalid","origin_not_allowed","invalid_related_case","invalid_assignee","invalid_action","action_not_found"]) {
+  for (const code of ["csrf_token_required","csrf_token_invalid","origin_not_allowed","invalid_related_case","invalid_assignee","invalid_action","action_not_found","authentication_required"]) {
     assert.ok(ui.includes(code), "UI should handle " + code);
   }
+  assert.ok(ui.includes("/api/actions/assignees"));
+  assert.ok(ui.includes("is_overdue"));
+  assert.ok(ui.includes("overdue-badge"));
   assert.match(ui, /textContent=text/);
   assert.match(ui, /esc\(a\.title\)/);
 });
@@ -48,6 +51,11 @@ test("case_actions schema enforces office/case and office/assignee relationships
     assert.ok(schema.includes("'" + status + "'"));
     assert.ok(server.includes('"' + status + '"'));
   }
+});
+
+test("assignee API is limited to active users in the current office", () => {
+  assert.ok(server.includes('/api/actions/assignees'));
+  assert.ok(server.includes("office_id = $1 and is_active = true and deleted_at is null"));
 });
 
 test("case action API is office-scoped, validates input, and audits changes", () => {
