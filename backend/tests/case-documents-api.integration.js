@@ -14,6 +14,7 @@ const port = Number(process.env.DADBAN_TEST_PORT || 18127);
 const origin = "http://localhost:5500";
 const pool = new Pool({ connectionString: databaseUrl, ssl: false, max: 3 });
 let server;
+let serverOutput = "";
 
 const ids = {
   officeA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -92,13 +93,9 @@ try {
 
   const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
   await pool.query(migration);
-  await pool.query(`
-    insert into offices(id,name) values ($1,'Office A'),($2,'Office B');
-    insert into users(id,office_id,full_name,email) values
-      ($3,$1,'Test User A','a@example.test'),($4,$2,'Test User B','b@example.test');
-    insert into cases(id,office_id,case_number,title) values
-      ($5,$1,'A-001','Case A'),($6,$2,'B-001','Case B');
-  `, [ids.officeA, ids.officeB, ids.userA, ids.userB, ids.caseA, ids.caseB]);
+  await pool.query("insert into offices(id,name) values ($1,'Office A'),($2,'Office B')", [ids.officeA, ids.officeB]);
+  await pool.query("insert into users(id,office_id,full_name,email) values ($1,$2,'Test User A','a@example.test'),($3,$4,'Test User B','b@example.test')", [ids.userA,ids.officeA,ids.userB,ids.officeB]);
+  await pool.query("insert into cases(id,office_id,case_number,title) values ($1,$2,'A-001','Case A'),($3,$4,'B-001','Case B')", [ids.caseA,ids.officeA,ids.caseB,ids.officeB]);
   await pool.query(`
     insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values
       ($1,$2,$3,$4,now()+interval '1 hour'),
@@ -110,7 +107,6 @@ try {
     env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
     stdio: ["ignore", "pipe", "pipe"]
   });
-  let serverOutput = "";
   server.stdout.on("data", chunk => { serverOutput += chunk.toString(); });
   server.stderr.on("data", chunk => { serverOutput += chunk.toString(); });
   await waitForServer();
