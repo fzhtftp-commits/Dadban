@@ -437,6 +437,33 @@ BEGIN
     RAISE EXCEPTION 'idempotency unique index null semantics or key count mismatch';
   END IF;
 
+  -- Assert the operator class attached to each index key, not just its column number.
+  IF EXISTS (
+    SELECT 1
+    FROM (VALUES
+      ('case_documents_pkey',1,'uuid_ops'),
+      ('case_documents_idempotency_unique_idx',1,'uuid_ops'),
+      ('case_documents_idempotency_unique_idx',2,'uuid_ops'),
+      ('case_documents_idempotency_unique_idx',3,'varchar_ops'),
+      ('case_documents_office_case_created_idx',1,'uuid_ops'),
+      ('case_documents_office_case_created_idx',2,'uuid_ops'),
+      ('case_documents_office_case_created_idx',3,'timestamptz_ops'),
+      ('case_documents_office_created_idx',1,'uuid_ops'),
+      ('case_documents_office_created_idx',2,'timestamptz_ops')
+    ) AS expected(index_name,key_ordinal,opclass_name)
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM pg_index i
+      JOIN pg_class idx ON idx.oid=i.indexrelid
+      JOIN pg_opclass opc ON opc.oid = (i.indclass::oid[])[expected.key_ordinal]
+      WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+        AND idx.relname=expected.index_name
+        AND opc.opcname=expected.opclass_name
+    )
+  ) THEN
+    RAISE EXCEPTION 'index key operator class differs from expected catalog contract';
+  END IF;
+
   -- Prove the inspection logic detects same-named but structurally wrong objects.
   IF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid='${bad_schema}.case_documents'::regclass AND a.attname='case_id' AND a.atttypid='uuid'::regtype AND a.attnum>0 AND NOT a.attisdropped) THEN
     RAISE EXCEPTION 'incompatible table fixture was not detected';
