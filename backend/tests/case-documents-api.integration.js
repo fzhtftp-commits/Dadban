@@ -18,6 +18,8 @@ let server;
 let serverOutput = "";
 let outageServer;
 let outageServerOutput = "";
+let timeoutServer;
+let timeoutServerOutput = "";
 
 const ids = {
   officeA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -226,6 +228,8 @@ try {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Must Roll Back" }
   });
   assert.equal(failedUpdate.status, 500, "audit insert failure should return a generic server error");
+  assert.deepEqual(failedUpdate.body, { error: "database_error" }, "unexpected database errors must not disclose internal exception text");
+  assert.equal(JSON.stringify(failedUpdate.body).includes("forced audit failure"), false, "database exception details must stay out of HTTP responses");
   const afterFailedUpdate = await pool.query("select title from case_documents where id=$1", [documentId]);
   assert.equal(afterFailedUpdate.rows[0].title, "Confidential Office A document", "document update must roll back when audit insert fails");
   const failedUpdateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
@@ -264,6 +268,72 @@ try {
   assert.equal(repeatedDelete.status, 404, "repeated soft delete must return not found");
   const repeatDeleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
   assert.equal(repeatDeleteAudit.rows[0].count, 1, "repeated delete must not create duplicate audit events");
+  
+  const raceCreated = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Concurrent mutation regression" }
+  });
+  assert.equal(raceCreated.status, 201, "race-test document should be created");
+  const raceId = raceCreated.body.data.id;
+  const raceResults = await Promise.all([
+    request(`/api/case-documents/${raceId}`, { token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Concurrent update" } }),
+    request(`/api/case-documents/${raceId}`, { token: tokenA, csrf: csrfA, method: "DELETE" }),
+    request(`/api/case-documents/${raceId}`, { token: tokenA, csrf: csrfA, method: "DELETE" })
+  ]);
+  assert.ok([200, 404].includes(raceResults[0].status), "concurrent update should either commit before deletion or see the deleted row");
+  assert.deepEqual(raceResults.slice(1).map(result => result.status).sort((a,b) => a-b), [204, 404], "exactly one concurrent delete may succeed");
+  const raceAudit = await pool.query("select action, count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 group by action", [raceId]);
+  const raceAuditCounts = Object.fromEntries(raceAudit.rows.map(row => [row.action, row.count]));
+  assert.equal(raceAuditCounts.delete, 1, "concurrent delete requests must create exactly one delete audit row");
+  assert.equal(raceAuditCounts.update || 0, raceResults[0].status === 200 ? 1 : 0, "update audit must match whether the update committed");
+  const racePersisted = await pool.query("select deleted_at from case_documents where id=$1", [raceId]);
+  assert.ok(racePersisted.rows[0].deleted_at, "concurrent mutation race must end in a soft-deleted state");
+
+  const timeoutCreated = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Database statement timeout regression" }
+  });
+  assert.equal(timeoutCreated.status, 201, "timeout-test document should be created");
+  const timeoutId = timeoutCreated.body.data.id;
+  await pool.query(`
+    create or replace function delay_target_document_update() returns trigger language plpgsql as $fn$
+    begin
+      if new.id = '${timeoutId}'::uuid then
+        perform pg_sleep(1);
+      end if;
+      return new;
+    end;
+    $fn$;
+    create trigger delay_target_document_update_trigger
+      before update on case_documents for each row execute function delay_target_document_update();
+  `);
+  const timeoutPort = port + 2;
+  timeoutServer = spawn(process.execPath, ["src/server.js"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, PORT: String(timeoutPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_STATEMENT_TIMEOUT_MS: "250" },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  timeoutServer.stdout.on("data", chunk => { timeoutServerOutput += chunk.toString(); });
+  timeoutServer.stderr.on("data", chunk => { timeoutServerOutput += chunk.toString(); });
+  await waitForServer(timeoutPort);
+  const timeoutResponse = await fetch(`http://127.0.0.1:${timeoutPort}/api/case-documents/${timeoutId}`, {
+    method: "PATCH",
+    headers: { origin, cookie: `dadban_session=${tokenA}; dadban_csrf=${csrfA}`, "x-csrf-token": csrfA, "content-type": "application/json" },
+    body: JSON.stringify({ title: "This update must time out" })
+  });
+  assert.equal(timeoutResponse.status, 500, "database statement timeout must fail the request without hanging");
+  const timeoutBody = await timeoutResponse.json();
+  assert.deepEqual(timeoutBody, { error: "database_error" }, "statement timeout response must be sanitized");
+  assert.equal(JSON.stringify(timeoutBody).includes("statement timeout"), false, "statement timeout details must not be disclosed");
+  const afterTimeout = await pool.query("select title from case_documents where id=$1", [timeoutId]);
+  assert.equal(afterTimeout.rows[0].title, "Database statement timeout regression", "timed-out update must roll back");
+  const timeoutAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [timeoutId]);
+  assert.equal(timeoutAudit.rows[0].count, 0, "timed-out update must not leave an audit record");
+  await pool.query("drop trigger delay_target_document_update_trigger on case_documents");
+  await pool.query("drop function delay_target_document_update()");
+  timeoutServer.kill("SIGTERM");
+  timeoutServer = null;
+
 
 
   console.log("PASS: office A can read its own document");
@@ -277,6 +347,8 @@ try {
   console.log("PASS: database connection outage returns sanitized 503");
   console.log("PASS: oversized JSON receives a sanitized 413 response");
   console.log("PASS: repeated soft delete does not duplicate audit events");
+  console.log("PASS: concurrent update/delete requests remain consistent with exactly one delete audit");
+  console.log("PASS: database statement timeout rolls back mutation and returns sanitized error");
   console.log("PASS: cross-office read rejected");
   console.log("PASS: cross-office update rejected without mutation");
   console.log("PASS: cross-office delete rejected without mutation");
@@ -288,5 +360,6 @@ try {
 } finally {
   if (server && server.exitCode === null) server.kill("SIGTERM");
   if (outageServer && outageServer.exitCode === null) outageServer.kill("SIGTERM");
+  if (timeoutServer && timeoutServer.exitCode === null) timeoutServer.kill("SIGTERM");
   await pool.end();
 }
