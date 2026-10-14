@@ -1,9 +1,11 @@
-# Migration 004 catalog audit report
-
-Date: 2026-10-14
-Scope: `backend/migrations/004_case_documents_metadata.sql` on `feature/case-documents-metadata`
-
 ## Latest verified continuation (2026-10-14)
+
+- Starting head rechecked before this continuation: `14e31f21279567cddaf0df60cdc5e1bee936be82`; PR #4 was open, Draft, unmerged, targeting `feature/case-actions`. The prior report-head CI [Run 38629188554](https://github.com/fzhtftp-commits/Dadban/actions/runs/38629188554) completed `success` on that exact SHA, and the prior catalog-test CI [Run 38629165716](https://github.com/fzhtftp-commits/Dadban/actions/runs/38629165716) completed `success` on exact test SHA `62d3ac21fcfea4150432393585d0ce4e2a9deaa7`.
+- New independent index-catalog check added in test commit `1fe57c799c87f8e44b82f9fb3c1c17a169dc6f92`: every index on the migration-created `case_documents` relation must have `pg_index.indisclustered=false` and `pg_index.indisreplident=false`. Migration 004 creates indexes but does not cluster the table or designate a replica-identity index. This is distinct from the table-level `pg_class.relreplident='d'` check, and distinct from index validity/readiness/liveness, uniqueness, and key/predicate assertions already present.
+- Migration `004_case_documents_metadata.sql` was read again and remains unchanged. The catalog audit remains scoped to the disposable PostgreSQL service in GitHub Actions; no operational database was used.
+- CI status at the time this report entry was authored: the new test commit has been pushed to `feature/case-documents-metadata`, but no workflow run for its exact SHA had appeared in the GitHub Actions API response yet. Do not treat the new test as verified until its own run is `completed/success` on exact SHA `1fe57c799c87f8e44b82f9fb3c1c17a169dc6f92`, and do not treat this report update as verified until its run is `completed/success` on the exact resulting PR head SHA.
+- PR #4 must remain open, Draft, and unmerged. No changes to `main`, operational databases, or Render.
+
 
 - Starting head verified before this change: `66e0f20ea85124f84ca3671cfb0fd69b7379d288`; PR #4 was open, Draft, unmerged, base `feature/case-actions`. Its matching report CI [Run 38627425595](https://github.com/fzhtftp-commits/Dadban/actions/runs/38627425595) completed `success` on that exact SHA; the preceding trigger/rule audit [Run 38627399692](https://github.com/fzhtftp-commits/Dadban/actions/runs/38627399692) also completed `success` on exact test SHA `da1e5015575051817a9f23dd10c36b432e3f1046`.
 - Next independent catalog gap added in test commit `967f4af06255a9bab82e9048f82b2fc98b033cfd`: check `pg_class.relrowsecurity`, `relforcerowsecurity`, and `relreplident`. Because migration 004 neither enables row-level security nor changes replica identity, the expected catalog state is RLS disabled, forced RLS disabled, and replica identity default (`'d'`). These flags affect row access/enforcement and replication semantics and are not covered by column, constraint, index, trigger, or rewrite-rule checks.
