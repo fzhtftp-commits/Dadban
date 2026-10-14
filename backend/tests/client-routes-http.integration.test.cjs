@@ -238,7 +238,8 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
     const stored = await db.query("select full_name, national_id from clients where id = $1", [clientId]);
     assert.deepEqual(stored.rows[0], { full_name: "علی رضایی ویرایش‌شده", national_id: "1234567891" });
     assert.equal((await db.query("select count(*)::int as count from audit_logs where action = 'update' and entity_id = $1", [clientId])).rows[0].count, 1);
-  })
+  });
+
   await t.test("client creation rolls back when audit-log insertion fails", async () => {
     await db.query("create function fail_audit_insert() returns trigger language plpgsql as $$ begin raise exception 'synthetic audit sink failure'; end; $$; create trigger fail_audit_insert_before_write before insert on audit_logs for each row execute function fail_audit_insert();");
     try {
@@ -252,5 +253,4 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
       await db.query("drop function if exists fail_audit_insert()");
     }
   });
-;
 });
