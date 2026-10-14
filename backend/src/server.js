@@ -1537,18 +1537,30 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
 });
 
 
+const documentTypeSchema = z.enum(["petition","contract","evidence","court_order","correspondence","identity","receipt","other"]);
+const documentDateSchema = z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/)
+  .refine((value) => { const date = new Date(value + "T00:00:00.000Z"); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; });
 const caseDocumentCreateSchema = z.object({
-  case_id: z.string().uuid(), title: z.string().trim().min(2).max(200),
-  document_type: z.enum(["petition","contract","evidence","court_order","correspondence","identity","receipt","other"]).default("other"),
+  case_id: z.string().uuid(),
+  title: z.string().trim().min(2).max(200),
+  document_type: documentTypeSchema.default("other"),
   description: z.string().trim().max(3000).optional().nullable(),
   original_filename: z.string().trim().min(1).max(255).optional().nullable(),
   mime_type: z.string().trim().max(127).optional().nullable(),
   size_bytes: z.number().int().min(0).max(25 * 1024 * 1024).optional().nullable(),
-    document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => { const date = new Date(`${value}T00:00:00.000Z`); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; }).optional().nullable(),
+  document_date: documentDateSchema.optional().nullable(),
   reference_number: z.string().trim().max(100).optional().nullable()
 }).strict();
-const caseDocumentPatchSchema = caseDocumentCreateSchema.omit({case_id:true}).partial().strict()
-  .refine((v) => Object.keys(v).length > 0, {message:"At least one field is required"});
+const caseDocumentPatchSchema = z.object({
+  title: z.string().trim().min(2).max(200).optional(),
+  document_type: documentTypeSchema.optional(),
+  description: z.string().trim().max(3000).optional().nullable(),
+  original_filename: z.string().trim().min(1).max(255).optional().nullable(),
+  mime_type: z.string().trim().max(127).optional().nullable(),
+  size_bytes: z.number().int().min(0).max(25 * 1024 * 1024).optional().nullable(),
+  document_date: documentDateSchema.optional().nullable(),
+  reference_number: z.string().trim().max(100).optional().nullable()
+}).strict().refine((v) => Object.keys(v).length > 0, {message:"At least one field is required"});
 
 app.get("/api/case-documents", requireAuth, async (req,res) => {
   const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
