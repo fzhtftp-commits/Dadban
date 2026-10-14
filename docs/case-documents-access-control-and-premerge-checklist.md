@@ -33,7 +33,8 @@ Observed in `backend/src/server.js` at the reviewed head:
 - The case-document list/detail/create/update/soft-delete routes are guarded by `requireAuth` (mutations also require trusted Origin and CSRF), and their SQL is scoped by `req.auth.officeId`.
 - No role-specific authorization guard or role comparison was found on these five case-document routes. Therefore, the code currently enforces authentication and office boundaries, but does **not** establish different document permissions for different roles. This is an observation about the code, not a claim that any particular role should or should not be allowed.
 - Existing two-office integration coverage validates office isolation, but the fixture uses the default `owner` role; it does not prove an authorization policy across all actual roles.
-- Do not add a guessed allow/deny list. Before merge, confirm the real role vocabulary from the application schema and obtain an explicit product decision for list/read/create/update/delete permissions for each role. Then implement the policy centrally and add positive and negative tests for every role/action pair, including cross-office cases.
+- The checked-in `database/schema.sql` defines the role vocabulary as `owner`, `admin`, `lawyer`, `assistant`, and `viewer`. That enum/check constraint identifies valid labels but does not define case-document permissions.
+- Do not add a guessed allow/deny list. Obtain an explicit product decision for list/read/create/update/delete permissions for each of those five roles. Then implement the policy centrally and add positive and negative tests for every role/action pair, including cross-office cases.
 
 ## Pre-merge checklist
 
