@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - "form-validation.js"
+      - "docs/forms-inventory-and-completion-plan.md"
       - "backend/tests/forms-validation.test.cjs"
       - "backend/package.json"
       - "client-form.js"
