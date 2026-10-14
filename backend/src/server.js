@@ -1108,10 +1108,10 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
   }
   const values = [req.auth.officeId];
   const conditions = ["h.office_id = $1", "h.deleted_at is null", "c.office_id = h.office_id", "c.deleted_at is null"];
-  if (from) { values.push(from); conditions.push(`h.hearing_at >= ${values.length}`); }
-  if (to) { values.push(to); conditions.push(`h.hearing_at <= ${values.length}`); }
-  if (status) { values.push(status); conditions.push(`h.status = ${values.length}`); }
-  if (case_id) { values.push(case_id); conditions.push(`h.case_id = ${values.length}`); }
+  if (from) { values.push(from); conditions.push(`h.hearing_at >= $${values.length}`); }
+  if (to) { values.push(to); conditions.push(`h.hearing_at <= $${values.length}`); }
+  if (status) { values.push(status); conditions.push(`h.status = $${values.length}`); }
+  if (case_id) { values.push(case_id); conditions.push(`h.case_id = $${values.length}`); }
   values.push(limit, offset);
   try {
     const result = await pool.query(`
@@ -1229,15 +1229,15 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     for (const field of fields) {
       if (Object.hasOwn(data, field)) {
         values.push(data[field] ?? null);
-        sets.push(`${field} = ${values.length}`);
+        sets.push(`${field} = $${values.length}`);
       }
     }
     values.push(req.auth.userId);
-    sets.push(`updated_by = ${values.length}`);
+    sets.push(`updated_by = $${values.length}`);
     sets.push("updated_at = now()");
     values.push(id.data, req.auth.officeId);
     const result = await client.query(
-      `update hearings set ${sets.join(", ")} where id = ${values.length - 1} and office_id = ${values.length} and deleted_at is null returning *`,
+      `update hearings set ${sets.join(", ")} where id = ${values.length - 1} and office_id = $${values.length} and deleted_at is null returning *`,
       values
     );
     await syncCaseNextHearing(client, req.auth.officeId, previousCaseId);
