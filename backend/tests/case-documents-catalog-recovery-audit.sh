@@ -552,6 +552,25 @@ BEGIN
     RAISE EXCEPTION 'row-security or replica-identity flags differ from migration contract';
   END IF;
 
+  -- Migration 004 declares no relation storage parameters. Unexpected reloptions
+  -- on the table or its indexes can change storage behavior independently of
+  -- column/constraint/index definitions, so require the catalog defaults.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class r
+    WHERE (
+      r.oid='${expected_schema}.case_documents'::regclass
+      OR r.oid IN (
+        SELECT i.indexrelid
+        FROM pg_index i
+        WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      )
+    )
+      AND r.reloptions IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'unexpected relation storage options on case_documents or its indexes';
+  END IF;
+
   IF EXISTS (
     SELECT 1 FROM pg_constraint c
     WHERE c.conrelid='${expected_schema}.case_documents'::regclass
