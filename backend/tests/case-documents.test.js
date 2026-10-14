@@ -96,6 +96,12 @@ test("document metadata rejects client-controlled office/case/storage fields and
 });
 
 
+test("forwarded IP headers are ignored unless proxy trust is explicitly configured", () => {
+ assert.match(server, /const trustProxyHops = process\.env\.TRUST_PROXY_HOPS/);
+ assert.match(server, /app\.set\("trust proxy", trustProxyHops/);
+ assert.doesNotMatch(server, /app\.set\("trust proxy", 1\)/);
+});
+
 test("document creation is idempotent and sensitive endpoints are rate limited", () => {
  assert.match(server, /idempotency-key/);
  assert.match(server, /request_fingerprint/);
