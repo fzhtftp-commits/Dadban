@@ -198,6 +198,29 @@ try {
     body: { case_id: ids.caseA, title: "Unknown metadata", storage_key: "private/path.pdf" }
   });
   assert.equal(unknownMetadata.status, 400, "storage metadata and unknown fields must be rejected in metadata-only phase");
+  const pathLikeFilename = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Reject path-like filename", original_filename: "../../private.pdf" }
+  });
+  assert.equal(pathLikeFilename.status, 400, "filename metadata must reject path separators");
+
+  const windowsPathFilename = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Reject Windows path filename", original_filename: "C:\\private.pdf" }
+  });
+  assert.equal(windowsPathFilename.status, 400, "filename metadata must reject Windows path separators");
+
+  const controlCharacterFilename = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseA, title: "Reject control character filename", original_filename: "bad\u0000name.pdf" }
+  });
+  assert.equal(controlCharacterFilename.status, 400, "filename metadata must reject control characters");
+
+  const pathLikeFilenameUpdate = await request("/api/case-documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa03", {
+    token: tokenA, csrf: csrfA, method: "PATCH",
+    body: { original_filename: "../private.pdf" }
+  });
+  assert.equal(pathLikeFilenameUpdate.status, 400, "filename metadata must reject path separators on update too");
   const emptyPatch = await request("/api/case-documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa03", {
     token: tokenA, csrf: csrfA, method: "PATCH", body: {}
   });
