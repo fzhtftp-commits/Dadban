@@ -46,8 +46,8 @@ async function waitForServer(portToCheck = port) {
   throw new Error("Dadban API did not become healthy in time");
 }
 
-async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true, idempotencyKey } = {}) {
-  const headers = { origin: originHeader, cookie: `dadban_session=${token}; dadban_csrf=${csrf}` };
+async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true, idempotencyKey, extraHeaders = {} } = {}) {
+  const headers = { origin: originHeader, cookie: `dadban_session=${token}; dadban_csrf=${csrf}`, ...extraHeaders };
   if (csrfHeader && ["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
     headers["x-csrf-token"] = csrf;
   }
@@ -463,6 +463,8 @@ try {
     const limited = await request("/api/case-documents", {
       token: tokenA, csrf: csrfA, method: "POST",
       idempotencyKey: `rate-limit-key-${String(i).padStart(2,"0")}`,
+      // Spoofed forwarding headers must not let a direct client rotate its limiter identity.
+      extraHeaders: { "x-forwarded-for": `198.51.100.${i + 1}` },
       body: {}
     });
     if (limited.status === 429) {
