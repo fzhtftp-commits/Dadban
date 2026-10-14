@@ -132,3 +132,12 @@ Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/t
 - Extended unit checks to guard this fail-closed source behavior. Extended the full-baseline SQL rehearsal to verify the actual definitions of all three office-scoped foreign keys and both named check constraints, not merely their names; index checks already assert the expected columns/order and partial predicates.
 - The current migration/test changes created a new head after run #111. The new run must complete successfully on the exact current head before these latest changes are called CI-verified.
 - PR #4 remains open, Draft, and unmerged. No changes were made to `main`, no operational database was accessed, and no Render deployment was performed.
+
+
+### Final CI confirmation for fail-closed migration changes
+
+- Run #114 failed in the new SQL catalog assertion because the assertion expected a particular textual formatting of PostgreSQL's CHECK expression; it was a test-matcher issue, not a migration-application failure. Run #115 exposed the same strict matcher on its own head.
+- Relaxed that assertion to check the stable metadata_only expression token while still requiring storage_key IS NULL; retained explicit exact-definition checks for the three office-scoped foreign keys and the idempotency constraint.
+- Run #116 completed successfully on exact head 90b6f418e5acbab4313169598e14389d54cc8694: https://github.com/fzhtftp-commits/Dadban/actions/runs/38596944490. All steps passed, including the full-baseline migration upgrade/rollback test.
+- The migration now deliberately fails on pre-existing case_documents table or named document indexes instead of silently accepting them via IF NOT EXISTS. This protects against falsely treating a same-named but incompatible object as a valid migration result. Inspect/reconcile partial prior attempts before retrying; do not expect a safe blind rerun.
+- This documentation update creates a new head; verify the next Actions run against that exact head before considering CI current. PR remains Draft and unmerged; no main, operational database, or Render changes.
