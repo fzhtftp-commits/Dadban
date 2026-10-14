@@ -535,12 +535,19 @@ try {
   await waitForServer(rolePort);
 
 
+  const roleAccessFixture = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", portToUse: rolePort,
+    body: { case_id: ids.caseA, title: "Role matrix access fixture", document_type: "evidence" }
+  });
+  assert.equal(roleAccessFixture.status, 201, "owner should create the active role matrix fixture");
+  const roleAccessDocumentId = roleAccessFixture.body.data.id;
+
   // Role authorization matrix: every role can list/read within its office.
   for (const account of roleAccounts) {
     const roleList = await request("/api/case-documents", { token: account.token, csrf: account.csrf, portToUse: rolePort });
     assert.equal(roleList.status, 200, `${account.role} should be allowed to list document metadata`);
-    assert.ok(roleList.body.data.some(item => item.id === documentId), `${account.role} list should include the in-office document`);
-    const roleRead = await request(`/api/case-documents/${documentId}`, { token: account.token, csrf: account.csrf, portToUse: rolePort });
+    assert.ok(roleList.body.data.some(item => item.id === roleAccessDocumentId), `${account.role} list should include the in-office document`);
+    const roleRead = await request(`/api/case-documents/${roleAccessDocumentId}`, { token: account.token, csrf: account.csrf, portToUse: rolePort });
     assert.equal(roleRead.status, 200, `${account.role} should be allowed to read document metadata`);
   }
 
@@ -562,7 +569,7 @@ try {
 
   // Owner/admin/lawyer may update; assistant/viewer must be denied.
   for (const account of roleAccounts) {
-    const result = await request(`/api/case-documents/${documentId}`, {
+    const result = await request(`/api/case-documents/${roleAccessDocumentId}`, {
       token: account.token, csrf: account.csrf, method: "PATCH", portToUse: rolePort,
       body: { description: `updated by ${account.role}` }
     });
@@ -577,7 +584,7 @@ try {
   // Only owner/admin may soft-delete; denied roles must not mutate the record.
   for (const role of ["lawyer", "assistant", "viewer"]) {
     const account = roleAccounts.find(item => item.role === role);
-    const result = await request(`/api/case-documents/${documentId}`, {
+    const result = await request(`/api/case-documents/${roleAccessDocumentId}`, {
       token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort
     });
     assert.equal(result.status, 403, `${role} must be denied document deletion`);
