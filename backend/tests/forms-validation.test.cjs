@@ -113,6 +113,7 @@ async function submitCase({ id = "", responses = [], csrf = "test-csrf", initial
   browser.get("title").value = initial.title || "پرونده آزمایشی";
   browser.get("next_hearing_at").value = initial.next_hearing_at || "2026-10-15T09:30";
   await browser.listeners.get("client_national_id:input")();
+  await new Promise(resolve => setImmediate(resolve));
   await browser.listeners.get("caseForm:submit")({ preventDefault(){} });
   return browser;
 }
