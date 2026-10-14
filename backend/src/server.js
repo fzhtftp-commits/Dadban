@@ -330,6 +330,13 @@ const requireAuth = async (req, res, next) => {
   }
 };
 
+const requireDocumentRole = (...allowedRoles) => (req, res, next) => {
+  if (!req.auth || !allowedRoles.includes(req.auth.role)) {
+    return res.status(403).json({ error: "document_role_forbidden" });
+  }
+  next();
+};
+
 const requireCsrf = (req, res, next) => {
   const cookies = parseCookies(req.headers.cookie);
   const header = req.get("x-csrf-token");
@@ -1608,7 +1615,7 @@ const caseDocumentPatchSchema = z.object({
   reference_number: z.string().trim().max(100).optional().nullable()
 }).strict().refine((v) => Object.keys(v).length > 0, {message:"At least one field is required"});
 
-app.get("/api/case-documents", requireAuth, async (req,res) => {
+app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
   const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
   if (cid && !cid.success) return res.status(400).json({error:"invalid_case_id"});
   const values=[req.auth.officeId], where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null"];
@@ -1618,14 +1625,14 @@ app.get("/api/case-documents", requireAuth, async (req,res) => {
     return res.json({data:result.rows});
   } catch(error){logSafeError("List case documents failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
-app.get("/api/case-documents/:id", requireAuth, async (req,res) => {
+app.get("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});
   try {
     const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null",[id.data,req.auth.officeId]);
     if(!q.rowCount)return res.status(404).json({error:"document_not_found"});return res.json({data:q.rows[0]});
   }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
-app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, createDocumentRateLimit, async(req,res)=>{
+app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, createDocumentRateLimit, async(req,res)=>{
    const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;
    const idempotencyKey=req.get("idempotency-key");
    if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
@@ -1645,7 +1652,7 @@ app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, 
      const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{case_id:doc.case_id,storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
    }catch(error){await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
  });
-app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
+app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
   const fields=["title","document_type","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
   for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
@@ -1655,7 +1662,7 @@ app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireC
     await writeAuditLog(c,req.auth,"update","case_document",id.data,req,{fields:Object.keys(p.data)});await c.query("commit");return res.json({data:q.rows[0]});
   }catch(error){await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
-app.delete("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
+app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});let c;
   try{c=await acquireClient(pool);await c.query("begin");const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
