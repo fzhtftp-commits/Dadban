@@ -1541,7 +1541,7 @@ const caseDocumentCreateSchema = z.object({
   original_filename: z.string().trim().min(1).max(255).optional().nullable(),
   mime_type: z.string().trim().max(127).optional().nullable(),
   size_bytes: z.number().int().min(0).max(25 * 1024 * 1024).optional().nullable(),
-  document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
+    document_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => { const date = new Date(`${value}T00:00:00.000Z`); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; }).optional().nullable(),
   reference_number: z.string().trim().max(100).optional().nullable()
 }).strict();
 const caseDocumentPatchSchema = caseDocumentCreateSchema.omit({case_id:true}).partial().strict()
