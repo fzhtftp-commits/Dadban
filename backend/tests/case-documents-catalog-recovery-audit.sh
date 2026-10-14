@@ -46,31 +46,9 @@ SQL
 DO \$audit\$
 DECLARE
   actual_count integer;
-  expected_count integer;
+  expected_count integer := 20;
   def text;
   idx record;
-  expected_columns text[][] := ARRAY[
-    ARRAY['id','uuid','true'],
-    ARRAY['office_id','uuid','true'],
-    ARRAY['case_id','uuid','true'],
-    ARRAY['title','character varying(200)','true'],
-    ARRAY['document_type','character varying(32)','true'],
-    ARRAY['description','character varying(3000)','false'],
-    ARRAY['original_filename','character varying(255)','false'],
-    ARRAY['mime_type','character varying(127)','false'],
-    ARRAY['size_bytes','bigint','false'],
-    ARRAY['document_date','date','false'],
-    ARRAY['reference_number','character varying(100)','false'],
-    ARRAY['idempotency_key','character varying(128)','false'],
-    ARRAY['request_fingerprint','character(64)','false'],
-    ARRAY['storage_status','character varying(24)','true'],
-    ARRAY['storage_key','text','false'],
-    ARRAY['created_by','uuid','true'],
-    ARRAY['updated_by','uuid','true'],
-    ARRAY['created_at','timestamp with time zone','true'],
-    ARRAY['updated_at','timestamp with time zone','true'],
-    ARRAY['deleted_at','timestamp with time zone','false']
-  ];
   col record;
 BEGIN
   SELECT count(*) INTO actual_count
@@ -79,25 +57,40 @@ BEGIN
   JOIN pg_namespace n ON n.oid = t.relnamespace
   WHERE n.nspname = '${expected_schema}' AND t.relname = 'case_documents'
     AND a.attnum > 0 AND NOT a.attisdropped;
-  expected_count := array_length(expected_columns, 1);
   IF actual_count <> expected_count THEN
     RAISE EXCEPTION 'column count mismatch: expected %, got %', expected_count, actual_count;
   END IF;
 
-  FOR col IN SELECT x[1] AS name, x[2] AS typ, x[3] AS notnull
-             FROM unnest(expected_columns) AS x LOOP
+  FOR col IN SELECT * FROM (VALUES
+    (1,'id','uuid',true),
+    (2,'office_id','uuid',true),
+    (3,'case_id','uuid',true),
+    (4,'title','character varying(200)',true),
+    (5,'document_type','character varying(32)',true),
+    (6,'description','character varying(3000)',false),
+    (7,'original_filename','character varying(255)',false),
+    (8,'mime_type','character varying(127)',false),
+    (9,'size_bytes','bigint',false),
+    (10,'document_date','date',false),
+    (11,'reference_number','character varying(100)',false),
+    (12,'idempotency_key','character varying(128)',false),
+    (13,'request_fingerprint','character(64)',false),
+    (14,'storage_status','character varying(24)',true),
+    (15,'storage_key','text',false),
+    (16,'created_by','uuid',true),
+    (17,'updated_by','uuid',true),
+    (18,'created_at','timestamp with time zone',true),
+    (19,'updated_at','timestamp with time zone',true),
+    (20,'deleted_at','timestamp with time zone',false)
+  ) AS expected(ord,name,typ,is_not_null) LOOP
     IF NOT EXISTS (
       SELECT 1 FROM pg_attribute a
       JOIN pg_class t ON t.oid = a.attrelid
       JOIN pg_namespace n ON n.oid = t.relnamespace
       WHERE n.nspname = '${expected_schema}' AND t.relname = 'case_documents'
         AND a.attname = col.name AND format_type(a.atttypid, a.atttypmod) = col.typ
-        AND a.attnotnull = col.notnull::boolean
-        AND a.attnum = (SELECT min(a2.attnum) + (
-          SELECT count(*) FROM pg_attribute a3
-          WHERE a3.attrelid = a.attrelid AND a3.attnum > 0 AND NOT a3.attisdropped
-            AND a3.attnum < a.attnum
-        ) FROM pg_attribute a2 WHERE a2.attrelid = a.attrelid AND a2.attnum > 0 AND NOT a2.attisdropped)
+        AND a.attnotnull = col.is_not_null
+        AND a.attnum = col.ord
     ) THEN
       RAISE EXCEPTION 'column missing or mismatched (name/type/nullability/order): % / % / %', col.name, col.typ, col.notnull;
     END IF;
@@ -113,7 +106,7 @@ BEGIN
   IF (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname='storage_status') NOT LIKE '%metadata_only%' THEN
     RAISE EXCEPTION 'storage_status default mismatch';
   END IF;
-  IF (SELECT count(*) FROM pg_attrdef d JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents') <> 4 THEN
+  IF (SELECT count(*) FROM pg_attrdef d JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents') <> 5 THEN
     RAISE EXCEPTION 'unexpected column default inventory';
   END IF;
 
