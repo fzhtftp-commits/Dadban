@@ -52,6 +52,12 @@ jobs:
         run: bash tests/case-documents-forced-rollback.sh
         working-directory: backend
 
+      - name: Demonstrate out-of-transaction migration partial apply in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-out-of-transaction-partial-apply.sh
+        working-directory: backend
+
       - name: Verify incompatible same-named table fails migration in disposable PostgreSQL
         env:
           PGPASSWORD: postgres
