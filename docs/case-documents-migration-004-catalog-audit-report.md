@@ -6,9 +6,11 @@ Scope: `backend/migrations/004_case_documents_metadata.sql` on `feature/case-doc
 ## Current PR and CI evidence
 
 - PR #4 is open, Draft, and unmerged; base branch is `feature/case-actions`.
-- Catalog test commit: `5eb73c00416870fb42dd9bfc0e3e0a6693ccb3de`.
-- GitHub Actions run [38624103780](https://github.com/fzhtftp-commits/Dadban/actions/runs/38624103780) completed successfully on that exact SHA. The `backend-tests` job passed.
-- This run includes the expanded CHECK behavior matrix and exact FK/CHECK/index inventory assertions described below.
+- Latest confirmed passing catalog-test commit at the time of this report update: `9b6620480c47fa12ed35749a7dc333f9c74ff812`.
+- GitHub Actions run [38624760976](https://github.com/fzhtftp-commits/Dadban/actions/runs/38624760976) completed successfully on that exact SHA; the `backend-tests` job and all steps passed. Its SHA matched PR #4's current head when checked.
+- Report-update commit [ca5004019f3128498d35d344488675e0c9c90ef8](https://github.com/fzhtftp-commits/Dadban/commit/ca5004019f3128498d35d344488675e0c9c90ef8) also passed CI in run [38624734607](https://github.com/fzhtftp-commits/Dadban/actions/runs/38624734607), on that commit's exact SHA. Subsequent catalog-test additions were separately checked by run 38624760976.
+- The catalog test now also asserts all indexes are live, valid, and ready; requires B-tree access methods; checks primary-index identity and exact key attributes; and checks unique-index NULL semantics.
+- Earlier run [38624551651](https://github.com/fzhtftp-commits/Dadban/actions/runs/38624551651) passed on exact SHA `cfed5a18268a2c30ef0e65069ed4e5ab03097ff9`. The preceding run [38624403599](https://github.com/fzhtftp-commits/Dadban/actions/runs/38624403599) failed due to an incorrect expected DESC `indoption` bitmask; the test was corrected on the feature branch and the follow-up passed.
 - No migration SQL, `main`, production database, or Render service was changed.
 
 ## Catalog coverage
