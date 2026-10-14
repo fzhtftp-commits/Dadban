@@ -102,6 +102,19 @@ test("forwarded IP headers are ignored unless proxy trust is explicitly configur
  assert.doesNotMatch(server, /app\.set\("trust proxy", 1\)/);
 });
 
+test("rate limiter expires stale keys and caps per-process key storage", () => {
+ assert.match(server, /if \(entry\.resetAt <= now\) clients\.delete\(clientKey\)/);
+ assert.match(server, /clients\.size >= 10000/);
+});
+
+test("logout revokes server-side session and clears both auth cookies", () => {
+ assert.match(server, /app\.post\("\/api\/auth\/logout", requireAuth, requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /update auth_sessions set revoked_at = now\(\) where id = \$1 and revoked_at is null/);
+ assert.match(server, /setClearAuthCookies\(res\)/);
+ assert.match(server, /s\.revoked_at is null/);
+ assert.match(server, /s\.expires_at > now\(\)/);
+});
+
 test("document creation is idempotent and sensitive endpoints are rate limited", () => {
  assert.match(server, /idempotency-key/);
  assert.match(server, /request_fingerprint/);
