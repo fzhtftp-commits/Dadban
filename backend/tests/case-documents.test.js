@@ -13,11 +13,21 @@ test("schema defaults to metadata-only and enforces same-office foreign keys and
 test("CRUD endpoints require authentication and protect writes", () => {
  assert.match(server, /app\.get\("\/api\/case-documents", requireAuth/);
  assert.match(server, /app\.get\("\/api\/case-documents\/:id", requireAuth/);
- assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireTrustedOrigin, requireCsrf/);
- assert.match(server, /app\.patch\("\/api\/case-documents\/:id", requireAuth, requireTrustedOrigin, requireCsrf/);
- assert.match(server, /app\.delete\("\/api\/case-documents\/:id", requireAuth, requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant"\), requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /app\.patch\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin", "lawyer"\), requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /app\.delete\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin"\), requireTrustedOrigin, requireCsrf/);
  assert.match(server, /d\.office_id = \$1/);
 });
+test("case-document routes enforce the approved role matrix centrally", () => {
+ assert.match(server, /const requireDocumentRole = \(\.\.\.allowedRoles\) =>/);
+ assert.match(server, /return res\.status\(403\)\.json\(\{ error: "document_role_forbidden" \}\)/);
+ assert.match(server, /app\.get\("\/api\/case-documents", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant", "viewer"\)/);
+ assert.match(server, /app\.get\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant", "viewer"\)/);
+ assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant"\)/);
+ assert.match(server, /app\.patch\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin", "lawyer"\)/);
+ assert.match(server, /app\.delete\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin"\)/);
+});
+
 test("metadata phase does not introduce file byte upload handling", () => {
  assert.match(migration, /storage_key text/);
  assert.match(migration, /storage_status = 'metadata_only' and storage_key is null/);
@@ -111,7 +121,7 @@ test("rate limiter expires stale keys and caps per-process key storage", () => {
 });
 
 test("logout revokes server-side session and clears both auth cookies", () => {
- assert.match(server, /app\.post\("\/api\/auth\/logout", requireAuth, requireTrustedOrigin, requireCsrf/);
+ assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant"\), requireTrustedOrigin, requireCsrf/);
  assert.match(server, /update auth_sessions set revoked_at = now\(\) where id = \$1 and revoked_at is null/);
  assert.match(server, /setClearAuthCookies\(res\)/);
  assert.match(server, /s\.revoked_at is null/);
