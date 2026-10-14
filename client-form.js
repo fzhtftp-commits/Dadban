@@ -16,72 +16,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const editMode = params.get("mode") === "edit";
   const clientId = params.get("id");
 
-  const normalizeDigits = (value) => String(value || "")
-    .replace(/[۰-۹]/g, d => String(d.charCodeAt(0) - 1776))
-    .replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 1632));
+  const { normalizeDigits, isValidIranianNationalCode, jalaliToGregorian, gregorianToJalali, isValidJalaliDate } = window.DadbanFormValidation;
 
   const showMessage = (text, ok = false) => {
     message.textContent = text;
     message.hidden = false;
     message.classList.toggle("success-message", ok);
-  };
-
-  const jalaliToGregorian = (input) => {
-    const value = normalizeDigits(input).replace(/-/g, "/").trim();
-    const m = value.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
-    if (!m) return null;
-    let jy = Number(m[1]), jm = Number(m[2]), jd = Number(m[3]);
-    if (jm < 1 || jm > 12 || jd < 1 || jd > 31) return null;
-    jy -= 979;
-    let jDayNo = 365 * jy + Math.floor(jy / 33) * 8 + Math.floor((jy % 33 + 3) / 4);
-    for (let i = 1; i < jm; i++) jDayNo += i <= 6 ? 31 : 30;
-    jDayNo += jd - 1;
-    let gDayNo = jDayNo + 79;
-    let gy = 1600 + 400 * Math.floor(gDayNo / 146097);
-    gDayNo %= 146097;
-    let leap = true;
-    if (gDayNo >= 36525) {
-      gDayNo--;
-      gy += 100 * Math.floor(gDayNo / 36524);
-      gDayNo %= 36524;
-      if (gDayNo >= 365) gDayNo++;
-      else leap = false;
-    }
-    gy += 4 * Math.floor(gDayNo / 1461);
-    gDayNo %= 1461;
-    if (gDayNo >= 366) {
-      leap = false;
-      gDayNo--;
-      gy += Math.floor(gDayNo / 365);
-      gDayNo %= 365;
-    }
-    let gd = gDayNo + 1;
-    const monthDays = [31, (leap ? 29 : 28),31,30,31,30,31,31,30,31,30,31];
-    let gm = 0;
-    while (gd > monthDays[gm]) { gd -= monthDays[gm]; gm++; }
-    return `${gy}-${String(gm + 1).padStart(2,"0")}-${String(gd).padStart(2,"0")}`;
-  };
-
-  const gregorianToJalali = (dateValue) => {
-    if (!dateValue) return "";
-    const parts = dateValue.slice(0,10).split("-").map(Number);
-    if (parts.length !== 3 || parts.some(Number.isNaN)) return "";
-    let [gy, gm, gd] = parts;
-    gy -= 1600; gm -= 1; gd -= 1;
-    const gDayNo = 365 * gy + Math.floor((gy + 3) / 4) - Math.floor((gy + 99) / 100) + Math.floor((gy + 399) / 400);
-    const gMonthDays = [31, (gy % 4 === 0 && (gy % 100 !== 0 || gy % 400 === 0)) ? 29 : 28,31,30,31,30,31,31,30,31,30,31];
-    let dayNo = gDayNo;
-    for (let i=0;i<gm;i++) dayNo += gMonthDays[i];
-    dayNo += gd;
-    let jDayNo = dayNo - 79;
-    let jy = 979 + 33 * Math.floor(jDayNo / 12053);
-    jDayNo %= 12053;
-    jy += 4 * Math.floor(jDayNo / 1461);
-    jDayNo %= 1461;
-    if (jDayNo >= 366) { jy += Math.floor((jDayNo - 1) / 365); jDayNo = (jDayNo - 1) % 365; }
-    let jm = jDayNo < 186 ? 1 + Math.floor(jDayNo / 31) : 7 + Math.floor((jDayNo - 186) / 30);
-    let jd = 1 + (jDayNo < 186 ? jDayNo % 31 : (jDayNo - 186) % 30);
-    return `${jy}/${String(jm).padStart(2,"0")}/${String(jd).padStart(2,"0")}`;
   };
 
   const setType = (type) => {
@@ -158,9 +98,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const selected = document.querySelector('input[name="clientType"]:checked').value;
     const nationalIdValue = String(nationalId.value || "").trim();
-    if (selected === "individual" && !/^[0-9۰-۹٠-٩]{10}$/.test(nationalIdValue)) {
-      showMessage("کد ملی باید دقیقاً ۱۰ رقم باشد.");
+    if (selected === "individual" && !isValidIranianNationalCode(nationalIdValue)) {
+      showMessage("کد ملی معتبر وارد کنید؛ رقم کنترل کد ملی صحیح نیست.");
       nationalId.focus();
+      return;
+    }
+
+    if (selected === "individual" && birthDate.value.trim() && !isValidJalaliDate(birthDate.value)) {
+      showMessage("تاریخ تولد شمسی معتبر وارد کنید.");
+      birthDate.focus();
       return;
     }
 

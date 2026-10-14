@@ -1,0 +1,37 @@
+name: Form validation tests
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ["audit/forms-inventory-2026-10"]
+permissions:
+  contents: read
+jobs:
+  form-validation:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dadban_test
+          POSTGRES_PASSWORD: dadban_test
+          POSTGRES_DB: dadban_http_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dadban_test -d dadban_http_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://dadban_test:dadban_test@localhost:5432/dadban_http_test
+      DADBANTEST_PORT: 18765
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install --prefix backend --ignore-scripts --no-audit --no-fund
+      - run: node --test backend/tests/forms-validation.test.cjs
+      - name: Run isolated real-HTTP client route integration tests
+        run: node --test backend/tests/client-routes-http.integration.test.cjs
