@@ -34,6 +34,16 @@ test("reused pool client can be released once per checkout", async () => {
   assert.equal(releaseCalls, 2, "reused client must be released for the new checkout");
 });
 
+test("connection acquisition errors propagate without attempting to release a nonexistent client", async () => {
+  const connectionError = Object.assign(new Error("simulated connection outage"), { code: "ECONNREFUSED" });
+  let releaseCalls = 0;
+  const pool = { async connect() { throw connectionError; } };
+  await assert.rejects(acquireClient(pool), error => error === connectionError);
+  const nonexistentClient = null;
+  releaseClient(nonexistentClient);
+  assert.equal(releaseCalls, 0);
+});
+
 test("rollback failure discards client and never throws to the request handler", async () => {
   const rollbackError = new Error("simulated rollback connection failure");
   let releaseCalls = 0;
