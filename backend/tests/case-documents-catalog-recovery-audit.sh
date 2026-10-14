@@ -578,6 +578,18 @@ BEGIN
     RAISE EXCEPTION 'unexpected explicit column-level ACL';
   END IF;
 
+  -- Migration 004 contains no table/index GRANT or REVOKE statements.
+  -- In the clean disposable test database, the created relation should have
+  -- no explicit ACL array; this is separate from per-column attacl.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class r
+    WHERE r.oid='${expected_schema}.case_documents'::regclass
+      AND r.relacl IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'unexpected explicit table-level ACL';
+  END IF;
+
   IF EXISTS (
     SELECT 1 FROM pg_constraint c
     WHERE c.conrelid='${expected_schema}.case_documents'::regclass
