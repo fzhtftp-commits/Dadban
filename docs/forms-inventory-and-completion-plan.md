@@ -74,7 +74,7 @@ This remains a repository audit with isolated controller tests, not a full brows
 - CI setup: disposable PostgreSQL 16 service with synthetic office, user, and session rows; the test starts the actual backend on a local runner port and calls it over HTTP.
 - Required assertions: invalid national-code checksum returns HTTP 400 on client POST and PATCH; invalid CSRF returns HTTP 403; valid client creation returns HTTP 201 and persists the client plus audit row; valid client edit returns HTTP 200 and persists normalized national code, changed name, and audit row.
 - Safety boundary: only the temporary CI service database is initialized/dropped. No production URL, Render service, or main-branch file is used by this test.
-- Verification status for the previous real-HTTP suite: successful on prior head `ddacb47e1dee8e04c52270f0360d01d228906343` (GitHub Actions runs #66 and #67). The newly added office-isolation and audit-failure rollback cases are pending CI on the current branch head; confirm the exact PR head SHA and both push/PR workflow runs before treating this extension as verified.
+- Verification status: **PASS on exact current head SHA `e46bbf41a6060a6fa665edc4363a5ea59a9b709c`**. GitHub Actions push run #78 and pull-request run #79 both completed successfully on this SHA. Each run passed the 20 form-validation tests and all 9 real-HTTP integration tests, including cross-office detail/lookup denial, cross-office PATCH denial with unchanged persisted data, and rollback after simulated audit-log insert failure. Both CI runs used disposable PostgreSQL 16 service containers; the expected `synthetic audit sink failure` appears in database logs because the rollback test intentionally triggers it.
 
 
 ### CI follow-up: backend launch path correction
