@@ -248,3 +248,100 @@ test("hearing API integration: CRUD, filters, dashboard sync, and office isolati
     assert.equal(caseDate.rows[0].next_hearing_at, null);
   });
 });
+
+
+test("case action API: CRUD, validation, audit, and office isolation", async (t) => {
+  let actionId;
+  await t.test("creates an action linked to an office-owned case", async () => {
+    const response = await api("/api/actions", {
+      method: "POST",
+      body: { case_id: ids.caseA1, title: "تهیه لایحه", description: "بررسی مستندات", due_at: iso(future(2)), priority: "high" }
+    });
+    await assertStatus(response, 201);
+    const data = (await response.json()).data;
+    actionId = data.id;
+    assert.equal(data.office_id, ids.officeA);
+    assert.equal(data.case_id, ids.caseA1);
+    assert.equal(data.status, "todo");
+    assert.equal(data.priority, "high");
+    assert.equal(data.completed_at, null);
+  });
+
+  await t.test("lists and filters actions by case/status with office isolation", async () => {
+    const filtered = await api("/api/actions?case_id=" + ids.caseA1 + "&status=todo");
+    await assertStatus(filtered, 200);
+    const rows = (await filtered.json()).data;
+    assert.ok(rows.some(item => item.id === actionId));
+    const listB = await api("/api/actions", { headers: headersB });
+    await assertStatus(listB, 200);
+    assert.equal((await listB.json()).data.length, 0);
+    const invalid = await api("/api/actions?status=not-a-status");
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error, "invalid_action_query");
+  });
+
+  await t.test("updates action status and stamps completion time", async () => {
+    const response = await api("/api/actions/" + actionId, {
+      method: "PATCH", body: { status: "completed", title: "تهیه و ثبت لایحه" }
+    });
+    await assertStatus(response, 200);
+    const data = (await response.json()).data;
+    assert.equal(data.status, "completed");
+    assert.ok(data.completed_at);
+    assert.equal(data.title, "تهیه و ثبت لایحه");
+    const reopened = await api("/api/actions/" + actionId, {
+      method: "PATCH", body: { status: "in_progress" }
+    });
+    await assertStatus(reopened, 200);
+    assert.equal((await reopened.json()).data.completed_at, null);
+  });
+
+  await t.test("rejects cross-office cases and assignees", async () => {
+    const foreignCase = await api("/api/actions", {
+      method: "POST", body: { case_id: ids.caseB, title: "نباید به دفتر دیگر متصل شود" }
+    });
+    assert.equal(foreignCase.status, 400);
+    assert.equal((await foreignCase.json()).error, "invalid_related_case");
+    const foreignAssignee = await api("/api/actions", {
+      method: "POST", body: { case_id: ids.caseA1, title: "مسئول نامعتبر", assigned_to: ids.userB }
+    });
+    assert.equal(foreignAssignee.status, 400);
+    assert.equal((await foreignAssignee.json()).error, "invalid_assignee");
+    const readB = await api("/api/actions/" + actionId, { headers: headersB });
+    assert.equal(readB.status, 404);
+    const patchB = await api("/api/actions/" + actionId, { method: "PATCH", headers: headersB, body: { title: "غیرمجاز" } });
+    assert.equal(patchB.status, 404);
+    const deleteB = await api("/api/actions/" + actionId, { method: "DELETE", headers: headersB });
+    assert.equal(deleteB.status, 404);
+  });
+
+  await t.test("rejects invalid CSRF and malformed identifiers without mutation", async () => {
+    const bad = await api("/api/actions/" + actionId, {
+      method: "PATCH", headers: headersBadCsrf, body: { title: "نباید تغییر کند" }
+    });
+    assert.equal(bad.status, 403);
+    assert.equal((await bad.json()).error, "csrf_token_invalid");
+    const invalidId = await api("/api/actions/not-a-uuid");
+    assert.equal(invalidId.status, 400);
+    assert.equal((await invalidId.json()).error, "invalid_action_id");
+    const invalidPayload = await api("/api/actions", {
+      method: "POST", body: { case_id: ids.caseA1, title: "" }
+    });
+    assert.equal(invalidPayload.status, 400);
+    assert.equal((await invalidPayload.json()).error, "invalid_action");
+    const unchanged = await api("/api/actions/" + actionId);
+    assert.equal(unchanged.status, 200);
+    assert.equal((await unchanged.json()).data.title, "تهیه و ثبت لایحه");
+  });
+
+  await t.test("soft deletes action and records an audit event", async () => {
+    const response = await api("/api/actions/" + actionId, { method: "DELETE" });
+    assert.equal(response.status, 204);
+    const hidden = await api("/api/actions/" + actionId);
+    assert.equal(hidden.status, 404);
+    const row = await db.query("select deleted_at from case_actions where id = $1", [actionId]);
+    assert.ok(row.rows[0].deleted_at);
+    const audit = await db.query("select count(*)::int as n from audit_logs where entity_type = 'case_action' and entity_id = $1 and action = 'delete'", [actionId]);
+    assert.equal(audit.rows[0].n, 1);
+  });
+});
