@@ -52,6 +52,12 @@ jobs:
         run: bash tests/case-documents-negative-migration.sh
         working-directory: backend
 
+      - name: Verify incompatible same-named index fails migration statement in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-negative-index-migration.sh
+        working-directory: backend
+
       - name: Verify two-office API isolation over HTTP
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
