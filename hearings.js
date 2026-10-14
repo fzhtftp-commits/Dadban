@@ -7,6 +7,7 @@ const statusLabels = {scheduled:"برنامه‌ریزی‌شده",completed:"ب
 const formatDate = (value) => { const d = new Date(value); return Number.isNaN(d.getTime()) ? "—" : new Intl.DateTimeFormat("fa-IR",{year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}).format(d); };
 let hearings = [];
 let cases = [];
+const initialCaseId = new URLSearchParams(window.location.search).get("case_id") || "";
 const message = (text, type = "") => { const el=$("pageMessage"); el.textContent=text; el.className="calendar-message"+(type?" "+type:""); el.hidden=!text; };
 const toLocalInput = (value) => { if(!value)return ""; const d=new Date(value); if(Number.isNaN(d.getTime()))return ""; const offset=d.getTimezoneOffset()*60000; return new Date(d.getTime()-offset).toISOString().slice(0,16); };
 async function request(url, options={}) {
@@ -20,6 +21,7 @@ async function request(url, options={}) {
 async function loadCases(){
  const d=await request(API+"/api/cases?limit=100");
  cases=Array.isArray(d?.data)?d.data:[];
+ if(initialCaseId && cases.some(c=>c.id===initialCaseId)) $("caseId").value=initialCaseId;
  $("caseId").innerHTML='<option value="">انتخاب پرونده</option>'+cases.map(c=>'<option value="'+esc(c.id)+'">'+esc((c.case_number||"بدون شماره")+" — "+(c.title||"بدون عنوان")+" — "+(c.client_full_name||c.client_company_name||"بدون موکل"))+'</option>').join("");
 }
 function render(){
@@ -35,6 +37,8 @@ function render(){
 async function loadHearings(){
  const params=new URLSearchParams();
  if($("filterStatus").value)params.set("status",$("filterStatus").value);
+ const selectedCaseId=$("caseId").value;
+ if(selectedCaseId)params.set("case_id",selectedCaseId);
  const from=$("filterFrom").value, to=$("filterTo").value;
  if(from && to && from > to) {
   message("تاریخ شروع نباید بعد از تاریخ پایان باشد.","error");
@@ -73,6 +77,7 @@ $("hearingForm").addEventListener("submit",async event=>{
  finally{button.disabled=false;}
 });
 $("hearingsBody").addEventListener("click",event=>{const edit=event.target.closest("[data-edit]"),del=event.target.closest("[data-delete]");if(edit)editHearing(edit.dataset.edit);if(del)deleteHearing(del.dataset.delete);});
+$("caseId").addEventListener("change",()=>{resetForm();loadHearings();});
 $("filterStatus").addEventListener("change",loadHearings);$("filterFrom").addEventListener("change",loadHearings);$("filterTo").addEventListener("change",loadHearings);
 $("clearFilters").addEventListener("click",()=>{$("filterStatus").value="";$("filterFrom").value="";$("filterTo").value="";loadHearings();});
 $("refreshHearings").addEventListener("click",loadHearings);$("cancelEdit").addEventListener("click",resetForm);
