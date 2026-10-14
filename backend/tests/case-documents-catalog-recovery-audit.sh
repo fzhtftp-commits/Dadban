@@ -634,6 +634,19 @@ BEGIN
     RAISE EXCEPTION 'table relation kind or persistence differs from migration contract';
   END IF;
 
+  -- Each index is also a pg_class relation. The migration creates ordinary
+  -- permanent indexes on this non-partitioned table; pg_index key checks alone
+  -- do not assert the index relation's kind/persistence/partition status.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_index i
+    JOIN pg_class idx ON idx.oid=i.indexrelid
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND (idx.relkind <> 'i' OR idx.relpersistence <> 'p' OR idx.reispartition)
+  ) THEN
+    RAISE EXCEPTION 'index relation kind, persistence, or partition status differs from migration contract';
+  END IF;
+
   -- Migration 004 does not enable row-level security or change replica identity.
   -- These flags alter row visibility/enforcement and logical-replication behavior
   -- without changing the column, constraint, or index inventories.
