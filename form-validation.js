@@ -108,7 +108,15 @@
     return date.toISOString();
   }
 
-  const api = { normalizeDigits, isValidIranianNationalCode, jalaliToGregorian, gregorianToJalali, isValidJalaliDate, localDateTimeToIso };
+  function isoToLocalDateTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const pad = (number) => String(number).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  const api = { normalizeDigits, isValidIranianNationalCode, jalaliToGregorian, gregorianToJalali, isValidJalaliDate, localDateTimeToIso, isoToLocalDateTime };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (root) root.DadbanFormValidation = api;
 })(typeof window !== "undefined" ? window : globalThis);
