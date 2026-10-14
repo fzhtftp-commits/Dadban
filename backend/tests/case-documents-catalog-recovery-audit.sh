@@ -435,6 +435,17 @@ BEGIN
     RAISE EXCEPTION 'index clustering or replica-identity flags differ from migration contract';
   END IF;
 
+  -- Migration 004 uses ordinary non-concurrent index creation. No index should
+  -- carry indcheckxmin's catalog hint that old snapshots need a visibility check
+  -- before using it; this is independent of valid/ready/live and replica flags.
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND i.indcheckxmin
+  ) THEN
+    RAISE EXCEPTION 'unexpected indcheckxmin visibility-safety flag on case_documents index';
+  END IF;
+
   -- Verify index access method, primary-index identity, and unique NULL semantics.
   IF EXISTS (
     SELECT 1
