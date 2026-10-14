@@ -20,6 +20,13 @@ const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5500";
 const caPath = new URL("../certs/prod-ca-2021.crt", import.meta.url);
 const supabaseCa = fs.readFileSync(caPath, "utf8");
 
+const logSafeError = (context, error) => {
+  const safe = {};
+  if (typeof error?.name === "string") safe.name = error.name.slice(0, 80);
+  if (typeof error?.code === "string") safe.code = error.code.slice(0, 40);
+  console.error(context, safe);
+};
+
 const pool = databaseUrl
   ? new Pool({
       connectionString: databaseUrl,
@@ -315,7 +322,7 @@ const requireAuth = async (req, res, next) => {
     await pool.query("update auth_sessions set last_seen_at = now() where id = $1", [req.auth.sessionId]);
     next();
   } catch (error) {
-    console.error("Authentication failed:", error);
+    logSafeError("Authentication failed", error);
     return res.status(401).json({ error: "authentication_required" });
   }
 };
@@ -383,7 +390,7 @@ app.get("/health/db", async (_req, res) => {
     await pool.query("select 1");
     return res.json({ ok: true, database: "connected" });
   } catch (error) {
-    console.error("Database health check failed:", error);
+    logSafeError("Database health check failed", error);
     return res.status(503).json({ ok: false, database: "unavailable" });
   }
 });
@@ -441,7 +448,7 @@ app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
     });
   } catch (error) {
     await client.query("rollback");
-    console.error("Registration failed:", error);
+    logSafeError("Registration failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -505,7 +512,7 @@ app.post("/api/auth/login", requireTrustedOrigin, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Login failed:", error);
+    logSafeError("Login failed", error);
     return res.status(500).json({ error: "authentication_error" });
   }
 });
@@ -603,7 +610,7 @@ app.get("/api/dashboard", requireAuth, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Dashboard data failed:", error);
+    logSafeError("Dashboard data failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -664,7 +671,7 @@ app.get("/api/clients", requireAuth, async (req, res) => {
       pagination: { page, limit, returned: result.rows.length }
     });
   } catch (error) {
-    console.error("List clients failed:", error);
+    logSafeError("List clients failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -704,7 +711,7 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
     return res.status(201).json({ data: created });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create client failed:", error);
+    logSafeError("Create client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -733,7 +740,7 @@ app.get("/api/clients/lookup", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "client_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Lookup client failed:", error);
+    logSafeError("Lookup client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -758,7 +765,7 @@ app.get("/api/clients/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "client_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get client failed:", error);
+    logSafeError("Get client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -817,7 +824,7 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
     return res.json({ data: updated });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update client failed:", error);
+    logSafeError("Update client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -853,7 +860,7 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete client failed:", error);
+    logSafeError("Delete client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -924,7 +931,7 @@ app.get("/api/cases", requireAuth, async (req, res) => {
     );
     return res.json({ data: result.rows, pagination: { page, limit, returned: result.rows.length } });
   } catch (error) {
-    console.error("List cases failed:", error);
+    logSafeError("List cases failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -977,7 +984,7 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
     return res.status(201).json({ data: created });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create case failed:", error);
+    logSafeError("Create case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1010,7 +1017,7 @@ app.get("/api/cases/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "case_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get case failed:", error);
+    logSafeError("Get case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1073,7 +1080,7 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
     return res.json({ data: updated });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update case failed:", error);
+    logSafeError("Update case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1106,7 +1113,7 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete case failed:", error);
+    logSafeError("Delete case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1152,7 +1159,7 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
     `, values);
     return res.json({ data: result.rows, pagination: { limit, offset, returned: result.rows.length } });
   } catch (error) {
-    console.error("List hearings failed:", error);
+    logSafeError("List hearings failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1175,7 +1182,7 @@ app.get("/api/hearings/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "hearing_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get hearing failed:", error);
+    logSafeError("Get hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1212,7 +1219,7 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
     return res.status(201).json({ data: hearing });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create hearing failed:", error);
+    logSafeError("Create hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1273,7 +1280,7 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     return res.json({ data: result.rows[0] });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update hearing failed:", error);
+    logSafeError("Update hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1301,7 +1308,7 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete hearing failed:", error);
+    logSafeError("Delete hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1320,7 +1327,7 @@ app.get("/api/actions/assignees", requireAuth, async (req, res) => {
     );
     return res.json({ data: result.rows });
   } catch (error) {
-    console.error("List case action assignees failed:", error);
+    logSafeError("List case action assignees failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1362,7 +1369,7 @@ app.get("/api/actions", requireAuth, async (req, res) => {
     `, values);
     return res.json({ data: result.rows });
   } catch (error) {
-    console.error("List case actions failed:", error);
+    logSafeError("List case actions failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1382,7 +1389,7 @@ app.get("/api/actions/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "action_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get case action failed:", error);
+    logSafeError("Get case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1430,7 +1437,7 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
     return res.status(201).json({ data: action });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create case action failed:", error);
+    logSafeError("Create case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1501,7 +1508,7 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
     return res.json({ data: result.rows[0] });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update case action failed:", error);
+    logSafeError("Update case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1528,7 +1535,7 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete case action failed:", error);
+    logSafeError("Delete case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1570,14 +1577,14 @@ app.get("/api/case-documents", requireAuth, async (req,res) => {
   try {
     const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
-  } catch(error){console.error("List case documents failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}
+  } catch(error){logSafeError("List case documents failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
 app.get("/api/case-documents/:id", requireAuth, async (req,res) => {
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});
   try {
     const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null",[id.data,req.auth.officeId]);
     if(!q.rowCount)return res.status(404).json({error:"document_not_found"});return res.json({data:q.rows[0]});
-  }catch(error){console.error("Get case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}
+  }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
 app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;let c;
@@ -1586,7 +1593,7 @@ app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, 
     if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
     const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11) returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,req.auth.userId]);
     const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{case_id:doc.case_id,storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
-  }catch(error){await rollbackQuietly(c,"create case document");console.error("Create case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+  }catch(error){await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
@@ -1596,19 +1603,19 @@ app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireC
   try{c=await pool.connect();await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);
     if(!q.rowCount){await rollbackQuietly(c,"update missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"update","case_document",id.data,req,{fields:Object.keys(p.data)});await c.query("commit");return res.json({data:q.rows[0]});
-  }catch(error){await rollbackQuietly(c,"update case document");console.error("Update case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+  }catch(error){await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 app.delete("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});let c;
   try{c=await pool.connect();await c.query("begin");const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);await c.query("commit");return res.status(204).send();
-  }catch(error){await rollbackQuietly(c,"delete case document");console.error("Delete case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+  }catch(error){await rollbackQuietly(c,"delete case document");logSafeError("Delete case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 
 
 app.use((error, _req, res, next) => {
-  console.error("Unhandled request error:", error);
+  logSafeError("Unhandled request error", error);
   if (res.headersSent) return next(error);
   if (error?.type === "entity.too.large") return res.status(413).json({ error: "request_too_large" });
   if (error instanceof SyntaxError && Object.hasOwn(error, "body")) return res.status(400).json({ error: "invalid_json" });
