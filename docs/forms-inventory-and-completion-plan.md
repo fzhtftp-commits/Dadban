@@ -38,10 +38,11 @@ This report inventories the form-related UI and the open feature branches before
 ## Automated tests added on this branch
 
 - Shared browser/Node helpers normalize Persian/Arabic-Indic digits, validate Iranian national-code check digits, validate Jalali dates by round-trip conversion, and convert local `datetime-local` values to/from UTC ISO timestamps without silently accepting invalid calendar dates.
-- Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and isolated form-controller scenarios using a lightweight fake DOM and queued API responses. It also imports the actual Zod client create/patch schemas to test valid Persian-digit normalization, invalid/repeated check digits, optional patch updates, CSRF middleware placement, and HTTP 400 validation responses. No live backend/database is contacted.
-- GitHub Actions workflow `.github/workflows/forms-validation.yml` installs backend dependencies in the runner and executes `node --test backend/tests/forms-validation.test.cjs`.
-- The first expanded run exposed a missing dependency-install step and failed (17 passed, 3 failed); the workflow was corrected to install backend dependencies before tests. The corrected [Run #50](https://github.com/fzhtftp-commits/Dadban/actions/runs/38636821320) then passed all 20 tests on SHA `4861390557e2497e41fd3d8e83eb24e5be74da3f`.
-- The fake-DOM scenario tests exercise the real form controllers and the actual Zod schemas, but do not replace full browser automation or live API/database end-to-end testing. Recheck CI against the latest PR head before merge.
+- Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and isolated form-controller scenarios using a lightweight fake DOM and queued API responses. It imports the actual Zod client create/patch schemas to test valid Persian-digit normalization, invalid/repeated check digits, optional patch updates, CSRF middleware placement, and schema-level HTTP 400 response logic.
+- Added `backend/tests/client-routes-http.integration.test.cjs`: it launches the actual Express backend and sends real HTTP requests against a disposable PostgreSQL service provided by GitHub Actions. It checks HTTP 400 for invalid-checksum POST and PATCH, HTTP 403 for an invalid CSRF token, HTTP 201 plus persisted client data/audit entry for a valid POST, and HTTP 200 plus persisted edits/audit entry for a valid PATCH. The fixture is created and torn down in the ephemeral CI database; it does not use Render, production credentials, or any operational database.
+- GitHub Actions workflow `.github/workflows/forms-validation.yml` installs backend dependencies, starts PostgreSQL 16 as an isolated service, runs the existing form-validation suite, and then runs the real-HTTP integration suite.
+- Earlier successful runs cover the pre-integration suite only. The new real-HTTP test is not considered verified until GitHub Actions completes successfully on the exact latest PR head SHA; report that run and SHA below after CI completes.
+- The fake-DOM tests remain useful for browser-controller behavior but do not replace full browser automation or staging checks. The new HTTP suite exercises the real server and disposable database but does not prove production deployment health or every authorization boundary.
 
 ## Open PR overlap that must be reconciled
 
@@ -52,7 +53,7 @@ This report inventories the form-related UI and the open feature branches before
 ## Recommended implementation sequence
 
 1. Keep this audit branch isolated; do not merge it into `main` as part of this snapshot.
-2. Keep server-side national-code checksum validation covered by schema tests; next add browser-driven acceptance tests and run staging-only API checks.
+2. Keep server-side national-code checksum validation covered by schema tests and real-HTTP integration tests; next add browser-driven acceptance tests and run staging-only API checks.
 3. Improve list scalability (pagination or explicit capped-result messaging) and remove/label placeholder profile metrics.
 4. Review PR #2 and PR #3 for integration order and verify current-head CI and office-isolation tests.
 5. Reconcile PR #4/#5 into one canonical document-metadata implementation before any merge.
@@ -62,3 +63,12 @@ This report inventories the form-related UI and the open feature branches before
 ## Verification note
 
 This remains a repository audit with isolated controller tests, not a full browser-run acceptance test. The test harness uses fake DOM elements and mocked API responses and does not connect to production or any database. Recheck the current head and Actions run before merge.
+
+
+## Real-HTTP integration verification (PR #6 follow-up)
+
+- Test file: `backend/tests/client-routes-http.integration.test.cjs`.
+- CI setup: disposable PostgreSQL 16 service with synthetic office, user, and session rows; the test starts the actual backend on a local runner port and calls it over HTTP.
+- Required assertions: invalid national-code checksum returns HTTP 400 on client POST and PATCH; invalid CSRF returns HTTP 403; valid client creation returns HTTP 201 and persists the client plus audit row; valid client edit returns HTTP 200 and persists normalized national code, changed name, and audit row.
+- Safety boundary: only the temporary CI service database is initialized/dropped. No production URL, Render service, or main-branch file is used by this test.
+- Verification status: **pending until Actions completes for the exact current PR head SHA**. Do not infer success from older run #50 or from the pre-integration green run #52.
