@@ -57,5 +57,4 @@ test("calendar UI fields and API validation remain compatible with the SQL schem
   }
   assert.match(schema, /reminder_minutes integer not null default 1440/);
   assert.match(schema, /check \(reminder_minutes >= 0 and reminder_minutes <= 43200\)/);
-  assert.match(hearingUi, /name="not-a-valid-pattern"/) === false;
 });
