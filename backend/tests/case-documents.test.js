@@ -65,3 +65,8 @@ test("unhandled and oversized request errors return sanitized JSON", () => {
  assert.match(server, /error: "invalid_json"/);
  assert.match(server, /error: "internal_server_error"/);
 });
+
+test("database connections and statements have bounded timeouts", () => {
+ assert.match(server, /connectionTimeoutMillis: 5000/);
+ assert.match(server, /statement_timeout: Number\(process\.env\.DB_STATEMENT_TIMEOUT_MS \|\| 15000\)/);
+});
