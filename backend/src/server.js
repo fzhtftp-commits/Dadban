@@ -6,6 +6,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { clientCreateSchema, clientPatchSchema } from "./client-schemas.js";
 
 const { Pool } = pg;
 const scrypt = promisify(crypto.scrypt);
@@ -42,63 +43,6 @@ const normalizeDigits = (value = "") =>
 
 const optionalText = z.string().trim().max(5000).optional().nullable();
 const emailSchema = z.string().trim().email().max(320).transform((v) => v.toLowerCase());
-
-const commonClientSchema = {
-  mobile: z.string().trim().max(20).optional().nullable(),
-  phone: z.string().trim().max(30).optional().nullable(),
-  email: z.string().trim().email().max(320).optional().nullable(),
-  source: z.string().trim().max(80).optional().nullable(),
-  address: optionalText,
-  notes: optionalText,
-  status: z.enum(["active", "needs_followup", "inactive"]).optional().default("active")
-};
-
-const individualClientSchema = z.object({
-  client_type: z.literal("individual"),
-  full_name: z.string().trim().min(2).max(160),
-  national_id: z.string().trim().transform(normalizeDigits).pipe(z.string().regex(/^\d{10}$/)),
-  birth_date: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
-  occupation: z.string().trim().max(160).optional().nullable(),
-  company_name: z.null().optional().default(null),
-  national_company_id: z.null().optional().default(null),
-  registration_no: z.null().optional().default(null),
-  ...commonClientSchema
-});
-
-const companyClientSchema = z.object({
-  client_type: z.literal("company"),
-  company_name: z.string().trim().min(2).max(240),
-  national_company_id: z.string().trim().transform(normalizeDigits).pipe(z.string().regex(/^\d{10,20}$/)),
-  registration_no: z.string().trim().max(40).optional().nullable(),
-  full_name: z.null().optional().default(null),
-  national_id: z.null().optional().default(null),
-  birth_date: z.null().optional().default(null),
-  occupation: z.null().optional().default(null),
-  ...commonClientSchema
-});
-
-const clientCreateSchema = z.discriminatedUnion("client_type", [
-  individualClientSchema,
-  companyClientSchema
-]);
-
-const clientPatchSchema = z.object({
-  client_type: z.enum(["individual", "company"]).optional(),
-  full_name: z.string().trim().min(2).max(160).optional().nullable(),
-  national_id: z.string().trim().transform(normalizeDigits).pipe(z.string().regex(/^\d{10}$/)).optional().nullable(),
-  birth_date: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
-  occupation: z.string().trim().max(160).optional().nullable(),
-  company_name: z.string().trim().min(2).max(240).optional().nullable(),
-  national_company_id: z.string().trim().transform(normalizeDigits).pipe(z.string().regex(/^\d{10,20}$/)).optional().nullable(),
-  registration_no: z.string().trim().max(40).optional().nullable(),
-  mobile: z.string().trim().max(20).optional().nullable(),
-  phone: z.string().trim().max(30).optional().nullable(),
-  email: z.string().trim().email().max(320).optional().nullable(),
-  source: z.string().trim().max(80).optional().nullable(),
-  address: optionalText,
-  notes: optionalText,
-  status: z.enum(["active", "needs_followup", "inactive"]).optional()
-}).strict();
 
 const caseCreateSchema = z.object({
   client_id: z.string().uuid(),
