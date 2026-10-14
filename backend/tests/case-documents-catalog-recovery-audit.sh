@@ -32,7 +32,7 @@ cleanup
 CREATE TABLE ${bad_schema}.case_documents (
   id uuid NOT NULL,
   title text,
-  CONSTRAINT case_documents_storage_metadata_consistency CHECK (id > 0),
+  CONSTRAINT case_documents_storage_metadata_consistency CHECK (length(title) > 0),
   CONSTRAINT case_documents_case_same_office_fk FOREIGN KEY (id) REFERENCES public.offices(id)
 );
 CREATE INDEX case_documents_office_created_idx
@@ -211,7 +211,7 @@ BEGIN
   END IF;
   SELECT pg_get_constraintdef(c.oid,true) INTO def
   FROM pg_constraint c WHERE c.conrelid='${bad_schema}.case_documents'::regclass AND c.conname='case_documents_storage_metadata_consistency';
-  IF def IS NULL OR def NOT ILIKE '%id > 0%' OR def ILIKE '%storage_status%' THEN
+  IF def IS NULL OR def NOT ILIKE '%length(title) > 0%' OR def ILIKE '%storage_status%' THEN
     RAISE EXCEPTION 'incompatible CHECK fixture was not detected: %', def;
   END IF;
   SELECT pg_get_constraintdef(c.oid,true) INTO def
