@@ -1,5 +1,13 @@
 const releasedClients = new WeakSet();
 
+export async function acquireClient(pool) {
+  const client = await pool.connect();
+  // pg.Pool may hand the same PoolClient object out again after release.
+  // Reset the one-checkout release guard for every new checkout.
+  releasedClients.delete(client);
+  return client;
+}
+
 export async function rollbackQuietly(client, context) {
   if (!client) return false;
   try {
