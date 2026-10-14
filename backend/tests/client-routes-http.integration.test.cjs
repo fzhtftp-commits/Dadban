@@ -49,8 +49,8 @@ async function waitForHealth(child) {
 }
 
 async function resetIsolatedSchema() {
+  await db.query("drop table if exists audit_logs, clients, auth_sessions, users, offices cascade");
   await db.query(`
-    drop table if exists audit_logs, clients, auth_sessions, users, offices cascade;
     create table offices (
       id uuid primary key,
       name text not null
@@ -110,13 +110,16 @@ async function resetIsolatedSchema() {
       user_agent text,
       created_at timestamptz not null default now()
     );
-    insert into offices (id, name) values ($1, 'Integration Test Office');
-    insert into users (id, office_id, full_name, email, role)
-      values ($2, $1, 'Integration Test User', 'dadban-http-test@example.invalid', 'owner');
-    insert into auth_sessions
-      (id, user_id, office_id, token_hash, csrf_hash, expires_at)
-      values ($3, $2, $1, $4, $5, now() + interval '1 hour');
-  `, [officeId, userId, sessionId, hash(sessionToken), hash(csrfToken)]);
+  `);
+  await db.query("insert into offices (id, name) values ($1, $2)", [officeId, "Integration Test Office"]);
+  await db.query(
+    "insert into users (id, office_id, full_name, email, role) values ($1, $2, $3, $4, $5)",
+    [userId, officeId, "Integration Test User", "dadban-http-test@example.invalid", "owner"]
+  );
+  await db.query(
+    "insert into auth_sessions (id, user_id, office_id, token_hash, csrf_hash, expires_at) values ($1, $2, $3, $4, $5, now() + interval '1 hour')",
+    [sessionId, userId, officeId, hash(sessionToken), hash(csrfToken)]
+  );
 }
 
 test("real HTTP client routes enforce checksum and CSRF, and accept valid create/edit", async t => {
