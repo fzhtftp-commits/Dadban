@@ -30,7 +30,7 @@ cleanup
 # Build a deliberately incompatible partial-apply fixture in another schema.
 "${PSQL[@]}" <<SQL
 CREATE TABLE ${bad_schema}.case_documents (
-  id integer NOT NULL,
+  id uuid NOT NULL,
   title text,
   CONSTRAINT case_documents_storage_metadata_consistency CHECK (id > 0),
   CONSTRAINT case_documents_case_same_office_fk FOREIGN KEY (id) REFERENCES public.offices(id)
