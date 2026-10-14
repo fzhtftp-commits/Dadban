@@ -95,17 +95,34 @@ BEGIN
     END IF;
   END LOOP;
 
-  -- Defaults are material to recovery compatibility; compare their catalog expressions.
-  IF (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname='id') NOT LIKE '%gen_random_uuid%' THEN
-    RAISE EXCEPTION 'id default mismatch';
-  END IF;
-  IF (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname='document_type') NOT LIKE '%other%' THEN
-    RAISE EXCEPTION 'document_type default mismatch';
-  END IF;
-  IF (SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname='storage_status') NOT LIKE '%metadata_only%' THEN
-    RAISE EXCEPTION 'storage_status default mismatch';
-  END IF;
-  IF (SELECT count(*) FROM pg_attrdef d JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents') <> 5 THEN
+  -- Assert the exact default-expression inventory, not only the presence of expected fragments.
+  FOR col IN SELECT * FROM (VALUES
+    ('id','gen_random_uuid()'),
+    ('document_type','''other'''),
+    ('storage_status','''metadata_only'''),
+    ('created_at','now()'),
+    ('updated_at','now()')
+  ) AS expected(name,expression) LOOP
+    SELECT pg_get_expr(d.adbin,d.adrelid) INTO def
+    FROM pg_attrdef d
+    JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum
+    JOIN pg_class t ON t.oid=d.adrelid
+    JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND a.attname=col.name;
+    IF def IS NULL OR regexp_replace(lower(def), '::character varying|::text|[[:space:]]', '', 'g')
+       <> regexp_replace(lower(col.expression), '[[:space:]]', '', 'g') THEN
+      RAISE EXCEPTION 'column default expression mismatch for %: expected %, got %', col.name, col.expression, def;
+    END IF;
+  END LOOP;
+  IF (SELECT count(*) FROM pg_attrdef d JOIN pg_class t ON t.oid=d.adrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents') <> 5
+     OR EXISTS (
+       SELECT 1 FROM pg_attrdef d
+       JOIN pg_attribute a ON a.attrelid=d.adrelid AND a.attnum=d.adnum
+       JOIN pg_class t ON t.oid=d.adrelid
+       JOIN pg_namespace n ON n.oid=t.relnamespace
+       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents'
+         AND a.attname NOT IN ('id','document_type','storage_status','created_at','updated_at')
+     ) THEN
     RAISE EXCEPTION 'unexpected column default inventory';
   END IF;
 
