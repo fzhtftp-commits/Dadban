@@ -27,13 +27,20 @@ This report inventories the form-related UI and the open feature branches before
 
 ## Form-quality gaps and work status
 
-1. **Done on this audit branch:** `client-form.html` no longer claims the form is only demonstrative; the subtitle now accurately says client information is saved/updated through the server. This copy-only change has not yet received a passing CI result.
+1. **Done on this audit branch:** `client-form.html` no longer claims the form is only demonstrative; the subtitle now accurately says client information is saved/updated through the server. The shared form-validation and form-contract test workflow now passes on the current PR head (run 38635356372, SHA `33c99f8f1c8bff32a25e9274ed032359138c4917`).
 2. Client and case lists request `limit=100`; no pagination/load-more flow was observed in these pages. Define the expected behavior before claiming support for larger offices.
 3. The client profile has placeholder counts for hearings, actions, and documents. Replace only when the corresponding data sources are integrated; until then label them as unavailable or omit them.
 4. The UI validates national-ID length, but a full Iranian national-code checksum validation was not observed in the inspected client form/server schemas. Decide whether to add checksum validation with shared front/back-end tests; do not rely on browser-only validation.
 5. Navigation entries for calendar, actions, and documents are `#` placeholders on `main`; they should be linked only when their feature has been reviewed and safely integrated.
 6. Case create/edit uses a browser `datetime-local` value and converts it to ISO before submission. Add tests that document the intended timezone behavior so hearings are not shifted unexpectedly.
 7. Acceptance tests should cover invalid/missing fields, duplicate identifiers/case numbers, stale session/CSRF, server failures, keyboard/RTL usability, and office-boundary denials.
+
+## Automated tests added on this branch
+
+- Shared browser/Node helpers normalize Persian/Arabic-Indic digits, validate Iranian national-code check digits, validate Jalali dates by round-trip conversion, and convert local `datetime-local` values to/from UTC ISO timestamps without silently accepting invalid calendar dates.
+- Node's built-in test runner covers digit normalization, national-code checksum cases, Nowruz conversion, invalid Esfand dates, local-time round trips, and static contracts for client/case create-edit routes, CSRF headers, client lookup, and script loading order.
+- GitHub Actions workflow `.github/workflows/forms-validation.yml` executes `node --test backend/tests/forms-validation.test.cjs` on matching PR changes.
+- Latest observed run: [Run #16](https://github.com/fzhtftp-commits/Dadban/actions/runs/38635356372), conclusion **success**, for head SHA `33c99f8f1c8bff32a25e9274ed032359138c4917`. The tests are unit and source-contract tests; they are not browser automation or a live API/database end-to-end test.
 
 ## Open PR overlap that must be reconciled
 
@@ -53,4 +60,4 @@ This report inventories the form-related UI and the open feature branches before
 
 ## Verification note
 
-This is a repository-source audit, not a browser-run acceptance test. The GitHub combined-status endpoint returned no status entries for the checked SHAs, so this report does **not** claim that current CI is green. Check the latest Actions run and exact head SHA for every PR before treating any feature as verified.
+This remains a repository-source audit, not a browser-run acceptance test. The dedicated form-validation workflow passed on the recorded head SHA above; a successful unit/contract-test run does not establish that live API/database integration or browser behavior is fully accepted. Recheck the current head and Actions run before merge.
