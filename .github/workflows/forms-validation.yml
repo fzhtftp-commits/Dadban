@@ -1,0 +1,35 @@
+name: Form validation tests
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "form-validation.js"
+      - "backend/tests/forms-validation.test.cjs"
+      - "backend/package.json"
+      - "client-form.js"
+      - "client-form.html"
+      - "case-form.js"
+      - "case-form.html"
+      - ".github/workflows/forms-validation.yml"
+  push:
+    branches: ["audit/forms-inventory-2026-10"]
+    paths:
+      - "form-validation.js"
+      - "backend/tests/forms-validation.test.cjs"
+      - "backend/package.json"
+      - "client-form.js"
+      - "client-form.html"
+      - "case-form.js"
+      - "case-form.html"
+      - ".github/workflows/forms-validation.yml"
+permissions:
+  contents: read
+jobs:
+  form-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --test backend/tests/forms-validation.test.cjs
