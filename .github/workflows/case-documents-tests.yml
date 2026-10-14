@@ -45,3 +45,9 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
         run: node tests/case-documents-api.integration.js
         working-directory: backend
+
+      - name: Verify full baseline migration upgrade and transactional rollback in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-migration-upgrade.sql
+        working-directory: backend
