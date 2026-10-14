@@ -15,6 +15,8 @@ const csrfToken = "integration-test-csrf-token";
 const userId = "00000000-0000-4000-8000-000000000001";
 const officeId = "00000000-0000-4000-8000-000000000002";
 const sessionId = "00000000-0000-4000-8000-000000000003";
+const otherOfficeId = "00000000-0000-4000-8000-000000000004";
+const otherOfficeClientId = "00000000-0000-4000-8000-000000000005";
 
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 const cookie = `dadban_session=${sessionToken}; dadban_csrf=${csrfToken}`;
@@ -111,7 +113,7 @@ async function resetIsolatedSchema() {
       created_at timestamptz not null default now()
     );
   `);
-  await db.query("insert into offices (id, name) values ($1, $2)", [officeId, "Integration Test Office"]);
+  await db.query("insert into offices (id, name) values ($1, $2), ($3, $4)", [officeId, "Integration Test Office", otherOfficeId, "Other Integration Test Office"]);
   await db.query(
     "insert into users (id, office_id, full_name, email, role) values ($1, $2, $3, $4, $5)",
     [userId, officeId, "Integration Test User", "dadban-http-test@example.invalid", "owner"]
@@ -119,6 +121,10 @@ async function resetIsolatedSchema() {
   await db.query(
     "insert into auth_sessions (id, user_id, office_id, token_hash, csrf_hash, expires_at) values ($1, $2, $3, $4, $5, now() + interval '1 hour')",
     [sessionId, userId, officeId, hash(sessionToken), hash(csrfToken)]
+  );
+  await db.query(
+    "insert into clients (id, office_id, client_type, full_name, national_id, created_by, updated_by) values ($1, $2, 'individual', $3, $4, $5, $5)",
+    [otherOfficeClientId, otherOfficeId, "Other Office Client", "1234567891", userId]
   );
 }
 
@@ -191,6 +197,23 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
     assert.equal((await db.query("select count(*)::int as count from clients")).rows[0].count, 0);
   });
 
+  await t.test("GET detail and national-code lookup never disclose another office's client", async () => {
+    const detail = await request("/api/clients/" + otherOfficeClientId, "GET");
+    assert.equal(detail.status, 404);
+    assert.deepEqual(await detail.json(), { error: "client_not_found" });
+    const lookup = await request("/api/clients/lookup?national_id=1234567891", "GET");
+    assert.equal(lookup.status, 404);
+    assert.deepEqual(await lookup.json(), { error: "client_not_found" });
+  });
+
+  await t.test("PATCH cannot update a client belonging to another office", async () => {
+    const response = await request("/api/clients/" + otherOfficeClientId, "PATCH", { full_name: "Unauthorized change" });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "client_not_found" });
+    const stored = await db.query("select full_name from clients where id = $1", [otherOfficeClientId]);
+    assert.equal(stored.rows[0].full_name, "Other Office Client");
+  });
+
   let clientId;
   await t.test("POST /api/clients returns 201 and persists a valid client", async () => {
     const response = await request("/api/clients", "POST", validClient);
@@ -215,5 +238,19 @@ test("real HTTP client routes enforce checksum and CSRF, and accept valid create
     const stored = await db.query("select full_name, national_id from clients where id = $1", [clientId]);
     assert.deepEqual(stored.rows[0], { full_name: "علی رضایی ویرایش‌شده", national_id: "1234567891" });
     assert.equal((await db.query("select count(*)::int as count from audit_logs where action = 'update' and entity_id = $1", [clientId])).rows[0].count, 1);
+  })
+  await t.test("client creation rolls back when audit-log insertion fails", async () => {
+    await db.query("create function fail_audit_insert() returns trigger language plpgsql as $$ begin raise exception 'synthetic audit sink failure'; end; $$; create trigger fail_audit_insert_before_write before insert on audit_logs for each row execute function fail_audit_insert();");
+    try {
+      const response = await request("/api/clients", "POST", { ...validClient, full_name: "Must Roll Back" });
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), { error: "database_error" });
+      assert.equal((await db.query("select count(*)::int as count from clients where full_name = $1", ["Must Roll Back"])).rows[0].count, 0);
+      assert.equal((await db.query("select count(*)::int as count from audit_logs where action = 'create'")).rows[0].count, 1);
+    } finally {
+      await db.query("drop trigger if exists fail_audit_insert_before_write on audit_logs");
+      await db.query("drop function if exists fail_audit_insert()");
+    }
   });
+;
 });
