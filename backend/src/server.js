@@ -1551,7 +1551,7 @@ app.get("/api/case-documents", requireAuth, async (req,res) => {
   const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
   if (cid && !cid.success) return res.status(400).json({error:"invalid_case_id"});
   const values=[req.auth.officeId], where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null"];
-  if(cid){values.push(cid.data);where.push(`d.case_id = ${values.length}`);}
+  if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
   try {
     const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
