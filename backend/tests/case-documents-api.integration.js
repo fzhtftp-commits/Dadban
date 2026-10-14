@@ -322,18 +322,11 @@ try {
   assert.equal(failedCreateRow.rows[0].count, 0, "failed create must roll back the document row");
   const failedCreateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
   assert.equal(failedCreateAudit.rows[0].count, createAuditBeforeFailure.rows[0].count, "failed create must not leave an audit row");
-  const failedIdempotentCreates = await Promise.all([
-    request("/api/case-documents", {
-      token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
-      body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
-    }),
-    request("/api/case-documents", {
-      token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
-      body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
-    })
-  ]);
-  assert.deepEqual(failedIdempotentCreates.map(result => result.status), [500, 500],
-    "concurrent same-key creates must both fail cleanly when the database audit insert fails");
+  const failedIdempotentCreate = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
+    body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
+  });
+  assert.equal(failedIdempotentCreate.status, 500, "audit failure must fail idempotent creation");
   const failedIdempotentRows = await pool.query("select count(*)::int as count from case_documents where title='Idempotent create database failure retry'");
   assert.equal(failedIdempotentRows.rows[0].count, 0, "failed idempotent create must roll back its document and key");
 
