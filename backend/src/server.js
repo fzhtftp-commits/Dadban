@@ -1583,7 +1583,7 @@ const documentTypeSchema = z.enum(["petition","contract","evidence","court_order
 const documentDateSchema = z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/)
   .refine((value) => { const date = new Date(value + "T00:00:00.000Z"); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; });
 const originalFilenameSchema = z.string().trim().min(1).max(255)
-  .refine((value) => value !== "." && value !== ".." && !/[\\/\\\\\\u0000-\\u001f\\u007f]/.test(value), {
+  .refine((value) => value !== "." && value !== ".." && !/[\/\\\u0000-\u001f\u007f]/.test(value), {
     message: "Filename must be a basename without path separators or control characters"
   });
 const caseDocumentCreateSchema = z.object({
