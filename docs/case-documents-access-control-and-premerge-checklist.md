@@ -123,3 +123,12 @@ Scope reviewed: `backend/migrations/004_case_documents_metadata.sql`, `backend/t
 - **Interpretation limit:** the intentional error is raised and caught inside the test transaction to allow deterministic rollback assertions. This verifies PostgreSQL transactional DDL rollback when statements are wrapped in a transaction; it does not prove that every production migration runner automatically wraps migrations or that an out-of-transaction partial failure is recoverable.
 - This rehearsal is restricted to the GitHub Actions disposable PostgreSQL service. It does not connect to, migrate, reset, or otherwise touch a production/shared database; it does not deploy to Render.
 - The workflow/test changes create a new commit, so the new Actions run must finish successfully on the exact latest PR head before these additions can be marked CI-verified.
+
+
+## Exact-SHA result and fail-closed schema-object audit — 2026-10-14
+
+- Run #111 completed successfully: [GitHub Actions #111](https://github.com/fzhtftp-commits/Dadban/actions/runs/38596118867). Its `head_sha` is exactly `d9a82650501e2cbcde0afbf1197dfefeb0d4caf9`, matching PR #4's head at the time of verification. All job steps passed, including npm tests, syntax checks, metadata isolation, full-baseline migration/rollback rehearsal, and two-office HTTP isolation.
+- A further review found that migration 004 used `IF NOT EXISTS` for its table and indexes. That can silently accept an existing same-named object without validating its definition. Removed `IF NOT EXISTS` from the `case_documents` table and its three indexes so an unexpected pre-existing object fails rather than being treated as valid. This intentionally makes the migration non-idempotent: inspect and reconcile any pre-existing/partially applied objects before rerunning.
+- Extended unit checks to guard this fail-closed source behavior. Extended the full-baseline SQL rehearsal to verify the actual definitions of all three office-scoped foreign keys and both named check constraints, not merely their names; index checks already assert the expected columns/order and partial predicates.
+- The current migration/test changes created a new head after run #111. The new run must complete successfully on the exact current head before these latest changes are called CI-verified.
+- PR #4 remains open, Draft, and unmerged. No changes were made to `main`, no operational database was accessed, and no Render deployment was performed.
