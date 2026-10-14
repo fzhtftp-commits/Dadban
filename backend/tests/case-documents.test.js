@@ -102,7 +102,7 @@ test("document creation is idempotent and sensitive endpoints are rate limited",
  assert.match(server, /on conflict \(office_id,created_by,idempotency_key\)/);
  assert.match(server, /idempotent_replay:\s*true/);
  assert.match(server, /createRateLimiter\(\{ windowMs: 15 \* 60 \* 1000, maxRequests: 10 \}\)/);
- assert.match(server, /createRateLimiter\(\{ windowMs: 15 \* 60 \* 1000, maxRequests: 30 \}\)/);
+ assert.match(server, /createRateLimiter\(\{ windowMs: 15 \* 60 \* 1000, maxRequests: 24 \}\)/);
  assert.match(server, /Retry-After/);
  assert.match(server, /Max-Age=28800/);
  assert.match(server, /SameSite=/);
