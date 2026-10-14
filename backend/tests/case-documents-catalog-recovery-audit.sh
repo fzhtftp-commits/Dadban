@@ -48,7 +48,6 @@ DECLARE
   actual_count integer;
   expected_count integer := 20;
   def text;
-  idx record;
   col record;
 BEGIN
   SELECT count(*) INTO actual_count
