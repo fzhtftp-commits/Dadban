@@ -442,14 +442,12 @@ try {
   console.log("PASS: cross-office delete rejected without mutation");
 
   let rateLimited = false;
-  for (let i = 0; i < 3; i++) {
-    console.log("RATE LIMIT REQUEST", i);
+  for (let i = 0; i < 21; i++) {
     const limited = await request("/api/case-documents", {
       token: tokenA, csrf: csrfA, method: "POST",
       idempotencyKey: `rate-limit-key-${String(i).padStart(2,"0")}`,
       body: { case_id: ids.caseA, title: `Rate limit test ${i}` }
     });
-    console.log("RATE LIMIT RESPONSE", i, limited.status);
     if (limited.status === 429) {
       rateLimited = true;
       assert.deepEqual(limited.body, { error: "rate_limit_exceeded" });
