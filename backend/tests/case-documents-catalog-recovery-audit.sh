@@ -7,7 +7,7 @@ set -euo pipefail
 PSQL=(psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1)
 expected_schema="case_documents_catalog_expected"
 bad_schema="case_documents_catalog_incompatible"
-migration_file="../migrations/004_case_documents_metadata.sql"
+migration_file="migrations/004_case_documents_metadata.sql"
 sql_file="$(mktemp)"
 
 cleanup() {
