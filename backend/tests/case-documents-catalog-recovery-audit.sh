@@ -642,7 +642,7 @@ BEGIN
     FROM pg_index i
     JOIN pg_class idx ON idx.oid=i.indexrelid
     WHERE i.indrelid='${expected_schema}.case_documents'::regclass
-      AND (idx.relkind <> 'i' OR idx.relpersistence <> 'p' OR idx.reispartition)
+      AND (idx.relkind <> 'i' OR idx.relpersistence <> 'p' OR idx.relispartition)
   ) THEN
     RAISE EXCEPTION 'index relation kind, persistence, or partition status differs from migration contract';
   END IF;
