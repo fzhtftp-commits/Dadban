@@ -124,22 +124,22 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_case_same_office_fk'
-      AND c.contype='f' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (case_id, office_id) REFERENCES public.cases(id, office_id)%') THEN
+      AND c.contype='f' AND c.convalidated AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='case_id'), (SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='office_id')]::smallint[] AND c.confrelid='public.cases'::regclass AND c.confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='id'), (SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='office_id')]::smallint[]) THEN
     RAISE EXCEPTION 'case composite FK definition mismatch';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_created_by_same_office_fk'
-      AND c.contype='f' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (created_by, office_id) REFERENCES public.users(id, office_id)%') THEN
+      AND c.contype='f' AND c.convalidated AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='created_by'), (SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='office_id')]::smallint[] AND c.confrelid='public.users'::regclass AND c.confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='id'), (SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='office_id')]::smallint[]) THEN
     RAISE EXCEPTION 'created_by composite FK definition mismatch';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_updated_by_same_office_fk'
-      AND c.contype='f' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (updated_by, office_id) REFERENCES public.users(id, office_id)%') THEN
+      AND c.contype='f' AND c.convalidated AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='updated_by'), (SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='office_id')]::smallint[] AND c.confrelid='public.users'::regclass AND c.confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='id'), (SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='office_id')]::smallint[]) THEN
     RAISE EXCEPTION 'updated_by composite FK definition mismatch';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
       WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='f'
-      AND pg_get_constraintdef(c.oid,true) ILIKE '%FOREIGN KEY (office_id) REFERENCES public.offices(id)%') THEN
+      AND c.conkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='office_id')]::smallint[] AND c.confrelid='public.offices'::regclass AND c.confkey = ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.confrelid AND attname='id')]::smallint[]) THEN
     RAISE EXCEPTION 'office_id FK definition mismatch';
   END IF;
 
@@ -216,7 +216,7 @@ BEGIN
   END IF;
   SELECT pg_get_constraintdef(c.oid,true) INTO def
   FROM pg_constraint c WHERE c.conrelid='${bad_schema}.case_documents'::regclass AND c.conname='case_documents_case_same_office_fk';
-  IF def IS NULL OR def NOT ILIKE '%FOREIGN KEY (id) REFERENCES public.offices(id)%' OR def ILIKE '%case_id, office_id%' THEN
+  IF def IS NULL OR def NOT ILIKE '%FOREIGN KEY (id) REFERENCES%offices(id)%' OR def ILIKE '%case_id, office_id%' THEN
     RAISE EXCEPTION 'incompatible FK fixture was not detected: %', def;
   END IF;
   SELECT pg_get_indexdef(i.indexrelid) INTO def
