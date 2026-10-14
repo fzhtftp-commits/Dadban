@@ -42,3 +42,8 @@ test("every document API route enforces office-scoped access predicates", () => 
  assert.match(update, /where id=\$\$\{v\.length-1\} and office_id=\$\$\{v\.length\}/);
  assert.match(remove, /where id=\$1 and office_id=\$2 and deleted_at is null/);
 });
+
+test("case_id list filter uses a bound SQL parameter and dates reject impossible calendar days", () => {
+ assert.match(server, /where\.push\(\`d\.case_id = \$\$\{values\.length\}\`\)/);
+ assert.match(server, /date\.toISOString\(\)\.slice\(0,10\) === value/);
+});
