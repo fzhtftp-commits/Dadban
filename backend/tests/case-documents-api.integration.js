@@ -59,7 +59,7 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
   });
-  return { status: response.status, body: response.status === 204 ? null : await response.json(), headers: { "retry-after": response.headers.get("retry-after") } };
+  return { status: response.status, body: response.status === 204 ? null : await response.json(), headers: { "retry-after": response.headers.get("retry-after"), "set-cookie": response.headers.get("set-cookie") } };
 }
 
 try {
@@ -322,6 +322,13 @@ try {
   assert.equal(failedCreateRow.rows[0].count, 0, "failed create must roll back the document row");
   const failedCreateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
   assert.equal(failedCreateAudit.rows[0].count, createAuditBeforeFailure.rows[0].count, "failed create must not leave an audit row");
+  const failedIdempotentCreate = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
+    body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
+  });
+  assert.equal(failedIdempotentCreate.status, 500, "audit failure must fail idempotent creation");
+  const failedIdempotentRows = await pool.query("select count(*)::int as count from case_documents where title='Idempotent create database failure retry'");
+  assert.equal(failedIdempotentRows.rows[0].count, 0, "failed idempotent create must roll back its document and key");
 
   const failedUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Must Roll Back" }
@@ -333,6 +340,14 @@ try {
   assert.equal(afterFailedUpdate.rows[0].title, "Confidential Office A document", "document update must roll back when audit insert fails");
   const failedUpdateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
   assert.equal(failedUpdateAudit.rows[0].count, 0, "failed update must not leave an audit row");
+  await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
+  const retriedIdempotentCreate = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
+    body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
+  });
+  assert.equal(retriedIdempotentCreate.status, 201, "same idempotency key must be reusable after a rolled-back database failure");
+  const retriedIdempotentAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [retriedIdempotentCreate.body.data.id]);
+  assert.equal(retriedIdempotentAudit.rows[0].count, 1, "successful retry after database failure must be audited exactly once");
   await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
   const ownUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Updated by Office A" }
@@ -483,6 +498,20 @@ try {
   assert.equal(expiredRequest.status, 401, "expired session must no longer authorize API access");
   assert.deepEqual(expiredRequest.body, { error: "authentication_required" });
   console.log("PASS: expired session is rejected");
+
+  const logoutToken = "test-session-logout-".padEnd(48, "e");
+  const logoutCsrf = "test-csrf-logout-".padEnd(48, "f");
+  await pool.query("insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values ($1,$2,$3,$4,now()+interval '1 hour')", [ids.userA, ids.officeA, hash(logoutToken), hash(logoutCsrf)]);
+  const logout = await request("/api/auth/logout", { token: logoutToken, csrf: logoutCsrf, method: "POST" });
+  assert.equal(logout.status, 200, "valid logout must succeed");
+  assert.deepEqual(logout.body, { ok: true });
+  assert.match(logout.headers["set-cookie"] || "", /Max-Age=0/, "logout must clear browser authentication cookies");
+  const revokedRow = await pool.query("select revoked_at from auth_sessions where token_hash=$1", [hash(logoutToken)]);
+  assert.ok(revokedRow.rows[0].revoked_at, "logout must revoke the server-side session");
+  const afterLogout = await request("/api/case-documents", { token: logoutToken, csrf: logoutCsrf });
+  assert.equal(afterLogout.status, 401, "revoked session must not authorize subsequent requests");
+  assert.deepEqual(afterLogout.body, { error: "authentication_required" });
+  console.log("PASS: logout clears cookies, revokes session, and rejects subsequent requests");
 
 } catch (error) {
   console.error(error);
