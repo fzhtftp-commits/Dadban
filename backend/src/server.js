@@ -1582,12 +1582,16 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
 const documentTypeSchema = z.enum(["petition","contract","evidence","court_order","correspondence","identity","receipt","other"]);
 const documentDateSchema = z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/)
   .refine((value) => { const date = new Date(value + "T00:00:00.000Z"); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; });
+const originalFilenameSchema = z.string().trim().min(1).max(255)
+  .refine((value) => value !== "." && value !== ".." && !/[\\/\\\\\\u0000-\\u001f\\u007f]/.test(value), {
+    message: "Filename must be a basename without path separators or control characters"
+  });
 const caseDocumentCreateSchema = z.object({
   case_id: z.string().uuid(),
   title: z.string().trim().min(2).max(200),
   document_type: documentTypeSchema.default("other"),
   description: z.string().trim().max(3000).optional().nullable(),
-  original_filename: z.string().trim().min(1).max(255).optional().nullable(),
+  original_filename: originalFilenameSchema.optional().nullable(),
   mime_type: z.string().trim().max(127).optional().nullable(),
   size_bytes: z.number().int().min(0).max(25 * 1024 * 1024).optional().nullable(),
   document_date: documentDateSchema.optional().nullable(),
@@ -1597,7 +1601,7 @@ const caseDocumentPatchSchema = z.object({
   title: z.string().trim().min(2).max(200).optional(),
   document_type: documentTypeSchema.optional(),
   description: z.string().trim().max(3000).optional().nullable(),
-  original_filename: z.string().trim().min(1).max(255).optional().nullable(),
+  original_filename: originalFilenameSchema.optional().nullable(),
   mime_type: z.string().trim().max(127).optional().nullable(),
   size_bytes: z.number().int().min(0).max(25 * 1024 * 1024).optional().nullable(),
   document_date: documentDateSchema.optional().nullable(),
