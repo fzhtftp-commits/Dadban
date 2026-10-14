@@ -393,6 +393,15 @@ BEGIN
     RAISE EXCEPTION 'office listing index exact catalog definition mismatch';
   END IF;
 
+  -- Every catalog index must be live as well as valid and ready.
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indrelid='${expected_schema}.case_documents'::regclass
+      AND (NOT i.indislive OR NOT i.indisvalid OR NOT i.indisready)
+  ) THEN
+    RAISE EXCEPTION 'index lifecycle state mismatch: expected all indexes live, valid, and ready';
+  END IF;
+
   -- Verify index access method, primary-index identity, and unique NULL semantics.
   IF EXISTS (
     SELECT 1
