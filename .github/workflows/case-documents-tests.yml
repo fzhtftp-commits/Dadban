@@ -64,6 +64,12 @@ jobs:
         run: bash tests/case-documents-negative-migration.sh
         working-directory: backend
 
+      - name: Verify recovery catalog audit detects incompatible table, constraint, and index in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-catalog-recovery-audit.sh
+        working-directory: backend
+
       - name: Verify incompatible same-named index fails migration statement in disposable PostgreSQL
         env:
           PGPASSWORD: postgres
