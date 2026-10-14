@@ -1576,9 +1576,9 @@ app.post("/api/case-documents", requireAuth, requireTrustedOrigin, requireCsrf, 
 app.patch("/api/case-documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
   const fields=["title","document_type","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
-  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=${v.length}`);}
-  v.push(req.auth.userId);sets.push(`updated_by=${v.length}`);v.push(id.data,req.auth.officeId);const c=await pool.connect();
-  try{await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=${v.length-1} and office_id=${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);
+  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
+  v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);const c=await pool.connect();
+  try{await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);
     if(!q.rowCount){await c.query("rollback");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"update","case_document",id.data,req,{fields:Object.keys(p.data)});await c.query("commit");return res.json({data:q.rows[0]});
   }catch(error){await c.query("rollback");console.error("Update case document failed:",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{c.release();}
