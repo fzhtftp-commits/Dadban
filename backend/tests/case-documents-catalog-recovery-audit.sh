@@ -521,8 +521,10 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_constraint c
     WHERE c.conrelid='${expected_schema}.case_documents'::regclass
-      AND c.contype IN ('f','c')
-      AND (NOT c.convalidated OR c.connoinherit)
+      AND (
+        NOT c.convalidated
+        OR (c.contype='c' AND c.connoinherit)
+      )
   ) THEN
     RAISE EXCEPTION 'FK/CHECK validation or inheritance flags differ from migration contract';
   END IF;
