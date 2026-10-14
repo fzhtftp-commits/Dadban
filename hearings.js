@@ -21,7 +21,9 @@ async function request(url, options={}) {
 async function loadCases(){
  const d=await request(API+"/api/cases?limit=100");
  cases=Array.isArray(d?.data)?d.data:[];
- if(initialCaseId && cases.some(c=>c.id===initialCaseId)) $("caseId").value=initialCaseId;
+ const caseOptions=cases.map(c=>'<option value="'+esc(c.id)+'">'+esc((c.case_number||"بدون شماره")+" — "+(c.title||"بدون عنوان")+" — "+(c.client_full_name||c.client_company_name||"بدون موکل"))+'</option>').join("");
+ $("filterCaseId").innerHTML='<option value="">همه پرونده‌ها</option>'+caseOptions;
+ if(initialCaseId && cases.some(c=>c.id===initialCaseId)) { $("filterCaseId").value=initialCaseId; $("caseId").value=initialCaseId; }
  $("caseId").innerHTML='<option value="">انتخاب پرونده</option>'+cases.map(c=>'<option value="'+esc(c.id)+'">'+esc((c.case_number||"بدون شماره")+" — "+(c.title||"بدون عنوان")+" — "+(c.client_full_name||c.client_company_name||"بدون موکل"))+'</option>').join("");
 }
 function render(){
@@ -37,7 +39,7 @@ function render(){
 async function loadHearings(){
  const params=new URLSearchParams();
  if($("filterStatus").value)params.set("status",$("filterStatus").value);
- const selectedCaseId=$("caseId").value;
+ const selectedCaseId=$("filterCaseId").value;
  if(selectedCaseId)params.set("case_id",selectedCaseId);
  const from=$("filterFrom").value, to=$("filterTo").value;
  if(from && to && from > to) {
@@ -77,7 +79,7 @@ $("hearingForm").addEventListener("submit",async event=>{
  finally{button.disabled=false;}
 });
 $("hearingsBody").addEventListener("click",event=>{const edit=event.target.closest("[data-edit]"),del=event.target.closest("[data-delete]");if(edit)editHearing(edit.dataset.edit);if(del)deleteHearing(del.dataset.delete);});
-$("caseId").addEventListener("change",()=>{resetForm();loadHearings();});
+$("filterCaseId").addEventListener("change",loadHearings);
 $("filterStatus").addEventListener("change",loadHearings);$("filterFrom").addEventListener("change",loadHearings);$("filterTo").addEventListener("change",loadHearings);
 $("clearFilters").addEventListener("click",()=>{$("filterStatus").value="";$("filterFrom").value="";$("filterTo").value="";loadHearings();});
 $("refreshHearings").addEventListener("click",loadHearings);$("cancelEdit").addEventListener("click",resetForm);
