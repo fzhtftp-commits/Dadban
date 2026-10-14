@@ -145,7 +145,7 @@ BEGIN
 
   -- Check every CHECK expression (including the inline type and size checks).
   IF (SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
-      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='c') <> 4 THEN
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='c') <> 5 THEN
     RAISE EXCEPTION 'CHECK constraint count mismatch: got %', (SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.contype='c');
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
@@ -171,6 +171,12 @@ BEGIN
       AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%26214400%'
       AND pg_get_constraintdef(c.oid,true) ILIKE '%size_bytes >= 0%') THEN
     RAISE EXCEPTION 'size_bytes CHECK mismatch';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+      WHERE n.nspname='${expected_schema}' AND t.relname='case_documents' AND c.conname='case_documents_storage_status_check'
+      AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid,true) ILIKE '%pending_storage%'
+      AND pg_get_constraintdef(c.oid,true) ILIKE '%quarantined%' AND pg_get_constraintdef(c.oid,true) ILIKE '%stored%') THEN
+    RAISE EXCEPTION 'storage_status CHECK mismatch';
   END IF;
 
   -- PK must be on id; compare index key order, uniqueness, partial predicates,
