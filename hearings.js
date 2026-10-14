@@ -18,7 +18,7 @@ async function request(url, options={}) {
  return data;
 }
 async function loadCases(){
- const d=await request(API+"/api/cases?limit=200");
+ const d=await request(API+"/api/cases?limit=100");
  cases=Array.isArray(d?.data)?d.data:[];
  $("caseId").innerHTML='<option value="">انتخاب پرونده</option>'+cases.map(c=>'<option value="'+esc(c.id)+'">'+esc((c.case_number||"بدون شماره")+" — "+(c.title||"بدون عنوان")+" — "+(c.client_full_name||c.client_company_name||"بدون موکل"))+'</option>').join("");
 }
@@ -29,7 +29,7 @@ function render(){
  body.innerHTML=hearings.map(h=>{
   const client=h.client_full_name||h.client_company_name||"—";
   const court=[h.court_name,h.branch_name].filter(Boolean).join("، ")||"—";
-  return '<tr><td>'+esc(formatDate(h.hearing_at))+'<br><small>'+esc(h.hearing_type||"جلسه")+'</small></td><td><b>'+esc(h.case_number||"—")+'</b><br>'+esc(h.case_title||"—")+'<br><small>'+esc(client)+'</small></td><td>'+esc(court)+'</td><td>'+esc(statusLabels[h.status]||h.status||"—")+'</td><td>'+esc(h.reminder_minutes===0?"بدون یادآوری":toFa(h.reminder_minutes)+" دقیقه قبل")+'</td><td><div class="calendar-actions"><button type="button" data-edit="'+esc(h.id)+'">ویرایش</button><button class="delete-hearing" type="button" data-delete="'+esc(h.id)+'">حذف</button></div></td></tr>';
+  return '<tr><td>'+esc(formatDate(h.hearing_at))+'<br><small>'+esc(h.hearing_type||"جلسه")+'</small></td><td><b>'+esc(h.case_number||"—")+'</b><br>'+esc(h.case_title||"—")+'<br><small>'+esc(client)+'</small></td><td>'+esc(court)+'</td><td>'+esc(statusLabels[h.status]||h.status||"—")+'</td><td>'+esc(h.reminder_minutes===0?"بدون یادآوری":(h.reminder_minutes>=10080?toFa(Math.round(h.reminder_minutes/10080))+" هفته قبل":h.reminder_minutes>=1440?toFa(Math.round(h.reminder_minutes/1440))+" روز قبل":toFa(h.reminder_minutes)+" دقیقه قبل"))+'</td><td><div class="calendar-actions"><button type="button" data-edit="'+esc(h.id)+'">ویرایش</button><button class="delete-hearing" type="button" data-delete="'+esc(h.id)+'">حذف</button></div></td></tr>';
  }).join("");
 }
 async function loadHearings(){
