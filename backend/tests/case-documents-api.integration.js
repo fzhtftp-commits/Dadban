@@ -28,6 +28,10 @@ const ids = {
   officeB: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
   userA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa01",
   userB: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb01",
+  userAdmin: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa11",
+  userLawyer: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa12",
+  userAssistant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa13",
+  userViewer: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa14",
   caseA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa02",
   caseB: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb02"
 };
@@ -35,6 +39,13 @@ const tokenA = "test-session-office-a-".padEnd(48, "a");
 const tokenB = "test-session-office-b-".padEnd(48, "b");
 const csrfA = "test-csrf-office-a-".padEnd(48, "c");
 const csrfB = "test-csrf-office-b-".padEnd(48, "d");
+const roleAccounts = [
+  { role: "owner", id: ids.userA, token: tokenA, csrf: csrfA },
+  { role: "admin", id: ids.userAdmin, token: "test-session-role-admin-".padEnd(48, "e"), csrf: "test-csrf-role-admin-".padEnd(48, "f") },
+  { role: "lawyer", id: ids.userLawyer, token: "test-session-role-lawyer-".padEnd(48, "g"), csrf: "test-csrf-role-lawyer-".padEnd(48, "h") },
+  { role: "assistant", id: ids.userAssistant, token: "test-session-role-assistant-".padEnd(48, "i"), csrf: "test-csrf-role-assistant-".padEnd(48, "j") },
+  { role: "viewer", id: ids.userViewer, token: "test-session-role-viewer-".padEnd(48, "k"), csrf: "test-csrf-role-viewer-".padEnd(48, "l") }
+];
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 
 async function waitForServer(portToCheck = port) {
@@ -114,13 +125,30 @@ try {
   assert.ok(indexDefinitions.has("case_documents_office_created_idx"), "migration must create office/created listing index");
   assert.ok(indexDefinitions.get("case_documents_office_created_idx").includes("WHERE (deleted_at IS NULL)"), "office listing index should exclude soft-deleted rows");
   await pool.query("insert into offices(id,name) values ($1,'Office A'),($2,'Office B')", [ids.officeA, ids.officeB]);
-  await pool.query("insert into users(id,office_id,full_name,email) values ($1,$2,'Test User A','a@example.test'),($3,$4,'Test User B','b@example.test')", [ids.userA,ids.officeA,ids.userB,ids.officeB]);
+  await pool.query(`
+    insert into users(id,office_id,full_name,email,role) values
+      ($1,$2,'Test Owner','owner@example.test','owner'),
+      ($3,$4,'Test User B','b@example.test','owner'),
+      ($5,$6,'Test Admin','admin@example.test','admin'),
+      ($7,$8,'Test Lawyer','lawyer@example.test','lawyer'),
+      ($9,$10,'Test Assistant','assistant@example.test','assistant'),
+      ($11,$12,'Test Viewer','viewer@example.test','viewer')
+  `, [ids.userA,ids.officeA,ids.userB,ids.officeB,ids.userAdmin,ids.officeA,ids.userLawyer,ids.officeA,ids.userAssistant,ids.officeA,ids.userViewer,ids.officeA]);
   await pool.query("insert into cases(id,office_id,case_number,title) values ($1,$2,'A-001','Case A'),($3,$4,'B-001','Case B')", [ids.caseA,ids.officeA,ids.caseB,ids.officeB]);
+  const sessionValues = [
+    ids.userA, ids.officeA, hash(tokenA), hash(csrfA),
+    ids.userB, ids.officeB, hash(tokenB), hash(csrfB),
+    ...roleAccounts.slice(1).flatMap(account => [account.id, ids.officeA, hash(account.token), hash(account.csrf)])
+  ];
   await pool.query(`
     insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values
       ($1,$2,$3,$4,now()+interval '1 hour'),
-      ($5,$6,$7,$8,now()+interval '1 hour')
-  `, [ids.userA,ids.officeA,hash(tokenA),hash(csrfA),ids.userB,ids.officeB,hash(tokenB),hash(csrfB)]);
+      ($5,$6,$7,$8,now()+interval '1 hour'),
+      ($9,$10,$11,$12,now()+interval '1 hour'),
+      ($13,$14,$15,$16,now()+interval '1 hour'),
+      ($17,$18,$19,$20,now()+interval '1 hour'),
+      ($21,$22,$23,$24,now()+interval '1 hour')
+  `, sessionValues);
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
@@ -287,6 +315,65 @@ try {
 
   const createAudit = await pool.query("select action, entity_id from audit_logs where entity_type='case_document' and entity_id=$1", [documentId]);
   assert.equal(createAudit.rows.filter(row => row.action === "create").length, 1, "successful create must be audited once");
+
+  // Role authorization matrix: every role can list/read within its office.
+  for (const account of roleAccounts) {
+    const roleList = await request("/api/case-documents", { token: account.token, csrf: account.csrf });
+    assert.equal(roleList.status, 200, `${account.role} should be allowed to list document metadata`);
+    assert.ok(roleList.body.data.some(item => item.id === documentId), `${account.role} list should include the in-office document`);
+    const roleRead = await request(`/api/case-documents/${documentId}`, { token: account.token, csrf: account.csrf });
+    assert.equal(roleRead.status, 200, `${account.role} should be allowed to read document metadata`);
+  }
+
+  // Owner/admin/lawyer/assistant may create; viewer may not.
+  const roleCreatedDocuments = new Map();
+  for (const account of roleAccounts) {
+    const result = await request("/api/case-documents", {
+      token: account.token, csrf: account.csrf, method: "POST",
+      body: { case_id: ids.caseA, title: `Role policy create ${account.role}`, document_type: "other" }
+    });
+    if (["owner", "admin", "lawyer", "assistant"].includes(account.role)) {
+      assert.equal(result.status, 201, `${account.role} should be allowed to create metadata`);
+      roleCreatedDocuments.set(account.role, result.body.data.id);
+    } else {
+      assert.equal(result.status, 403, "viewer must be denied document creation");
+      assert.deepEqual(result.body, { error: "document_role_forbidden" });
+    }
+  }
+
+  // Owner/admin/lawyer may update; assistant/viewer must be denied.
+  for (const account of roleAccounts) {
+    const result = await request(`/api/case-documents/${documentId}`, {
+      token: account.token, csrf: account.csrf, method: "PATCH",
+      body: { description: `updated by ${account.role}` }
+    });
+    if (["owner", "admin", "lawyer"].includes(account.role)) {
+      assert.equal(result.status, 200, `${account.role} should be allowed to update metadata`);
+    } else {
+      assert.equal(result.status, 403, `${account.role} must be denied metadata updates`);
+      assert.deepEqual(result.body, { error: "document_role_forbidden" });
+    }
+  }
+
+  // Only owner/admin may soft-delete; denied roles must not mutate the record.
+  for (const role of ["lawyer", "assistant", "viewer"]) {
+    const account = roleAccounts.find(item => item.role === role);
+    const result = await request(`/api/case-documents/${documentId}`, {
+      token: account.token, csrf: account.csrf, method: "DELETE"
+    });
+    assert.equal(result.status, 403, `${role} must be denied document deletion`);
+    assert.deepEqual(result.body, { error: "document_role_forbidden" });
+  }
+  for (const role of ["owner", "admin"]) {
+    const account = roleAccounts.find(item => item.role === role);
+    const targetId = roleCreatedDocuments.get(role);
+    const result = await request(`/api/case-documents/${targetId}`, {
+      token: account.token, csrf: account.csrf, method: "DELETE"
+    });
+    assert.equal(result.status, 204, `${role} should be allowed to soft-delete metadata`);
+  }
+  console.log("PASS: role matrix verified for list/read/create/update/delete across owner/admin/lawyer/assistant/viewer");
+
 
   const idempotentPayload = { case_id: ids.caseA, title: "Idempotent retry regression", document_type: "evidence" };
   const idempotentFirst = await request("/api/case-documents", {
