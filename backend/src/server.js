@@ -150,6 +150,27 @@ const actionCreateSchema = z.object({
   assigned_to: z.string().uuid().optional().nullable()
 }).strict();
 
+
+const documentCreateSchema = z.object({
+  case_id: z.string().uuid(),
+  title: z.string().trim().min(2).max(200),
+  document_type: z.enum(["pleading","evidence","contract","correspondence","court_order","identity","other"]).optional().default("other"),
+  description: z.string().trim().max(5000).optional().nullable(),
+  document_date: z.string().trim().regex(/^\\d{4}-\\d{2}-\\d{2}$/).optional().nullable(),
+  reference_number: z.string().trim().max(120).optional().nullable(),
+  confidentiality: z.enum(["normal","confidential","restricted"]).optional().default("confidential")
+}).strict();
+
+const documentPatchSchema = z.object({
+  case_id: z.string().uuid().optional(),
+  title: z.string().trim().min(2).max(200).optional(),
+  document_type: z.enum(["pleading","evidence","contract","correspondence","court_order","identity","other"]).optional(),
+  description: z.string().trim().max(5000).optional().nullable(),
+  document_date: z.string().trim().regex(/^\\d{4}-\\d{2}-\\d{2}$/).optional().nullable(),
+  reference_number: z.string().trim().max(120).optional().nullable(),
+  confidentiality: z.enum(["normal","confidential","restricted"]).optional()
+}).strict().refine((value) => Object.keys(value).length > 0, { message: "At least one field is required" });
+
 const actionPatchSchema = z.object({
   case_id: z.string().uuid().optional(),
   title: z.string().trim().min(2).max(200).optional(),
@@ -1306,6 +1327,192 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
   }
 });
 
+
+
+app.get("/api/documents", requireAuth, async (req, res) => {
+  const parsed = z.object({
+    case_id: z.string().uuid().optional(),
+    document_type: z.enum(["pleading","evidence","contract","correspondence","court_order","identity","other"]).optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50)
+  }).strict().safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_document_query" });
+  const { case_id, document_type, limit } = parsed.data;
+  const values = [req.auth.officeId];
+  const conditions = ["d.office_id = $1", "d.deleted_at is null", "c.office_id = d.office_id", "c.deleted_at is null"];
+  if (case_id) { values.push(case_id); conditions.push("d.case_id = $" + values.length); }
+  if (document_type) { values.push(document_type); conditions.push("d.document_type = $" + values.length); }
+  values.push(limit);
+  try {
+    const result = await pool.query(`
+      select d.id, d.office_id, d.case_id, d.title, d.document_type, d.description,
+             d.document_date, d.reference_number, d.confidentiality, d.storage_status,
+             d.created_by, d.updated_by, d.created_at, d.updated_at,
+             c.case_number, c.title as case_title
+      from case_documents d
+      join cases c on c.id = d.case_id and c.office_id = d.office_id
+      where ${conditions.join(" and ")}
+      order by d.document_date desc nulls last, d.created_at desc
+      limit $` + values.length, values);
+    return res.json({ data: result.rows, pagination: { limit, returned: result.rows.length } });
+  } catch (error) {
+    console.error("List case documents failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
+app.get("/api/documents/:id", requireAuth, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  if (!id.success) return res.status(400).json({ error: "invalid_document_id" });
+  try {
+    const result = await pool.query(`
+      select d.id, d.office_id, d.case_id, d.title, d.document_type, d.description,
+             d.document_date, d.reference_number, d.confidentiality, d.storage_status,
+             d.created_by, d.updated_by, d.created_at, d.updated_at,
+             c.case_number, c.title as case_title
+      from case_documents d
+      join cases c on c.id = d.case_id and c.office_id = d.office_id and c.deleted_at is null
+      where d.id = $1 and d.office_id = $2 and d.deleted_at is null
+    `, [id.data, req.auth.officeId]);
+    if (!result.rowCount) return res.status(404).json({ error: "document_not_found" });
+    return res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error("Get case document failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  }
+});
+
+app.post("/api/documents", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const parsed = documentCreateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_document" });
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const related = await client.query(
+      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      [data.case_id, req.auth.officeId]
+    );
+    if (!related.rowCount) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_related_case" });
+    }
+    const result = await client.query(`
+      insert into case_documents
+        (office_id, case_id, title, document_type, description, document_date,
+         reference_number, confidentiality, created_by, updated_by)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+      returning id, office_id, case_id, title, document_type, description, document_date,
+                reference_number, confidentiality, storage_status, created_at, updated_at
+    `, [req.auth.officeId, data.case_id, data.title, data.document_type,
+      data.description ?? null, data.document_date ?? null, data.reference_number ?? null,
+      data.confidentiality, req.auth.userId]);
+    const document = result.rows[0];
+    await writeAuditLog(client, req.auth, "create", "case_document", document.id, req, {
+      case_id: document.case_id, document_type: document.document_type,
+      storage_status: "metadata_only"
+    });
+    await client.query("commit");
+    return res.status(201).json({ data: document });
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Create case document failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+app.patch("/api/documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  const parsed = documentPatchSchema.safeParse(req.body);
+  if (!id.success) return res.status(400).json({ error: "invalid_document_id" });
+  if (!parsed.success) return res.status(400).json({ error: "invalid_document_update" });
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const current = await client.query(
+      "select id, case_id from case_documents where id = $1 and office_id = $2 and deleted_at is null for update",
+      [id.data, req.auth.officeId]
+    );
+    if (!current.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "document_not_found" });
+    }
+    const nextCaseId = data.case_id ?? current.rows[0].case_id;
+    const related = await client.query(
+      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      [nextCaseId, req.auth.officeId]
+    );
+    if (!related.rowCount) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_related_case" });
+    }
+    const allowed = ["case_id","title","document_type","description","document_date","reference_number","confidentiality"];
+    const values = [];
+    const sets = [];
+    for (const field of allowed) {
+      if (Object.hasOwn(data, field)) {
+        values.push(data[field] ?? null);
+        sets.push(field + " = $" + values.length);
+      }
+    }
+    values.push(req.auth.userId);
+    sets.push("updated_by = $" + values.length);
+    sets.push("updated_at = now()");
+    values.push(id.data, req.auth.officeId);
+    const result = await client.query(`
+      update case_documents set ${sets.join(", ")}
+      where id = $` + (values.length - 1) + " and office_id = $" + values.length + ` and deleted_at is null
+      returning id, office_id, case_id, title, document_type, description, document_date,
+                reference_number, confidentiality, storage_status, created_at, updated_at
+    `, values);
+    await writeAuditLog(client, req.auth, "update", "case_document", id.data, req, {
+      fields: Object.keys(data), storage_status: "metadata_only"
+    });
+    await client.query("commit");
+    return res.json({ data: result.rows[0] });
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Update case document failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
+
+app.delete("/api/documents/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
+  const id = parseUuid.safeParse(req.params.id);
+  if (!id.success) return res.status(400).json({ error: "invalid_document_id" });
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query(`
+      update case_documents set deleted_at = now(), updated_by = $3, updated_at = now()
+      where id = $1 and office_id = $2 and deleted_at is null returning id, case_id
+    `, [id.data, req.auth.officeId, req.auth.userId]);
+    if (!result.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "document_not_found" });
+    }
+    await writeAuditLog(client, req.auth, "delete", "case_document", id.data, req, {
+      case_id: result.rows[0].case_id, storage_status: "metadata_only"
+    });
+    await client.query("commit");
+    return res.status(204).send();
+  } catch (error) {
+    await client.query("rollback");
+    console.error("Delete case document failed:", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
+});
 
 app.get("/api/actions/assignees", requireAuth, async (req, res) => {
   try {

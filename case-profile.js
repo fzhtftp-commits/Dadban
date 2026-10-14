@@ -58,6 +58,8 @@ async function load(){
   if(hearingsLink) hearingsLink.href=`calendar.html?case_id=${encodeURIComponent(c.id)}`;
   const actionsLink=$("caseActionsLink");
   if(actionsLink) actionsLink.href=`actions.html?case_id=${encodeURIComponent(c.id)}`;
+  const documentsLink=$("caseDocumentsLink");
+  if(documentsLink) documentsLink.href=`documents.html?case_id=${encodeURIComponent(c.id)}`;
   const actionsAllLink=$("caseActionsAllLink");
   if(actionsAllLink) actionsAllLink.href=`actions.html?case_id=${encodeURIComponent(c.id)}`;
   await loadCaseActions();
