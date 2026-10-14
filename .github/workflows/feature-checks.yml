@@ -24,6 +24,7 @@ jobs:
           node --check cases.js
           node --check clients.js
           node --check case-profile.js
+          node --check documents.js
       - name: Install backend dependencies
         run: npm install --prefix backend
       - name: Check integration test syntax
@@ -31,6 +32,7 @@ jobs:
           node --check backend/test/hearings.integration.test.js
           node --check backend/test/hearings-ui-contract.test.js
           node --check backend/test/case-actions-ui-contract.test.js
+          node --check backend/test/documents-ui-contract.test.js
   hearings-integration:
     runs-on: ubuntu-latest
     services:
