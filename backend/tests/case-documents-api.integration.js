@@ -22,6 +22,8 @@ let timeoutServer;
 let timeoutServerOutput = "";
 let rateLimitServer;
 let rateLimitServerOutput = "";
+let roleServer;
+let roleServerOutput = "";
 
 const ids = {
   officeA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -522,12 +524,23 @@ try {
     "concurrent authenticated requests above pool size must finish after clients are released");
   console.log("PASS: repeated and concurrent requests do not exhaust the PostgreSQL connection pool");
 
+  const rolePort = port + 4;
+  roleServer = spawn(process.execPath, ["src/server.js"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, PORT: String(rolePort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  roleServer.stdout.on("data", chunk => { roleServerOutput += chunk.toString(); });
+  roleServer.stderr.on("data", chunk => { roleServerOutput += chunk.toString(); });
+  await waitForServer(rolePort);
+
+
   // Role authorization matrix: every role can list/read within its office.
   for (const account of roleAccounts) {
-    const roleList = await request("/api/case-documents", { token: account.token, csrf: account.csrf });
+    const roleList = await request("/api/case-documents", { token: account.token, csrf: account.csrf, portToUse: rolePort });
     assert.equal(roleList.status, 200, `${account.role} should be allowed to list document metadata`);
     assert.ok(roleList.body.data.some(item => item.id === documentId), `${account.role} list should include the in-office document`);
-    const roleRead = await request(`/api/case-documents/${documentId}`, { token: account.token, csrf: account.csrf });
+    const roleRead = await request(`/api/case-documents/${documentId}`, { token: account.token, csrf: account.csrf, portToUse: rolePort });
     assert.equal(roleRead.status, 200, `${account.role} should be allowed to read document metadata`);
   }
 
@@ -535,7 +548,7 @@ try {
   const roleCreatedDocuments = new Map();
   for (const account of roleAccounts) {
     const result = await request("/api/case-documents", {
-      token: account.token, csrf: account.csrf, method: "POST",
+      token: account.token, csrf: account.csrf, method: "POST", portToUse: rolePort,
       body: { case_id: ids.caseA, title: `Role policy create ${account.role}`, document_type: "other" }
     });
     if (["owner", "admin", "lawyer", "assistant"].includes(account.role)) {
@@ -550,7 +563,7 @@ try {
   // Owner/admin/lawyer may update; assistant/viewer must be denied.
   for (const account of roleAccounts) {
     const result = await request(`/api/case-documents/${documentId}`, {
-      token: account.token, csrf: account.csrf, method: "PATCH",
+      token: account.token, csrf: account.csrf, method: "PATCH", portToUse: rolePort, portToUse: rolePort,
       body: { description: `updated by ${account.role}` }
     });
     if (["owner", "admin", "lawyer"].includes(account.role)) {
@@ -565,7 +578,7 @@ try {
   for (const role of ["lawyer", "assistant", "viewer"]) {
     const account = roleAccounts.find(item => item.role === role);
     const result = await request(`/api/case-documents/${documentId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE"
+      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort, portToUse: rolePort
     });
     assert.equal(result.status, 403, `${role} must be denied document deletion`);
     assert.deepEqual(result.body, { error: "document_role_forbidden" });
@@ -574,7 +587,7 @@ try {
     const account = roleAccounts.find(item => item.role === role);
     const targetId = roleCreatedDocuments.get(role);
     const result = await request(`/api/case-documents/${targetId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE"
+      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort, portToUse: rolePort
     });
     assert.equal(result.status, 204, `${role} should be allowed to soft-delete metadata`);
   }
@@ -663,5 +676,6 @@ try {
   if (outageServer && outageServer.exitCode === null) outageServer.kill("SIGTERM");
   if (timeoutServer && timeoutServer.exitCode === null) timeoutServer.kill("SIGTERM");
   if (rateLimitServer && rateLimitServer.exitCode === null) rateLimitServer.kill("SIGTERM");
+  if (roleServer && roleServer.exitCode === null) roleServer.kill("SIGTERM");
   await pool.end();
 }
