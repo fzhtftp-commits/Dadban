@@ -368,7 +368,7 @@ const createRateLimiter = ({ windowMs, maxRequests }) => {
 };
 
 const loginRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 10 });
-const createDocumentRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 24 });
+const createDocumentRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 20 });
 
 const syncCaseNextHearing = async (client, officeId, caseId) => {
   await client.query(
