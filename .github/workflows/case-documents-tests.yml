@@ -46,6 +46,12 @@ jobs:
         run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-migration-upgrade.sql
         working-directory: backend
 
+      - name: Verify forced migration failure rolls back all DDL in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-forced-rollback.sh
+        working-directory: backend
+
       - name: Verify incompatible same-named table fails migration in disposable PostgreSQL
         env:
           PGPASSWORD: postgres
