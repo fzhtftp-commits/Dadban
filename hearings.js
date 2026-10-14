@@ -81,6 +81,6 @@ $("hearingForm").addEventListener("submit",async event=>{
 $("hearingsBody").addEventListener("click",event=>{const edit=event.target.closest("[data-edit]"),del=event.target.closest("[data-delete]");if(edit)editHearing(edit.dataset.edit);if(del)deleteHearing(del.dataset.delete);});
 $("filterCaseId").addEventListener("change",loadHearings);
 $("filterStatus").addEventListener("change",loadHearings);$("filterFrom").addEventListener("change",loadHearings);$("filterTo").addEventListener("change",loadHearings);
-$("clearFilters").addEventListener("click",()=>{$("filterStatus").value="";$("filterFrom").value="";$("filterTo").value="";loadHearings();});
+$("clearFilters").addEventListener("click",()=>{$("filterStatus").value="";$("filterCaseId").value="";$("filterFrom").value="";$("filterTo").value="";loadHearings();});
 $("refreshHearings").addEventListener("click",loadHearings);$("cancelEdit").addEventListener("click",resetForm);
 (async()=>{try{await loadCases();await loadHearings();}catch(e){message(e.message||"بارگذاری صفحه ناموفق بود.","error");}})();
