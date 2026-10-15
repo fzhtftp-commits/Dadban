@@ -98,10 +98,38 @@ try {
       is_active boolean not null default true, deleted_at timestamptz,
       unique (id, office_id)
     );
+    create table clients (
+      id uuid primary key, office_id uuid not null references offices(id),
+      client_type text not null default 'individual', full_name text not null,
+      national_id text, birth_date date, occupation text, company_name text,
+      national_company_id text, registration_no text, mobile text, phone text,
+      email text, source text, address text, notes text,
+      status text not null default 'active', created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(), deleted_at timestamptz,
+      unique (id, office_id)
+    );
     create table cases (
       id uuid primary key, office_id uuid not null references offices(id),
-      case_number text not null, title text not null, deleted_at timestamptz,
-      unique (id, office_id)
+      client_id uuid not null, case_number text not null, title text not null,
+      case_type text, court_name text, branch_name text, opposing_party text,
+      status text not null default 'active', priority text, filing_date date,
+      next_hearing_at timestamptz, description text, notes text,
+      created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+      deleted_at timestamptz, unique (id, office_id)
+    );
+    create table hearings (
+      id uuid primary key, office_id uuid not null references offices(id),
+      case_id uuid not null, hearing_at timestamptz not null, hearing_type text,
+      court_name text, branch_name text, status text not null default 'scheduled',
+      reminder_minutes integer, notes text, created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(), deleted_at timestamptz
+    );
+    create table case_actions (
+      id uuid primary key, office_id uuid not null references offices(id),
+      case_id uuid not null, title text not null, description text, due_at timestamptz,
+      status text not null default 'todo', priority text, assigned_to uuid,
+      completed_at timestamptz, created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(), deleted_at timestamptz
     );
     create table auth_sessions (
       id uuid primary key default gen_random_uuid(), user_id uuid not null,
@@ -138,7 +166,20 @@ try {
       ($9,$10,'Test Assistant','assistant@example.test','assistant'),
       ($11,$12,'Test Viewer','viewer@example.test','viewer')
   `, [ids.userA,ids.officeA,ids.userB,ids.officeB,ids.userAdmin,ids.officeA,ids.userLawyer,ids.officeA,ids.userAssistant,ids.officeA,ids.userViewer,ids.officeA]);
-  await pool.query("insert into cases(id,office_id,case_number,title) values ($1,$2,'A-001','Case A'),($3,$4,'B-001','Case B')", [ids.caseA,ids.officeA,ids.caseB,ids.officeB]);
+   const clientA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa21";
+   const clientB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb21";
+   const hearingA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa22";
+   const hearingB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb22";
+   const actionA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa23";
+   const actionB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbb23";
+   await pool.query("insert into clients(id,office_id,full_name,national_id) values ($1,$2,'Client A','1234567890'),($3,$4,'Client B','0987654321')",
+     [clientA,ids.officeA,clientB,ids.officeB]);
+   await pool.query("insert into cases(id,office_id,client_id,case_number,title) values ($1,$2,$3,'A-001','Case A'),($4,$5,$6,'B-001','Case B')",
+     [ids.caseA,ids.officeA,clientA,ids.caseB,ids.officeB,clientB]);
+   await pool.query("insert into hearings(id,office_id,case_id,hearing_at,hearing_type) values ($1,$2,$3,now()+interval '1 day','trial'),($4,$5,$6,now()+interval '2 days','trial')",
+     [hearingA,ids.officeA,ids.caseA,hearingB,ids.officeB,ids.caseB]);
+   await pool.query("insert into case_actions(id,office_id,case_id,title,assigned_to) values ($1,$2,$3,'Action A',$4),($5,$6,$7,'Action B',$8)",
+     [actionA,ids.officeA,ids.caseA,ids.userA,actionB,ids.officeB,ids.caseB,ids.userB]);
   const sessionValues = [
     ids.userA, ids.officeA, hash(tokenA), hash(csrfA),
     ids.userB, ids.officeB, hash(tokenB), hash(csrfB),
