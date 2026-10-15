@@ -33,9 +33,10 @@ test("case-document routes enforce the approved role matrix centrally", () => {
 
 test("confidentiality policy is enforced by API and audit", () => {
  assert.match(server, /const canReadCaseDocument = \(role, level\) =>/);
- assert.ok(server.includes("d.confidentiality in ('normal','confidential')"));
- assert.ok(server.includes("d.confidentiality = 'normal'"));
- assert.match(server, /!canReadCaseDocument\(req\.auth\.role,q\.rows\[0\]\.confidentiality\)/);
+ assert.ok(server.includes("u.role='assistant' and d.confidentiality in ('normal','confidential')"));
+ assert.ok(server.includes("u.role='viewer' and d.confidentiality='normal'"));
+ assert.match(server, /join users u on u\.id=\$3 and u\.office_id=d\.office_id and u\.is_active=true and u\.deleted_at is null/);
+ assert.match(server, /join users u on u\.id=\$2 and u\.office_id=d\.office_id and u\.is_active=true and u\.deleted_at is null/);
  assert.match(server, /!canCreateCaseDocument\(req\.auth\.role,d\.confidentiality\)/);
  assert.match(server, /Object\.hasOwn\(p\.data,"confidentiality"\)&&!canChangeDocumentConfidentiality\(req\.auth\.role\)/);
  assert.match(server, /confidentiality_change=\{from:current\.rows\[0\]\.confidentiality,to:q\.rows\[0\]\.confidentiality\}/);
