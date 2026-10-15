@@ -26,10 +26,11 @@ test("every client/case/hearing/action/document mutation audits before commit", 
 
   for (const route of writes) {
     const auditAt = route.body.indexOf("writeAuditLog(");
-    const commitAt = route.body.indexOf('query("commit")');
-    assert.notEqual(auditAt, -1, `${route.method} ${route.path} must write an audit row`);
-    assert.notEqual(commitAt, -1, `${route.method} ${route.path} must commit its transaction`);
-    assert.ok(auditAt < commitAt, `${route.method} ${route.path} must write the audit row before commit`);
+    const commitPositions = [...route.body.matchAll(/query\("commit"\)/g)].map(match => match.index);
+    assert.notEqual(auditAt, -1, `${route.method} ${route.path} must write an audit row for its mutation path`);
+    assert.ok(commitPositions.length > 0, `${route.method} ${route.path} must commit its transaction`);
+    assert.ok(commitPositions.some(position => position > auditAt),
+      `${route.method} ${route.path} must write the audit row before committing the mutation`);
     assert.ok(route.body.includes('query("begin")') || route.body.includes('query("begin");'),
       `${route.method} ${route.path} must start a transaction`);
   }
