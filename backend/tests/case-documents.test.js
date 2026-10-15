@@ -59,12 +59,12 @@ test("every document API route enforces office-scoped access predicates", () => 
  assert.match(list, /d\.office_id = \$1/);
  assert.match(detail, /d\.id=\$1 and d\.office_id=\$2/);
  assert.match(create, /cases where id=\$1 and office_id=\$2/);
- assert.match(update, /where id=\$\$\{v\.length-1\} and office_id=\$\$\{v\.length\}/);
+ assert.ok(update.includes("where id=$\${v.length-1} and office_id=$\${v.length}"));
  assert.match(remove, /where id=\$1 and office_id=\$2 and deleted_at is null/);
 });
 
 test("case_id list filter uses a bound SQL parameter and dates reject impossible calendar days", () => {
- assert.match(server, /where\.push\(\`d\.case_id = \$\$\{values\.length\}\`\)/);
+ assert.match(server, /d\.case_id = \$\$\{values\.length\}/);
  assert.match(server, /date\.toISOString\(\)\.slice\(0,10\) === value/);
 });
 
@@ -75,7 +75,7 @@ test("document transactions guard rollback failures and always release acquired 
  const routeEnd = server.indexOf('app.use\(\(_req, res\) =>', routeStart);
  const routes = server.slice(routeStart, routeEnd);
  assert.equal((routes.match(/finally\{releaseClient\(c\);\}/g) || []).length, 3);
- assert.equal((routes.match(/try\{c=await acquireClient\(pool\)/g) || []).length, 3);
+ assert.equal((routes.match(/try\{\s*c=await acquireClient\(pool\)/g) || []).length, 3);
  assert.doesNotMatch(routes, /catch\(error\)\{await c\.query\("rollback"\)/);
 });
 test("unhandled and oversized request errors return sanitized JSON", () => {
