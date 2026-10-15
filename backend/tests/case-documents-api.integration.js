@@ -565,6 +565,30 @@ try {
   assert.equal(keyReuse.status, 409, "same idempotency key with different payload must be rejected");
   assert.deepEqual(keyReuse.body, { error: "idempotency_key_reused" });
 
+  // A soft-deleted document keeps its idempotency key reserved, but must never be replayed or recreated.
+  const deletedIdempotent = await request(`/api/case-documents/${idempotentFirst.body.data.id}`, {
+    token: tokenA, csrf: csrfA, method: "DELETE"
+  });
+  assert.equal(deletedIdempotent.status, 204, "idempotent fixture document should soft-delete");
+  const deletedReplay = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-key-12345678", body: idempotentPayload
+  });
+  assert.equal(deletedReplay.status, 409, "retry after soft deletion must not resurrect or replay the deleted document");
+  assert.deepEqual(deletedReplay.body, { error: "idempotency_key_reused" });
+  const deletedIdempotentState = await pool.query(
+    "select deleted_at from case_documents where id=$1",
+    [idempotentFirst.body.data.id]
+  );
+  assert.ok(deletedIdempotentState.rows[0].deleted_at, "deleted idempotent document must remain soft-deleted");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_documents where office_id=$1 and created_by=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, "retry-key-12345678"]
+  )).rows[0].count, 1, "retry after deletion must not create a second row");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'",
+    [idempotentFirst.body.data.id]
+  )).rows[0].count, 1, "soft deletion of idempotent document must be audited once");
+
   const concurrentPayload = { case_id: ids.caseA, title: "Concurrent idempotency regression", document_type: "contract" };
   const concurrentKey = "concurrent-key-12345";
   const concurrentCreates = await Promise.all([
@@ -1050,6 +1074,45 @@ try {
   console.log("PASS: successful create/update are audited once");
   console.log("PASS: audit failures roll back update and soft delete");
   console.log("PASS: soft-deleted document is hidden and audited once");
+
+  // Deleting the parent case hides its documents from every document read path.
+  const lifecycleCase = await request("/api/cases", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { client_id: clientA, case_number: "A-DOC-LIFECYCLE", title: "Case document lifecycle fixture" }
+  });
+  assert.equal(lifecycleCase.status, 201, "case lifecycle fixture should be created");
+  const lifecycleCaseId = lifecycleCase.body.data.id;
+  const lifecycleDoc = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: lifecycleCaseId, title: "Hidden when parent case is deleted" }
+  });
+  assert.equal(lifecycleDoc.status, 201, "document for case lifecycle fixture should be created");
+  const lifecycleDocId = lifecycleDoc.body.data.id;
+  const deleteParentCase = await request(`/api/cases/${lifecycleCaseId}`, {
+    token: tokenA, csrf: csrfA, method: "DELETE"
+  });
+  assert.equal(deleteParentCase.status, 204, "parent case should soft-delete");
+  const parentDeletedDocDetail = await request(`/api/case-documents/${lifecycleDocId}`, { token: tokenA, csrf: csrfA });
+  assert.equal(parentDeletedDocDetail.status, 404, "document detail must hide documents whose parent case is soft-deleted");
+  const parentDeletedDocList = await request("/api/case-documents", { token: tokenA, csrf: csrfA });
+  assert.equal(parentDeletedDocList.body.data.some(row => row.id === lifecycleDocId), false,
+    "document list must hide documents whose parent case is soft-deleted");
+  const parentDeletedState = await pool.query(
+    "select d.deleted_at, c.deleted_at as case_deleted_at from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where d.id=$1",
+    [lifecycleDocId]
+  );
+  assert.ok(parentDeletedState.rows[0].case_deleted_at, "parent case should remain soft-deleted");
+  assert.equal(parentDeletedState.rows[0].deleted_at, null,
+    "case deletion must not silently mutate document lifecycle state");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1",
+    [lifecycleDocId]
+  )).rows[0].count, 1, "parent case deletion must not fabricate a document audit event");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where entity_type='case' and entity_id=$1 and action='delete'",
+    [lifecycleCaseId]
+  )).rows[0].count, 1, "parent case deletion must create exactly one case delete audit event");
+  console.log("PASS: parent case soft deletion hides linked documents without falsifying document audit history");
   console.log("PASS: title and size boundary inputs are rejected");
   console.log("PASS: database connection outage returns sanitized 503");
   console.log("PASS: oversized JSON receives a sanitized 413 response");
