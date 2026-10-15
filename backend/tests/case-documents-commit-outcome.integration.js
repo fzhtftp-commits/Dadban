@@ -282,6 +282,92 @@ try {
   // request on the same server/pool after all three fault-injected COMMITs.
   const health = await fetch(`http://127.0.0.1:${apiPort}/health/db`);
   assert.equal(health.status, 200, "pool must recover after discarding broken COMMIT connections");
+
+  // Restart the API process while keeping the same disposable PostgreSQL database.
+  // Durable key rows, not process memory, must resolve the replay after restart.
+  const stoppedServer = server;
+  const stoppedServerExit = new Promise(resolve => stoppedServer.once("exit", resolve));
+  stoppedServer.kill("SIGKILL");
+  await stoppedServerExit;
+  server = null;
+  server = spawn(process.execPath, ["src/server.js"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: {
+      ...process.env,
+      PORT: String(apiPort),
+      NODE_ENV: "test",
+      DATABASE_URL: proxyUrl,
+      CORS_ORIGIN: origin,
+      RATE_LIMIT_MODE: "memory"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  server.stdout.on("data", chunk => { serverOutput += chunk.toString(); });
+  server.stderr.on("data", chunk => { serverOutput += chunk.toString(); });
+  await waitForServer(apiPort);
+
+  const restartedReplay = await request(`/api/case-documents/${patchId}`, {
+    method: "PATCH", key: patchKey, body: { title: "Committed despite lost COMMIT response" }
+  });
+  assert.equal(restartedReplay.status, 200, "same-key replay after API restart must return the committed result");
+  const restartKeyState = await pool.query(
+    "select response_status, created_at from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  );
+  assert.equal(restartKeyState.rowCount, 1, "restart must preserve one durable idempotency record");
+  assert.equal(restartKeyState.rows[0].response_status, 200);
+  assert.equal(await countAudit(patchId, "update"), 1, "restart replay must not duplicate the audit event");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [patchId])).rows[0].title,
+    "Committed despite lost COMMIT response", "restart replay must not change the committed business result");
+  console.log("PASS: API restart replays the durable PostgreSQL idempotency result without a second mutation or audit row");
+
+  // There is deliberately no TTL in migration 006: make the existing key older
+  // than one year and verify it remains reserved and replayable.
+  await pool.query(
+    "update case_document_mutation_idempotency set created_at=now()-interval '400 days' where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  );
+  const agedReplay = await request(`/api/case-documents/${patchId}`, {
+    method: "PATCH", key: patchKey, body: { title: "Committed despite lost COMMIT response" }
+  });
+  assert.equal(agedReplay.status, 200, "an old key must remain replayable because the current contract has no expiry");
+  const agedState = await pool.query(
+    "select created_at, response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  );
+  assert.equal(agedState.rowCount, 1);
+  assert.equal(agedState.rows[0].response_status, 200);
+  assert.ok(agedState.rows[0].created_at < new Date(Date.now() - 399 * 24 * 60 * 60 * 1000),
+    "test must confirm the key is genuinely older than 399 days");
+  assert.equal(await countAudit(patchId, "update"), 1, "aged replay must not duplicate audit");
+  console.log("PASS: 400-day-old idempotency key remains reserved; no TTL expiry is implemented");
+
+  // Security probe for a future cleanup/migration: deleting the idempotency row
+  // removes the only durable key reservation. Reusing the same key then executes
+  // the PATCH again and appends another audit row. This is a documented FINDING,
+  // not an approved cleanup policy; do not add a cleanup job until a durable
+  // tombstone/operation-identity design preserves duplicate protection.
+  const removedKey = await pool.query(
+    "delete from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 returning idempotency_key",
+    [ids.office, ids.user, patchKey]
+  );
+  assert.equal(removedKey.rowCount, 1, "cleanup simulation must remove only the selected test key");
+  const afterCleanupReplay = await request(`/api/case-documents/${patchId}`, {
+    method: "PATCH", key: patchKey, body: { title: "Re-executed after idempotency cleanup" }
+  });
+  assert.equal(afterCleanupReplay.status, 200, "after deletion, the current implementation treats the old key as new");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [patchId])).rows[0].title,
+    "Re-executed after idempotency cleanup", "cleanup probe must directly confirm the second mutation");
+  const cleanupKeyRows = await pool.query(
+    "select response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  );
+  assert.equal(cleanupKeyRows.rowCount, 1);
+  assert.equal(cleanupKeyRows.rows[0].response_status, 200);
+  assert.equal(await countAudit(patchId, "update"), 2,
+    "deleting the idempotency row permits a second mutation and a second audit event");
+  console.log("FINDING: deleting an idempotency row reopens the key and permits a second mutation/audit; cleanup requires durable tombstones or equivalent protection");
+
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for PATCH, confidentiality change, and DELETE");
 } catch (error) {
   console.error(error);
