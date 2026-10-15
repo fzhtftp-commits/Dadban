@@ -220,6 +220,7 @@ try {
     assert.equal(roleState.rows[0].can_truncate_idem, false);
     assert.equal(roleState.rows[0].can_reopen_tombstone, false);
     assert.equal(roleState.rows[0].can_read_audit, false, "runtime may append audit but must not read audit history");
+    assert.equal(await pool.query("select has_table_privilege('dadban_document_runtime_ci','public.users','UPDATE') AS can_update_users").then(r=>r.rows[0].can_update_users), false, "runtime must not be able to change user identity or role");
     assert.equal(roleState.rows[0].can_change_audit, false, "runtime may not modify audit history");
     const runtimeProbe = new Pool({ connectionString: apiDatabaseUrl, ssl: false, max: 1 });
     try {
