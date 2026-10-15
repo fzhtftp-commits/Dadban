@@ -701,6 +701,55 @@ try {
   retryServer.stdout.on("data", chunk => { retryServerOutput += chunk.toString(); });
   retryServer.stderr.on("data", chunk => { retryServerOutput += chunk.toString(); });
   await waitForServer(retryPort);
+
+  // Real PostgreSQL deadlock: the API holds the actor/session and idempotency locks
+  // while waiting on a document row; the second transaction holds that document and
+  // then requests the actor row. Extra ballast locks make the API transaction the
+  // lower-cost deadlock victim so its confirmed rollback and HTTP retry contract are tested.
+  const realDeadlockDocId = await insertRetryFixture("Real deadlock target");
+  const realDeadlockKey = "real-deadlock-retry-01";
+  const realDeadlockPayload = { title: "Real deadlock retried" };
+  const deadlockBlocker = await pool.connect();
+  let deadlockRequest;
+  let deadlockRollbackConfirmed = false;
+  try {
+    await deadlockBlocker.query("begin");
+    await deadlockBlocker.query("insert into users(id,office_id,full_name,email,role) select gen_random_uuid(),$1,'Deadlock ballast '||g,'deadlock-ballast-'||g||'@example.test','owner' from generate_series(1,30) g", [ids.officeA]);
+    await deadlockBlocker.query("select id from users where email like 'deadlock-ballast-%@example.test' for update");
+    await deadlockBlocker.query("select id from case_documents where id=$1 for update", [realDeadlockDocId]);
+    deadlockRequest = request("/api/case-documents/" + realDeadlockDocId, { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "PATCH", idempotencyKey: realDeadlockKey, body: realDeadlockPayload, portToUse: retryPort });
+    await waitForBlockedPatchCount(1);
+    let blockerDeadlockError = null;
+    try {
+      await deadlockBlocker.query("update users set role=role where id=$1", [retryPrincipal.id]);
+    } catch (error) {
+      blockerDeadlockError = error;
+    }
+    const deadlockResponse = await deadlockRequest;
+    assert.equal(blockerDeadlockError, null, "ballast transaction should survive while PostgreSQL aborts the smaller API transaction");
+    assert.equal(deadlockResponse.status, 503, "real PostgreSQL deadlock with confirmed rollback must return retryable 503");
+    assert.deepEqual(deadlockResponse.body, { error: "database_retryable" });
+    await deadlockBlocker.query("rollback");
+    deadlockRollbackConfirmed = true;
+  } finally {
+    await deadlockBlocker.query("rollback").catch(()=>{});
+    deadlockBlocker.release();
+    if (deadlockRequest) await deadlockRequest.catch(()=>{});
+    await pool.query("delete from users where email like 'deadlock-ballast-%@example.test'").catch(()=>{});
+  }
+  assert.equal(deadlockRollbackConfirmed, true, "blocker transaction must be explicitly rolled back to release its locks");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [realDeadlockDocId])).rows[0].title, "Real deadlock target", "aborted API transaction must not mutate document metadata");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.officeA, retryPrincipal.id, realDeadlockKey])).rows[0].count, 0, "confirmed deadlock rollback must remove the uncommitted idempotency record");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [realDeadlockDocId])).rows[0].count, 0, "deadlock rollback must leave no audit event");
+  const realDeadlockRetry = await request("/api/case-documents/" + realDeadlockDocId, { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "PATCH", idempotencyKey: realDeadlockKey, body: realDeadlockPayload, portToUse: retryPort });
+  assert.equal(realDeadlockRetry.status, 200, "same idempotency key and fingerprint must succeed after confirmed deadlock rollback");
+  assert.equal(realDeadlockRetry.body.data.title, realDeadlockPayload.title);
+  const realDeadlockReplay = await request("/api/case-documents/" + realDeadlockDocId, { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "PATCH", idempotencyKey: realDeadlockKey, body: realDeadlockPayload, portToUse: retryPort });
+  assert.equal(realDeadlockReplay.status, 200, "repeat of committed retry must replay successfully");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [realDeadlockDocId])).rows[0].count, 1, "real deadlock retry and replay must produce exactly one audit event");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=200", [ids.officeA, retryPrincipal.id, realDeadlockKey])).rows[0].count, 1, "successful retry must persist one completed idempotency record");
+  console.log("PASS: real PostgreSQL deadlock aborts API transaction, releases locks, retries with same key, and writes exactly one audit event");
+
   const transientCreateFailed = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload, portToUse: retryPort });
   assert.equal(transientCreateFailed.status, 503, "deadlock with confirmed rollback should be explicitly retryable");
   assert.deepEqual(transientCreateFailed.body, { error: "database_retryable" });
