@@ -49,6 +49,137 @@ BEGIN
 END
 $catalog$;
 
+
+-- Verify real catalog mappings/definitions, not just constraint/index names.
+DO $document_catalog$
+DECLARE
+  fk record;
+  fk_count integer;
+  check_count integer;
+  index_keys text[];
+  index_predicate text;
+  index_definition text;
+  check_def text;
+  required_check text;
+BEGIN
+  SELECT count(*) INTO fk_count
+  FROM pg_constraint c
+  WHERE c.conrelid='public.case_documents'::regclass AND c.contype='f' AND c.convalidated;
+  IF fk_count <> 4 THEN
+    RAISE EXCEPTION 'Expected four validated foreign keys, found %', fk_count;
+  END IF;
+
+  -- Each FK must map the intended source columns to the intended target columns.
+  FOR fk IN
+    SELECT c.conname,
+           c.confrelid::regclass::text AS target_table,
+           ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(attnum,ord)
+                 JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum
+                 ORDER BY k.ord) AS source_columns,
+           ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(attnum,ord)
+                 JOIN pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=k.attnum
+                 ORDER BY k.ord) AS target_columns,
+           c.convalidated, c.confdeltype
+    FROM pg_constraint c
+    WHERE c.conrelid='public.case_documents'::regclass AND c.contype='f'
+  LOOP
+    IF NOT fk.convalidated OR fk.confdeltype <> 'r' THEN
+      RAISE EXCEPTION 'FK % must be validated and RESTRICT deletes', fk.conname;
+    END IF;
+    IF NOT (
+      (fk.target_table='offices' AND fk.source_columns=ARRAY['office_id']::text[] AND fk.target_columns=ARRAY['id']::text[])
+      OR (fk.target_table='cases' AND fk.source_columns=ARRAY['case_id','office_id']::text[] AND fk.target_columns=ARRAY['id','office_id']::text[])
+      OR (fk.target_table='users' AND fk.source_columns=ARRAY['created_by','office_id']::text[] AND fk.target_columns=ARRAY['id','office_id']::text[])
+      OR (fk.target_table='users' AND fk.source_columns=ARRAY['updated_by','office_id']::text[] AND fk.target_columns=ARRAY['id','office_id']::text[])
+    ) THEN
+      RAISE EXCEPTION 'Unexpected FK definition %: % -> % (%)', fk.conname, fk.source_columns, fk.target_table, fk.target_columns;
+    END IF;
+  END LOOP;
+
+  -- Check constraints must be validated and encode the actual intended bounds/allowlists.
+  SELECT count(*) INTO check_count
+  FROM pg_constraint c
+  WHERE c.conrelid='public.case_documents'::regclass AND c.contype='c' AND c.convalidated;
+  IF check_count <> 7 THEN
+    RAISE EXCEPTION 'Expected seven validated CHECK constraints, found %', check_count;
+  END IF;
+  FOR required_check IN SELECT unnest(ARRAY[
+    'title','document_type','description','size_bytes','reference_number',
+    'confidentiality','storage_status','idempotency_pair'
+  ]) LOOP
+    SELECT pg_get_constraintdef(c.oid,true) INTO check_def
+    FROM pg_constraint c
+    WHERE c.conrelid='public.case_documents'::regclass AND c.contype='c'
+      AND c.convalidated AND c.conname LIKE '%' || required_check || '%';
+    IF check_def IS NULL THEN
+      RAISE EXCEPTION 'Missing validated CHECK for %', required_check;
+    END IF;
+    IF required_check='title' AND (check_def NOT LIKE '%btrim%' OR check_def NOT LIKE '%200%' OR check_def NOT LIKE '%2%') THEN
+      RAISE EXCEPTION 'Unexpected title CHECK definition: %', check_def;
+    ELSIF required_check='document_type' AND (check_def NOT LIKE '%petition%' OR check_def NOT LIKE '%other%') THEN
+      RAISE EXCEPTION 'Unexpected document_type CHECK definition: %', check_def;
+    ELSIF required_check='description' AND check_def NOT LIKE '%3000%' THEN
+      RAISE EXCEPTION 'Unexpected description CHECK definition: %', check_def;
+    ELSIF required_check='size_bytes' AND (check_def NOT LIKE '%26214400%' OR check_def NOT LIKE '%0%') THEN
+      RAISE EXCEPTION 'Unexpected size_bytes CHECK definition: %', check_def;
+    ELSIF required_check='reference_number' AND check_def NOT LIKE '%120%' THEN
+      RAISE EXCEPTION 'Unexpected reference_number CHECK definition: %', check_def;
+    ELSIF required_check='confidentiality' AND (check_def NOT LIKE '%normal%' OR check_def NOT LIKE '%restricted%') THEN
+      RAISE EXCEPTION 'Unexpected confidentiality CHECK definition: %', check_def;
+    ELSIF required_check='storage_status' AND check_def NOT LIKE '%metadata_only%' THEN
+      RAISE EXCEPTION 'Unexpected storage_status CHECK definition: %', check_def;
+    ELSIF required_check='idempotency_pair' AND (check_def NOT LIKE '%idempotency_key%' OR check_def NOT LIKE '%request_fingerprint%') THEN
+      RAISE EXCEPTION 'Unexpected idempotency-pair CHECK definition: %', check_def;
+    END IF;
+  END LOOP;
+
+  -- Check each operational index's real key order, validity, uniqueness and partial predicate.
+  SELECT ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(attnum,ord)
+               JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum
+               WHERE k.ord <= i.indnkeyatts ORDER BY k.ord),
+         pg_get_expr(i.indpred,i.indrelid), pg_get_indexdef(i.indexrelid)
+    INTO index_keys,index_predicate,index_definition
+  FROM pg_index i JOIN pg_class ix ON ix.oid=i.indexrelid
+  WHERE i.indrelid='public.case_documents'::regclass AND ix.relname='case_documents_idempotency_unique_idx'
+    AND i.indisunique AND i.indisvalid AND i.indisready AND i.indislive
+    AND i.indpred IS NOT NULL AND i.indexprs IS NULL AND i.indnkeyatts=3;
+  IF index_keys IS DISTINCT FROM ARRAY['office_id','created_by','idempotency_key']::text[]
+     OR index_predicate NOT LIKE '%idempotency_key IS NOT NULL%' THEN
+    RAISE EXCEPTION 'Invalid idempotency index definition: %, predicate=%', index_definition,index_predicate;
+  END IF;
+
+  FOR fk IN
+    SELECT ix.relname,
+           ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(attnum,ord)
+                 JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum
+                 WHERE k.ord <= i.indnkeyatts ORDER BY k.ord) AS keys,
+           pg_get_expr(i.indpred,i.indrelid) AS predicate,
+           i.indisvalid, i.indisready, i.indislive, i.indisunique
+    FROM pg_index i JOIN pg_class ix ON ix.oid=i.indexrelid
+    WHERE i.indrelid='public.case_documents'::regclass
+      AND ix.relname IN ('case_documents_office_case_created_idx','case_documents_office_created_idx')
+  LOOP
+    IF NOT fk.indisvalid OR NOT fk.indisready OR NOT fk.indislive OR fk.indisunique
+       OR fk.predicate NOT LIKE '%deleted_at IS NULL%' THEN
+      RAISE EXCEPTION 'Invalid active-document index %: keys %, predicate %', fk.relname,fk.keys,fk.predicate;
+    END IF;
+    IF fk.relname='case_documents_office_case_created_idx'
+       AND fk.keys IS DISTINCT FROM ARRAY['office_id','case_id','created_at']::text[] THEN
+      RAISE EXCEPTION 'Unexpected office/case index key order: %', fk.keys;
+    ELSIF fk.relname='case_documents_office_created_idx'
+       AND fk.keys IS DISTINCT FROM ARRAY['office_id','created_at']::text[] THEN
+      RAISE EXCEPTION 'Unexpected office index key order: %', fk.keys;
+    END IF;
+  END LOOP;
+  IF (SELECT count(*) FROM pg_index i JOIN pg_class ix ON ix.oid=i.indexrelid
+      WHERE i.indrelid='public.case_documents'::regclass
+        AND ix.relname IN ('case_documents_office_case_created_idx','case_documents_office_created_idx')
+        AND i.indisvalid AND i.indisready AND i.indislive) <> 2 THEN
+    RAISE EXCEPTION 'Expected both valid active-document indexes';
+  END IF;
+END
+$document_catalog$;
+
 DO $probe$
 DECLARE expr text; ok boolean;
 BEGIN
