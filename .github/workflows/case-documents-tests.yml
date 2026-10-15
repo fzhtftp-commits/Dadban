@@ -60,7 +60,13 @@ jobs:
           createdb -h localhost -U postgres dadban_rate_limit_test
           trap 'dropdb -h localhost -U postgres --if-exists dadban_rate_limit_test' EXIT
           psql -h localhost -U postgres -d dadban_rate_limit_test -v ON_ERROR_STOP=1 -f migrations/005_shared_rate_limits.sql
-          node tests/shared-rate-limit.integration.js
+          psql -h localhost -U postgres -d dadban_rate_limit_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE dadban_rate_limiter_ci LOGIN PASSWORD 'ci-only-rate-limit-role-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+          GRANT CONNECT ON DATABASE dadban_rate_limit_test TO dadban_rate_limiter_ci;
+          GRANT USAGE ON SCHEMA public TO dadban_rate_limiter_ci;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.rate_limit_counters TO dadban_rate_limiter_ci;
+          SQL
+          DATABASE_URL=postgres://dadban_rate_limiter_ci:ci-only-rate-limit-role-password@localhost:5432/dadban_rate_limit_test node tests/shared-rate-limit.integration.js
         working-directory: backend
 
       - name: Verify forced migration failure rolls back all DDL in disposable PostgreSQL
