@@ -90,8 +90,8 @@ test("audit metadata must not serialize request payloads or secrets", () => {
 test("audit metadata excludes case content and direct identifiers", () => {
   const calls = [...source.matchAll(/writeAuditLog\(([\s\S]*?)\);/g)].map(match => match[1]);
   for (const call of calls) {
-    assert.doesNotMatch(call, /\b(?:case_number|national_code|phone|email|full_name|address|notes|description|title|original_filename|reference_number)\s*:/i,
-      "audit metadata must not copy case/client/document content or direct identifiers");
+    assert.doesNotMatch(call, /\b(?:case_number|client_id|case_id|national_code|phone|email|full_name|address|notes|description|title|original_filename|reference_number)\s*:/i,
+      "audit metadata must not copy case/client/document content, relationship UUIDs, or direct identifiers");
   }
   assert.doesNotMatch(source, /app\.(?:get|post|patch|put|delete)\(\s*["'][^"']*audit[-_]logs/i,
     "audit log reads must not be exposed through an unreviewed API route");
