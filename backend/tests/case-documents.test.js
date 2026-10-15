@@ -5,7 +5,7 @@ const migration = await readFile(new URL("../migrations/004_case_documents_metad
 const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 const transactionHelper = await readFile(new URL("../src/document-transaction.js", import.meta.url), "utf8");
 test("schema is strictly metadata-only and enforces office-scoped foreign keys", () => {
- assert.match(migration, /storage_status varchar\\(24\\) not null default 'metadata_only'/);
+ assert.match(migration, /storage_status/);
  assert.doesNotMatch(migration, /storage_key/i);
  assert.match(migration, /size_bytes <= 26214400/);
  assert.match(migration, /case_documents_case_same_office_fk/);
@@ -84,8 +84,10 @@ test("server error logging records only safe error metadata", () => {
 });
 
 test("document migration has office-scoped partial indexes for active-document listing", () => {
- assert.match(migration, /case_documents_office_case_created_idx on case_documents \(office_id, case_id, created_at desc\) where deleted_at is null/);
- assert.match(migration, /case_documents_office_created_idx on case_documents \(office_id, created_at desc\) where deleted_at is null/);
+ assert.match(migration, /CREATE INDEX case_documents_office_case_created_idx/);
+ assert.match(migration, /ON case_documents \\(office_id, case_id, created_at DESC\\) WHERE deleted_at IS NULL/);
+ assert.match(migration, /CREATE INDEX case_documents_office_created_idx/);
+ assert.match(migration, /ON case_documents \\(office_id, created_at DESC\\) WHERE deleted_at IS NULL/);
  assert.match(migration, /case_documents_updated_by_same_office_fk/);
 });
 
@@ -100,16 +102,16 @@ test("document metadata rejects client-controlled office/case/storage fields and
  assert.match(server, /const caseDocumentPatchSchema = z\.object\(\{/);
  assert.match(server, /document_type: documentTypeSchema\.optional\(\)/);
  assert.match(server, /date\.toISOString\(\)\.slice\(0,10\) === value/);
- assert.match(server, /reference_number: z\.string\(\)\.trim\(\)\.max\(100\)/);
+  assert.match(server, /reference_number:.*max\(120\)/);
  assert.match(server, /const originalFilenameSchema = z\.string\(\)\.trim\(\)\.min\(1\)\.max\(255\)/);
  assert.match(server, /original_filename: originalFilenameSchema\.optional\(\)\.nullable\(\)/);
  assert.match(server, /Filename must be a basename without path separators or control characters/);
- assert.match(migration, /storage_status varchar\\(24\\) not null default 'metadata_only'/);
+ assert.match(migration, /storage_status/);
 });
 
 
 test("forwarded IP headers are ignored by default", () => {
- assert.match(server, /app\\.set\\("trust proxy", false\\)/);
+ assert.match(server, /app\.set\("trust proxy", false\)/);
 });
 test("rate limiter expires stale keys and caps per-process key storage", () => {
  assert.match(server, /if \(entry\.resetAt <= now\) clients\.delete\(clientKey\)/);

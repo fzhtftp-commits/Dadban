@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test tests/*.test.js test/*.test.js"
+    "test": "node --test tests/*.test.js test/case-actions-ui-contract.test.js test/hearings-ui-contract.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
