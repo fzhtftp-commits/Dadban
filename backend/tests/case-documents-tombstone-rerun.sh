@@ -11,12 +11,12 @@ if [[ "${PGDATABASE:-dadban_test}" != "dadban_test" ]]; then
   exit 2
 fi
 
-if psql -v ON_ERROR_STOP=1 -d dadban_test -f migrations/007_case_document_mutation_tombstones.sql >/tmp/dadban-tombstone-rerun.log 2>&1; then
+if psql -h localhost -U postgres -v ON_ERROR_STOP=1 -d dadban_test -f migrations/007_case_document_mutation_tombstones.sql >/tmp/dadban-tombstone-rerun.log 2>&1; then
   echo "FAIL: migration 007 unexpectedly succeeded on second application" >&2
   exit 1
 fi
 
-state="$(psql -X -A -t -v ON_ERROR_STOP=1 -d dadban_test -c "
+state="$(psql -h localhost -U postgres -X -A -t -v ON_ERROR_STOP=1 -d dadban_test -c "
 SELECT
   (SELECT count(*) FROM pg_attribute WHERE attrelid='public.case_document_mutation_idempotency'::regclass AND attname='purged_at' AND NOT attisdropped),
   (SELECT count(*) FROM pg_constraint WHERE conrelid='public.case_document_mutation_idempotency'::regclass AND conname='case_document_mutation_idempotency_purged_completed_check'),
