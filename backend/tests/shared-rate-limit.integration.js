@@ -82,6 +82,34 @@ try {
   assert.equal(ipv6Results.filter(x => x.status === 429).length, 1,
     "equivalent IPv6 representations must share a bucket");
 
+  // Cleanup is bounded to one batch of 500 even when more rows have expired.
+  await poolA.query("DELETE FROM public.rate_limit_counters");
+  await poolA.query(`
+    INSERT INTO public.rate_limit_counters
+      (bucket_name, key_digest, window_start, request_count, expires_at)
+    SELECT 'login',
+      decode(md5('cleanup-a-' || n::text) || md5('cleanup-b-' || n::text), 'hex'),
+      clock_timestamp() - interval '1 hour',
+      1,
+      clock_timestamp() - interval '1 second'
+    FROM generate_series(1, 510) AS n
+  `);
+  const cleanupLimiter = createPostgresRateLimiter(poolA, {
+    secret, bucket: "login", maxRequests: 10, cleanupIntervalMs: 60_000
+  });
+  const cleanupResponse = await invoke(cleanupLimiter, "192.0.2.88");
+  assert.equal(cleanupResponse.status, 200);
+  let expiredCount = 510;
+  for (let attempt = 0; attempt < 30 && expiredCount > 10; attempt += 1) {
+    await delay(25);
+    const remaining = await poolA.query(
+      "SELECT count(*)::integer AS n FROM public.rate_limit_counters WHERE expires_at <= clock_timestamp()"
+    );
+    expiredCount = remaining.rows[0].n;
+  }
+  assert.equal(expiredCount, 10,
+    "each cleanup invocation must delete no more than 500 expired rows");
+
   assert.throws(() => createPostgresRateLimiter(poolA, {
     secret: "too-short", bucket: "login", maxRequests: 10
   }), /at least 32 bytes/);
