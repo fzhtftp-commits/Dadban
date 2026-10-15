@@ -60,6 +60,12 @@ jobs:
         run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-tombstone-privileges.sql
         working-directory: backend
 
+      - name: Verify runtime cannot disable tombstone triggers or truncate identity rows
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-tombstone-ddl-privileges.sh
+        working-directory: backend
+
       - name: Verify tombstone migration rerun fails atomically in disposable PostgreSQL
         env:
           PGPASSWORD: postgres
@@ -126,6 +132,12 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
         run: node tests/case-documents-commit-outcome.integration.js
+        working-directory: backend
+
+      - name: Verify PostgreSQL tombstone backup/restore and post-restore migration safety
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-tombstone-backup-restore.sh
         working-directory: backend
 
       - name: Verify audit INSERT failure rolls back client, case, hearing, and action mutations
