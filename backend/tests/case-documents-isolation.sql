@@ -39,6 +39,13 @@ begin
     raise notice 'PASS: cross-office actor rejected';
   end;
   begin
+    insert into case_documents(office_id,case_id,title,created_by,updated_by)
+    values ('11111111-1111-4111-8111-111111111111','cccccccc-cccc-4ccc-8ccc-cccccccccccc','cross-office updater','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    raise exception 'FAIL: cross-office updated_by actor was accepted';
+  exception when foreign_key_violation then
+    raise notice 'PASS: cross-office updated_by actor rejected';
+  end;
+  begin
     insert into case_documents(office_id,case_id,title,size_bytes,created_by,updated_by)
     values ('11111111-1111-4111-8111-111111111111','cccccccc-cccc-4ccc-8ccc-cccccccccccc','oversized metadata',26214401,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
     raise exception 'FAIL: oversized metadata was accepted';
