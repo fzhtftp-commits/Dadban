@@ -95,13 +95,13 @@ try {
     create extension if not exists pgcrypto;
     create table offices (id uuid primary key, name text not null);
     create table users (
-      id uuid primary key, office_id uuid not null references offices(id),
+      id uuid primary key, office_id uuid not null references offices(id),id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
       full_name text not null, email text not null, role text not null default 'owner',
       is_active boolean not null default true, deleted_at timestamptz,
       unique (id, office_id)
     );
     create table clients (
-      id uuid primary key, office_id uuid not null references offices(id),
+      id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
       client_type text not null default 'individual', full_name text not null,
       national_id text, birth_date date, occupation text, company_name text,
       national_company_id text, registration_no text, mobile text, phone text,
@@ -111,7 +111,7 @@ try {
       unique (id, office_id)
     );
     create table cases (
-      id uuid primary key, office_id uuid not null references offices(id),
+      id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
       client_id uuid not null, case_number text not null, title text not null,
       case_type text, court_name text, branch_name text, opposing_party text,
       status text not null default 'active', priority text, filing_date date,
@@ -120,14 +120,14 @@ try {
       deleted_at timestamptz, unique (id, office_id)
     );
     create table hearings (
-      id uuid primary key, office_id uuid not null references offices(id),
+      id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
       case_id uuid not null, hearing_at timestamptz not null, hearing_type text,
       court_name text, branch_name text, status text not null default 'scheduled',
       reminder_minutes integer, notes text, created_by uuid, updated_by uuid, created_at timestamptz not null default now(),
       updated_at timestamptz not null default now(), deleted_at timestamptz
     );
     create table case_actions (
-      id uuid primary key, office_id uuid not null references offices(id),
+      id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
       case_id uuid not null, title text not null, description text, due_at timestamptz,
       status text not null default 'todo', priority text, assigned_to uuid,
       completed_at timestamptz, created_by uuid, updated_by uuid, created_at timestamptz not null default now(),
