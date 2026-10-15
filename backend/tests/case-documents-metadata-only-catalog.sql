@@ -14,8 +14,8 @@ BEGIN
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.case_documents'::regclass AND conname='case_documents_storage_status_check' AND contype='c' AND convalidated AND pg_get_constraintdef(oid,true) LIKE '%metadata_only%') THEN
    RAISE EXCEPTION 'metadata-only storage CHECK is missing or invalid';
  END IF;
- IF (SELECT count(*) FROM pg_constraint WHERE conrelid='public.case_documents'::regclass AND contype='f') <> 3 THEN
-   RAISE EXCEPTION 'expected exactly three office-scoped foreign keys';
+ IF (SELECT count(*) FROM pg_constraint WHERE conrelid='public.case_documents'::regclass AND contype='f') <> 4 THEN
+   RAISE EXCEPTION 'expected four foreign keys: office plus three office-scoped references';
  END IF;
  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='public.case_documents'::regclass AND tgname='case_documents_set_updated_at' AND NOT tgisinternal) THEN
    RAISE EXCEPTION 'updated_at trigger missing';
