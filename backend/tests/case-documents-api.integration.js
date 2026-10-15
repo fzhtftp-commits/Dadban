@@ -887,9 +887,9 @@ try {
     headers: { origin, cookie: `dadban_session=${tokenA}; dadban_csrf=${csrfA}`, "x-csrf-token": csrfA, "content-type": "application/json" },
     body: JSON.stringify({ title: "This update must time out" })
   });
-  assert.equal(timeoutResponse.status, 500, "database statement timeout must fail the request without hanging");
+  assert.equal(timeoutResponse.status, 503, "database statement timeout with confirmed rollback must be retryable without hanging");
   const timeoutBody = await timeoutResponse.json();
-  assert.deepEqual(timeoutBody, { error: "database_error" }, "statement timeout response must be sanitized");
+  assert.deepEqual(timeoutBody, { error: "database_retryable" }, "statement timeout response must be sanitized and marked retryable");
   assert.equal(JSON.stringify(timeoutBody).includes("statement timeout"), false, "statement timeout details must not be disclosed");
   const afterTimeout = await pool.query("select title from case_documents where id=$1", [timeoutId]);
   assert.equal(afterTimeout.rows[0].title, "Database statement timeout regression", "timed-out update must roll back");
