@@ -53,7 +53,7 @@ async function request(path, method, body, options = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
   });
-  return { status: response.status, body: response.status === 204 ? null : await response.json() };
+  return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: response.status === 204 ? null : await response.json() };
 }
 
 async function countRows(table) {
@@ -291,7 +291,7 @@ try {
   console.log("PASS: audit User-Agent is capped at 512 characters");
 
   // Login rate limiting is per process and source IP; verify the existing 10/15-minute policy.
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 7; i++) {
     const limitedWindowResponse = await request("/api/auth/login", "POST", {
       email: `unknown-rate-test-${i}@example.test`,
       password: "WrongPassword!234"
@@ -304,7 +304,7 @@ try {
   });
   assert.equal(rateLimitedResponse.status, 429, "the eleventh login attempt in the same process/IP window must be rate limited");
   assert.equal(rateLimitedResponse.body.error, "rate_limit_exceeded");
-  assert.ok(Number(rateLimitedResponse.headers?.["retry-after"] ?? 0) >= 0);
+  assert.ok(Number(rateLimitedResponse.headers["retry-after"] ?? 0) >= 1, "rate-limited response must include a positive Retry-After header");
   console.log("PASS: login rate limit rejects attempts beyond 10 per 15 minutes for one process/IP");
 
   // A failure in the independent audit write must not change the public 401 result.
