@@ -423,6 +423,28 @@ const writeAuditLog = async (client, auth, action, entityType, entityId, req, me
   );
 };
 
+// Failed credentials must be audited outside the rolled-back login transaction.
+// Deliberately omit submitted email, user/office IDs, password, and token material.
+const writeFailedLoginAudit = async (req) => {
+  try {
+    await pool.query(
+      `
+        insert into audit_logs
+          (office_id, user_id, action, entity_type, entity_id, metadata, ip_address, user_agent, created_at)
+        values (null, null, 'login_failed', 'authentication', null, $1, $2, $3, clock_timestamp())
+      `,
+      [
+        JSON.stringify({ reason: "invalid_credentials" }),
+        req.ip || null,
+        req.get("user-agent") || null
+      ]
+    );
+  } catch (error) {
+    // Preserve the generic 401 response even if the separate security-event write fails.
+    logSafeError("Failed-login audit write failed", error);
+  }
+};
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "dadban-backend" });
 });
@@ -536,6 +558,7 @@ app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, re
     if (!result.rowCount || !(await verifyPassword(password, result.rows[0].password_hash))) {
       await client.query("rollback");
       transactionStarted = false;
+      await writeFailedLoginAudit(req);
       return res.status(401).json({ error: "invalid_credentials" });
     }
 
