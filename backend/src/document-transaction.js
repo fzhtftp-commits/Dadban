@@ -2,9 +2,12 @@ const releasedClients = new WeakSet();
 const clientErrorHandlers = new WeakMap();
 const clientErrors = new WeakMap();
 
+const safeErrorCode = rollbackError =>
+  typeof rollbackError?.code === "string" ? rollbackError.code.slice(0, 40) : undefined;
+
 const safeErrorMetadata = error => ({
   name: typeof error?.name === "string" ? error.name.slice(0, 80) : "Error",
-  code: typeof error?.code === "string" ? error.code.slice(0, 40) : undefined
+  code: safeErrorCode(error)
 });
 
 const detachClientErrorHandler = client => {
