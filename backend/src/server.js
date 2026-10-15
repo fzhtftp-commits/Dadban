@@ -321,7 +321,7 @@ const requireAuth = async (req, res, next) => {
       role: result.rows[0].role
     };
 
-    await pool.query("update auth_sessions set last_seen_at = now() where id = $1", [req.auth.sessionId]);
+    await pool.query("update auth_sessions set last_seen_at = now() where id = $1 and user_id = $2 and office_id = $3 and revoked_at is null", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
     next();
   } catch (error) {
     logSafeError("Authentication failed", error);
