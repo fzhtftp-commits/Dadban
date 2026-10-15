@@ -100,8 +100,8 @@ BEGIN
   SELECT count(*) INTO check_count
   FROM pg_constraint c
   WHERE c.conrelid='public.case_documents'::regclass AND c.contype='c' AND c.convalidated;
-  IF check_count <> 7 THEN
-    RAISE EXCEPTION 'Expected seven validated CHECK constraints, found %', check_count;
+  IF check_count <> 8 THEN
+    RAISE EXCEPTION 'Expected eight validated CHECK constraints, found %', check_count;
   END IF;
   FOR required_check IN SELECT unnest(ARRAY[
     'title','document_type','description','size_bytes','reference_number',
