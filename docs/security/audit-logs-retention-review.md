@@ -126,3 +126,12 @@ Use only disposable PostgreSQL in CI. Extend existing migration/API integration 
 ### Go/no-go
 
 Do not enable the shared limiter until migration execution is documented for production, a stable secret is configured on all instances, DB role privileges are verified, cross-instance concurrency tests pass, and failure behavior is approved. Until then, the current runtime remains a single-process safeguard and must not be described as distributed rate limiting.
+
+
+### Shared PostgreSQL rate limiter implementation status (2026-10-15)
+
+The opt-in implementation is now present on the PR branch, but is **not enabled by default** and has not been applied to any operational database or deployment. New files are `backend/migrations/005_shared_rate_limits.sql`, `backend/src/shared-rate-limiter.js`, and `backend/tests/shared-rate-limit.integration.js`. `backend/src/server.js` selects the PostgreSQL implementation only when `RATE_LIMIT_MODE=postgres`; otherwise the prior in-process limiter remains. Selecting PostgreSQL mode requires `DATABASE_URL` and a stable `RATE_LIMIT_HMAC_KEY` of at least 32 bytes at startup, with no silent memory fallback.
+
+The implementation uses PostgreSQL `host(inet)` to canonicalize the observed source address, HMAC-SHA-256 with a bucket-specific domain-separated message, database-aligned 900-second windows, an atomic UPSERT, a bounded cleanup batch of at most 500 expired rows, and generic 503 behavior for counter-decision failures. CI adds a separate disposable PostgreSQL integration run that races two independently pooled limiter instances, checks exact allowed/rejected totals and IPv6 normalization, and exercises missing-key and database-error handling. The migration-upgrade catalog harness now also checks the counter table's columns, primary key, digest constraint, expiry index, and absence of PUBLIC SELECT.
+
+Manual production migration and runtime-role grants are documented in `backend/README.md`. No Render settings, operational secrets, or production database were changed. Shared production behavior remains **not activated** until CI is green on the final SHA, the real runtime role is verified, and the stable secret and least-privilege grants are configured through the approved operational process.
