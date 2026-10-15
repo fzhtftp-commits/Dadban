@@ -302,6 +302,7 @@ try {
 
   const ownDetail = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA });
   assert.equal(ownDetail.status, 200, "office A must be able to view its own document");
+  assert.equal(ownDetail.body.data.confidentiality, "restricted", "detail endpoint must return persisted confidentiality");
 
   const otherList = await request("/api/case-documents", { token: tokenB, csrf: csrfB });
   assert.equal(otherList.status, 200);
@@ -417,6 +418,8 @@ try {
   const confidentialityUpdate = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "normal" } });
   assert.equal(confidentialityUpdate.status, 200);
   assert.equal(confidentialityUpdate.body.data.confidentiality, "normal");
+  const updatedDetail = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA });
+  assert.equal(updatedDetail.body.data.confidentiality, "normal", "detail endpoint must reflect confidentiality updates");
   const invalidConfidentiality = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "public" } });
   assert.equal(invalidConfidentiality.status, 400);
   const updateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
