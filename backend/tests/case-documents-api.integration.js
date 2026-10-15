@@ -610,6 +610,37 @@ try {
   assert.deepEqual(deniedReplay.body,{error:"document_not_found"});
   assert.equal((await pool.query("select confidentiality from case_documents where id=$1",[replayDocId])).rows[0].confidentiality,"restricted",
     "denied idempotency replay must not change classification");
+
+  // Hold the document row lock while a concurrent replay starts. The replay must wait
+  // for the committed classification and must not read the stale confidential level.
+  const restoreReplayDoc=await request(`/api/case-documents/${replayDocId}`,{token:tokenA,csrf:csrfA,method:"PATCH",portToUse:rolePort,body:{confidentiality:"confidential"}});
+  assert.equal(restoreReplayDoc.status,200,"owner can restore confidential level for race fixture");
+  const classificationLock=await pool.connect();
+  let concurrentReplay;
+  try {
+    await classificationLock.query("begin");
+    await classificationLock.query("update case_documents set confidentiality='restricted' where id=$1",[replayDocId]);
+    concurrentReplay=request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,idempotencyKey:replayKey,body:{case_id:ids.caseA,title:"Replay becomes restricted",confidentiality:"confidential"}});
+    const earlyResult=await Promise.race([concurrentReplay.then(result=>({finished:true,result})),delay(150).then(()=>({finished:false}))]);
+    assert.equal(earlyResult.finished,false,"idempotency replay must block on the in-flight classification update");
+    await classificationLock.query(
+      "insert into audit_logs(office_id,user_id,action,entity_type,entity_id,metadata) values($1,$2,'update','case_document',$3,$4)",
+      [ids.officeA,ids.userA,replayDocId,JSON.stringify({confidentiality_change:{from:"confidential",to:"restricted"},test_fixture:true})]
+    );
+    await classificationLock.query("commit");
+    const racedReplay=await concurrentReplay;
+    assert.equal(racedReplay.status,404,"replay must be denied after concurrent restricted classification commits");
+    assert.deepEqual(racedReplay.body,{error:"document_not_found"});
+    const raceState=await pool.query("select confidentiality from case_documents where id=$1",[replayDocId]);
+    assert.equal(raceState.rows[0].confidentiality,"restricted","concurrent replay must not alter classification");
+    const raceAudit=await pool.query("select metadata from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' and metadata->>'test_fixture'='true'",[replayDocId]);
+    assert.equal(raceAudit.rowCount,1,"classification state and its audit event must commit atomically in the race fixture");
+    assert.deepEqual(raceAudit.rows[0].metadata.confidentiality_change,{from:"confidential",to:"restricted"});
+  } finally {
+    if(concurrentReplay) await concurrentReplay.catch(()=>{});
+    await classificationLock.query("rollback").catch(()=>{});
+    classificationLock.release();
+  }
   const assistantConfidentialCreate=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:"Assistant confidential create allowed",confidentiality:"confidential"}});
   assert.equal(assistantConfidentialCreate.status,201,"assistant may create confidential documents");
   const lawyer=roleAccounts.find(a=>a.role==="lawyer");
