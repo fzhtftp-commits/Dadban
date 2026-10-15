@@ -266,9 +266,14 @@ const verifyPassword = async (password, stored) => {
   return expected.length === derived.length && crypto.timingSafeEqual(expected, derived);
 };
 
-const dbError = (error) => {
+const dbError = (error, rollbackSucceeded = false) => {
   if (error?.code === "23505") return { status: 409, body: { error: "duplicate_record" } };
   if (error?.code === "23503") return { status: 409, body: { error: "invalid_related_record" } };
+  // Only tell clients a write is safe to retry when PostgreSQL confirmed rollback.
+  // A lost connection during COMMIT can leave the transaction outcome unknown.
+  if (rollbackSucceeded && ["40001", "40P01", "55P03", "57014"].includes(error?.code)) {
+    return { status: 503, body: { error: "database_retryable" } };
+  }
   return { status: 500, body: { error: "database_error" } };
 };
 
@@ -1760,7 +1765,7 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
        await rollbackQuietly(c,"idempotency key conflict");return res.status(409).json({error:"idempotency_key_reused"});
      }
      const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
-   }catch(error){await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+   }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
  });
 app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
@@ -1780,14 +1785,14 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
     const auditMetadata={fields:Object.keys(p.data)};
     if(Object.hasOwn(p.data,"confidentiality")&&current.rows[0].confidentiality!==q.rows[0].confidentiality) auditMetadata.confidentiality_change={from:current.rows[0].confidentiality,to:q.rows[0].confidentiality};
     await writeAuditLog(c,req.auth,"update","case_document",id.data,req,auditMetadata);await c.query("commit");return res.json({data:q.rows[0]});
-  }catch(error){await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+  }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});let c;
   try{c=await acquireClient(pool);await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin"]);if (!actor.ok) { await rollbackQuietly(c, "delete actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);await c.query("commit");return res.status(204).send();
-  }catch(error){await rollbackQuietly(c,"delete case document");logSafeError("Delete case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+  }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"delete case document");logSafeError("Delete case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 
 
