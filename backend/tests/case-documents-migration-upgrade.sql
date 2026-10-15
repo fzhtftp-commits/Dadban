@@ -51,7 +51,7 @@ $catalog$;
 DO $probe$
 DECLARE expr text; ok boolean;
 BEGIN
-  SELECT pg_get_constraintdef(c.oid,true) INTO expr FROM pg_constraint c
+  SELECT pg_get_expr(c.conbin,c.conrelid) INTO expr FROM pg_constraint c
   WHERE c.conrelid='public.case_documents'::regclass AND c.contype='c'
     AND pg_get_constraintdef(c.oid,true) LIKE '%storage_status%';
   EXECUTE 'SELECT (' || regexp_replace(expr, '\mstorage_status\M', quote_literal('metadata_only'), 'g') || ')' INTO ok;
