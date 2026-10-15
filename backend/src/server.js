@@ -1667,8 +1667,8 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
   if(Object.hasOwn(p.data,"confidentiality")&&!canChangeDocumentConfidentiality(req.auth.role)) return res.status(403).json({error:"document_confidentiality_forbidden"});
   const fields=["title","document_type","confidentiality","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
-  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=${v.length}`);}
-  v.push(req.auth.userId);sets.push(`updated_by=${v.length}`);v.push(id.data,req.auth.officeId);let c;
+  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
+  v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);let c;
   try{
     c=await acquireClient(pool);await c.query("begin");
     const current=await c.query("select confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
