@@ -474,6 +474,24 @@ try {
   assert.equal(repeatedDelete.status, 404, "repeated soft delete must return not found");
   const repeatDeleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
   assert.equal(repeatDeleteAudit.rows[0].count, 1, "repeated delete must not create duplicate audit events");
+
+  const documentAuditRows = await pool.query(
+    "select office_id, user_id, entity_type, entity_id, action from audit_logs where entity_type='case_document' and entity_id=$1",
+    [documentId]
+  );
+  assert.equal(documentAuditRows.rows.length, 4, "the document must have exactly one create, two updates, and one delete audit event");
+  assert.deepEqual(
+    documentAuditRows.rows.map(row => row.action).sort(),
+    ["create", "delete", "update", "update"],
+    "audit actions must match the successful document lifecycle exactly"
+  );
+  for (const row of documentAuditRows.rows) {
+    assert.equal(row.office_id, ids.officeA, "every document audit event must be attributed to the owning office");
+    assert.equal(row.user_id, ids.userA, "every document audit event must identify the authenticated actor");
+    assert.equal(row.entity_type, "case_document", "every lifecycle audit event must identify the document entity type");
+    assert.equal(row.entity_id, documentId, "every lifecycle audit event must point to the exact document");
+  }
+
   
   const raceCreated = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST",
