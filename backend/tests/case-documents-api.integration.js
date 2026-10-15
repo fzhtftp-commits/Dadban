@@ -95,7 +95,7 @@ try {
     create extension if not exists pgcrypto;
     create table offices (id uuid primary key, name text not null);
     create table users (
-      id uuid primary key, office_id uuid not null references offices(id),id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
+      id uuid primary key, office_id uuid not null references offices(id),
       full_name text not null, email text not null, role text not null default 'owner',
       is_active boolean not null default true, deleted_at timestamptz,
       unique (id, office_id)
