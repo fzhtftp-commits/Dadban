@@ -680,9 +680,8 @@ try {
     assert.equal(row.entity_id, documentId);
   }
   assert.deepEqual(lifecycleAuditRows.rows[0].metadata, {
-    case_id: ids.caseA,
     storage_status: "metadata_only"
-  }, "create audit must retain only the intended non-content metadata");
+  }, "create audit must omit relationship UUIDs and retain only intended non-content metadata");
   assert.deepEqual(lifecycleAuditRows.rows[1].metadata, { fields: ["title"] },
     "ordinary update audit must record changed field names, not submitted field values");
   assert.deepEqual(lifecycleAuditRows.rows[2].metadata, {
