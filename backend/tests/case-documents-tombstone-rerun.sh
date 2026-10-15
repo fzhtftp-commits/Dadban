@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# CI only: the workflow points PGHOST at localhost and uses disposable dadban_test.
+# CI only: this test must never target a non-local or non-disposable database.
 if [[ "${PGHOST:-localhost}" != "localhost" && "${PGHOST:-localhost}" != "127.0.0.1" ]]; then
   echo "Refusing migration rerun test against non-local PostgreSQL" >&2
   exit 2
@@ -23,17 +23,10 @@ SELECT
   (SELECT count(*) FROM pg_trigger WHERE tgrelid='public.case_document_mutation_idempotency'::regclass AND tgname IN ('case_document_mutation_idempotency_no_delete','case_document_mutation_idempotency_identity_immutable') AND NOT tgisinternal),
   (SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='case_document_mutation_idempotency' AND indexname='case_document_mutation_idempotency_purged_at_idx');
 ")"
-if [[ "$state" != 
+if [[ "$state" != "1|1|2|1" ]]; then
   echo "FAIL: migration rerun left unexpected catalog state: $state" >&2
   cat /tmp/dadban-tombstone-rerun.log >&2
   exit 1
 fi
 
-echo "PASS: migration 007 second application fails atomically; existing tombstone column, constraint, trigger, and index remain intact"
-1|1|2|1' ]]; then
-  echo "FAIL: migration rerun left unexpected catalog state: $state" >&2
-  cat /tmp/dadban-tombstone-rerun.log >&2
-  exit 1
-fi
-
-echo "PASS: migration 007 second application fails atomically; existing tombstone column, constraint, trigger, and index remain intact"
+echo "PASS: migration 007 second application fails atomically; existing tombstone column, constraint, triggers, and index remain intact"
