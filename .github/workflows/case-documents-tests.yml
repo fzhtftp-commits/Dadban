@@ -1,0 +1,120 @@
+name: Case document metadata checks
+on:
+  push:
+    branches:
+      - feature/unified-case-documents-metadata-only-2026-10
+  pull_request:
+    branches:
+      - feature/case-actions
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dadban_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dadban_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+        working-directory: backend
+      - run: npm test
+        working-directory: backend
+      - run: node --check src/server.js && node --check ../documents.js
+        working-directory: backend
+      - name: Verify metadata migration and office isolation in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: |
+          createdb -h localhost -U postgres dadban_isolation_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_isolation_test' EXIT
+          psql -h localhost -U postgres -d dadban_isolation_test -v ON_ERROR_STOP=1 -f tests/case-documents-isolation.sql
+        working-directory: backend
+
+      - name: Verify full baseline migration upgrade and catalog assertions in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-migration-upgrade.sql
+        working-directory: backend
+
+      - name: Verify shared rate-limit concurrency and failure behavior in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_rate_limit_test
+        run: |
+          createdb -h localhost -U postgres dadban_rate_limit_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_rate_limit_test' EXIT
+          psql -h localhost -U postgres -d dadban_rate_limit_test -v ON_ERROR_STOP=1 -f migrations/005_shared_rate_limits.sql
+          psql -h localhost -U postgres -d dadban_rate_limit_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE dadban_rate_limiter_ci LOGIN PASSWORD 'ci-only-rate-limit-role-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+          GRANT CONNECT ON DATABASE dadban_rate_limit_test TO dadban_rate_limiter_ci;
+          GRANT USAGE ON SCHEMA public TO dadban_rate_limiter_ci;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.rate_limit_counters TO dadban_rate_limiter_ci;
+          SQL
+          DATABASE_URL=postgres://dadban_rate_limiter_ci:ci-only-rate-limit-role-password@localhost:5432/dadban_rate_limit_test node tests/shared-rate-limit.integration.js
+        working-directory: backend
+
+      - name: Verify forced migration failure rolls back all DDL in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-forced-rollback.sh
+        working-directory: backend
+
+      - name: Verify incompatible same-named table fails migration in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-negative-migration.sh
+        working-directory: backend
+
+      - name: Verify metadata-only catalog contract in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-metadata-only-catalog.sql
+        working-directory: backend
+
+      - name: Verify incompatible same-named index fails migration statement in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-negative-index-migration.sh
+        working-directory: backend
+
+      - name: Verify audit log SQL privileges and RLS in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: |
+          createdb -h localhost -U postgres dadban_audit_security_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_audit_security_test' EXIT
+          bash tests/audit-logs-security.sh
+        working-directory: backend
+
+      - name: Verify two-office API isolation over HTTP
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
+        run: node tests/case-documents-api.integration.js
+        working-directory: backend
+
+      - name: Verify audit INSERT failure rolls back client, case, hearing, and action mutations
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_audit_mutations_test
+        run: |
+          createdb -h localhost -U postgres dadban_audit_mutations_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_audit_mutations_test' EXIT
+          node tests/audit-mutation-rollback.integration.js
+        working-directory: backend
+

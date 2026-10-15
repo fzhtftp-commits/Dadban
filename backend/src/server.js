@@ -6,6 +6,8 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { acquireClient, rollbackQuietly, releaseClient } from "./document-transaction.js";
+import { createPostgresRateLimiter } from "./shared-rate-limiter.js";
 
 const { Pool } = pg;
 const scrypt = promisify(crypto.scrypt);
@@ -19,10 +21,19 @@ const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5500";
 const caPath = new URL("../certs/prod-ca-2021.crt", import.meta.url);
 const supabaseCa = fs.readFileSync(caPath, "utf8");
 
+const logSafeError = (context, error) => {
+  const safe = {};
+  if (typeof error?.name === "string") safe.name = error.name.slice(0, 80);
+  if (typeof error?.code === "string") safe.code = error.code.slice(0, 40);
+  console.error(context, safe);
+};
+
 const pool = databaseUrl
   ? new Pool({
       connectionString: databaseUrl,
-      max: 5,
+      max: 10,
+      connectionTimeoutMillis: 10000,
+      statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 15000),
       ssl: databaseUrl.includes("localhost")
         ? false
         : { ca: supabaseCa, rejectUnauthorized: true }
@@ -30,7 +41,9 @@ const pool = databaseUrl
   : null;
 
 app.disable("x-powered-by");
-app.set("trust proxy", 1);
+// Never trust client-supplied forwarding headers by default. Configure TRUST_PROXY_HOPS
+// only when the deployment edge overwrites forwarding headers and direct origin access is blocked.
+app.set("trust proxy", false);
 app.use(helmet());
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: "100kb" }));
@@ -253,9 +266,14 @@ const verifyPassword = async (password, stored) => {
   return expected.length === derived.length && crypto.timingSafeEqual(expected, derived);
 };
 
-const dbError = (error) => {
+const dbError = (error, rollbackSucceeded = false) => {
   if (error?.code === "23505") return { status: 409, body: { error: "duplicate_record" } };
   if (error?.code === "23503") return { status: 409, body: { error: "invalid_related_record" } };
+  // Only tell clients a write is safe to retry when PostgreSQL confirmed rollback.
+  // A lost connection during COMMIT can leave the transaction outcome unknown.
+  if (rollbackSucceeded && ["40001", "40P01", "55P03", "57014"].includes(error?.code)) {
+    return { status: 503, body: { error: "database_retryable" } };
+  }
   return { status: 500, body: { error: "database_error" } };
 };
 
@@ -309,12 +327,67 @@ const requireAuth = async (req, res, next) => {
       role: result.rows[0].role
     };
 
-    await pool.query("update auth_sessions set last_seen_at = now() where id = $1", [req.auth.sessionId]);
+    // Activity heartbeat is operational telemetry, not a business mutation; scope it to this live session and office without emitting one audit row per request.
+    const activity = await pool.query("update auth_sessions set last_seen_at = now() where id = $1 and user_id = $2 and office_id = $3 and revoked_at is null returning id", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
+    if (!activity.rowCount) return res.status(401).json({ error: "authentication_required" });
     next();
   } catch (error) {
-    console.error("Authentication failed:", error);
+    logSafeError("Authentication failed", error);
     return res.status(401).json({ error: "authentication_required" });
   }
+};
+
+const requireDocumentRole = (...allowedRoles) => (req, res, next) => {
+  if (!req.auth || !allowedRoles.includes(req.auth.role)) {
+    return res.status(403).json({ error: "document_role_forbidden" });
+  }
+  next();
+};
+
+const lockLiveDocumentActor = async (client, req, allowedRoles) => {
+  // Lock identity rows first, then check expiry with the wall clock after any lock wait.
+  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 for update of s, u", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
+  if (!result.rowCount) return { ok: false, status: 401, error: "authentication_required" };
+  const live = await client.query("select (s.revoked_at is null and s.expires_at > clock_timestamp() and u.is_active = true and u.deleted_at is null) as valid from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
+  if (!live.rowCount || !live.rows[0].valid) return { ok: false, status: 401, error: "authentication_required" };
+  if (!allowedRoles.includes(result.rows[0].role)) return { ok: false, status: 403, error: "document_role_forbidden" };
+  return { ok: true, role: result.rows[0].role };
+};
+
+
+const parseDocumentMutationIdempotencyKey = (req) => {
+  const key = req.get("idempotency-key");
+  if (key === undefined) return { ok: true, key: null };
+  return /^[A-Za-z0-9._:-]{8,128}$/.test(key) ? { ok: true, key } : { ok: false, key: null };
+};
+const documentMutationFingerprint = (operation, entityId, payload = null) => {
+  const canonicalPayload = payload === null ? null : Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b)));
+  return hashToken(JSON.stringify({ operation, entityId: String(entityId).toLowerCase(), payload: canonicalPayload }));
+};
+const beginDocumentMutationIdempotency = async (client, req, key, operation, entityId, fingerprint) => {
+  if (!key) return { kind: "new" };
+  const inserted = await client.query(
+    "insert into case_document_mutation_idempotency(office_id,user_id,idempotency_key,operation,entity_id,request_fingerprint,response_status) values($1,$2,$3,$4,$5,$6,null) on conflict (office_id,user_id,idempotency_key) do nothing returning idempotency_key",
+    [req.auth.officeId, req.auth.userId, key, operation, entityId, fingerprint]
+  );
+  if (inserted.rowCount) return { kind: "new" };
+  const existing = await client.query(
+    "select operation,entity_id,request_fingerprint,response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
+    [req.auth.officeId, req.auth.userId, key]
+  );
+  if (!existing.rowCount) throw new Error("Document mutation idempotency record disappeared");
+  const row = existing.rows[0];
+  if (row.operation !== operation || String(row.entity_id) !== String(entityId).toLowerCase() || row.request_fingerprint !== fingerprint) return { kind: "conflict" };
+  if (row.response_status === null) return { kind: "incomplete" };
+  return { kind: "replay", status: row.response_status };
+};
+const completeDocumentMutationIdempotency = async (client, req, key, status) => {
+  if (!key) return;
+  const result = await client.query(
+    "update case_document_mutation_idempotency set response_status=$4 where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is null returning idempotency_key",
+    [req.auth.officeId, req.auth.userId, key, status]
+  );
+  if (!result.rowCount) throw new Error("Document mutation idempotency completion failed");
 };
 
 const requireCsrf = (req, res, next) => {
@@ -328,6 +401,60 @@ const requireCsrf = (req, res, next) => {
   }
   next();
 };
+
+const createRateLimiter = ({ windowMs, maxRequests }) => {
+  const clients = new Map();
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = req.ip || req.socket.remoteAddress || "unknown";
+    for (const [clientKey, entry] of clients) {
+      if (entry.resetAt <= now) clients.delete(clientKey);
+    }
+    if (!clients.has(key) && clients.size >= 10000) {
+      const oldestKey = clients.keys().next().value;
+      if (oldestKey !== undefined) clients.delete(oldestKey);
+    }
+    let entry = clients.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowMs };
+      clients.set(key, entry);
+    }
+    entry.count += 1;
+    res.setHeader("RateLimit-Limit", String(maxRequests));
+    res.setHeader("RateLimit-Remaining", String(Math.max(0, maxRequests - entry.count)));
+    if (entry.count > maxRequests) {
+      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((entry.resetAt - now) / 1000))));
+      return res.status(429).json({ error: "rate_limit_exceeded" });
+    }
+    next();
+  };
+};
+
+const rateLimitMode = process.env.RATE_LIMIT_MODE || "memory";
+if (!["memory", "postgres"].includes(rateLimitMode)) {
+  throw new Error("RATE_LIMIT_MODE must be either memory or postgres");
+}
+if (rateLimitMode === "postgres" && !pool) {
+  throw new Error("RATE_LIMIT_MODE=postgres requires DATABASE_URL");
+}
+if (rateLimitMode === "postgres" &&
+    (typeof process.env.RATE_LIMIT_HMAC_KEY !== "string" ||
+     Buffer.byteLength(process.env.RATE_LIMIT_HMAC_KEY, "utf8") < 32)) {
+  throw new Error("RATE_LIMIT_MODE=postgres requires RATE_LIMIT_HMAC_KEY of at least 32 bytes");
+}
+
+const createConfiguredRateLimiter = ({ bucket, maxRequests }) =>
+  rateLimitMode === "postgres"
+    ? createPostgresRateLimiter(pool, {
+        secret: process.env.RATE_LIMIT_HMAC_KEY,
+        bucket,
+        maxRequests
+      })
+    : createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests });
+
+const registerRateLimit = createConfiguredRateLimiter({ bucket: "register", maxRequests: 5 });
+const loginRateLimit = createConfiguredRateLimiter({ bucket: "login", maxRequests: 10 });
+const createDocumentRateLimit = createConfiguredRateLimiter({ bucket: "document_create", maxRequests: 20 });
 
 const syncCaseNextHearing = async (client, officeId, caseId) => {
   await client.query(
@@ -354,8 +481,8 @@ const writeAuditLog = async (client, auth, action, entityType, entityId, req, me
   await client.query(
     `
       insert into audit_logs
-        (office_id, user_id, action, entity_type, entity_id, metadata, ip_address, user_agent)
-      values ($1,$2,$3,$4,$5,$6,$7,$8)
+        (office_id, user_id, action, entity_type, entity_id, metadata, ip_address, user_agent, created_at)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp())
     `,
     [
       auth.officeId,
@@ -365,9 +492,31 @@ const writeAuditLog = async (client, auth, action, entityType, entityId, req, me
       entityId,
       metadata ? JSON.stringify(metadata) : null,
       req.ip || null,
-      req.get("user-agent") || null
+      typeof req.get("user-agent") === "string" ? req.get("user-agent").slice(0, 512) : null
     ]
   );
+};
+
+// Failed credentials must be audited outside the rolled-back login transaction.
+// Deliberately omit submitted email, user/office IDs, password, and token material.
+const writeFailedLoginAudit = async (req) => {
+  try {
+    await pool.query(
+      `
+        insert into audit_logs
+          (office_id, user_id, action, entity_type, entity_id, metadata, ip_address, user_agent, created_at)
+        values (null, null, 'login_failed', 'authentication', null, $1, $2, $3, clock_timestamp())
+      `,
+      [
+        JSON.stringify({ reason: "invalid_credentials" }),
+        req.ip || null,
+        typeof req.get("user-agent") === "string" ? req.get("user-agent").slice(0, 512) : null
+      ]
+    );
+  } catch (error) {
+    // Preserve the generic 401 response even if the separate security-event write fails.
+    logSafeError("Failed-login audit write failed", error);
+  }
 };
 
 app.get("/health", (_req, res) => {
@@ -380,12 +529,12 @@ app.get("/health/db", async (_req, res) => {
     await pool.query("select 1");
     return res.json({ ok: true, database: "connected" });
   } catch (error) {
-    console.error("Database health check failed:", error);
+    logSafeError("Database health check failed", error);
     return res.status(503).json({ ok: false, database: "unavailable" });
   }
 });
 
-app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
+app.post("/api/auth/register", requireTrustedOrigin, registerRateLimit, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "invalid_registration" });
@@ -427,6 +576,15 @@ app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
       [user.rows[0].id, user.rows[0].office_id, hashToken(sessionToken), hashToken(csrfToken)]
     );
 
+    await writeAuditLog(
+      client,
+      { officeId: user.rows[0].office_id, userId: user.rows[0].id },
+      "register",
+      "user",
+      user.rows[0].id,
+      req,
+      { role: user.rows[0].role }
+    );
     await client.query("commit");
     setAuthCookies(res, sessionToken, csrfToken);
 
@@ -438,7 +596,7 @@ app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
     });
   } catch (error) {
     await client.query("rollback");
-    console.error("Registration failed:", error);
+    logSafeError("Registration failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -446,14 +604,19 @@ app.post("/api/auth/register", requireTrustedOrigin, async (req, res) => {
   }
 });
 
-app.post("/api/auth/login", requireTrustedOrigin, async (req, res) => {
+app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_login" });
 
   const { email, password } = parsed.data;
+  const client = await pool.connect();
+  let transactionStarted = false;
 
   try {
-    const result = await pool.query(
+    await client.query("begin");
+    transactionStarted = true;
+
+    const result = await client.query(
       `
         select u.id, u.office_id, u.full_name, u.email, u.role, c.password_hash
         from users u
@@ -467,43 +630,57 @@ app.post("/api/auth/login", requireTrustedOrigin, async (req, res) => {
     );
 
     if (!result.rowCount || !(await verifyPassword(password, result.rows[0].password_hash))) {
+      await client.query("rollback");
+      transactionStarted = false;
+      await writeFailedLoginAudit(req);
       return res.status(401).json({ error: "invalid_credentials" });
     }
 
+    const account = result.rows[0];
     const sessionToken = crypto.randomBytes(32).toString("base64url");
     const csrfToken = crypto.randomBytes(32).toString("base64url");
 
-    await pool.query(
+    await client.query(
       `
         insert into auth_sessions
           (user_id, office_id, token_hash, csrf_hash, expires_at)
         values ($1,$2,$3,$4,now()+interval '8 hours')
       `,
-      [
-        result.rows[0].id,
-        result.rows[0].office_id,
-        hashToken(sessionToken),
-        hashToken(csrfToken)
-      ]
+      [account.id, account.office_id, hashToken(sessionToken), hashToken(csrfToken)]
     );
+    await writeAuditLog(
+      client,
+      { officeId: account.office_id, userId: account.id },
+      "login",
+      "user",
+      account.id,
+      req,
+      { role: account.role }
+    );
+    await client.query("commit");
+    transactionStarted = false;
 
     setAuthCookies(res, sessionToken, csrfToken);
-
     return res.json({
       data: {
         user: {
-          id: result.rows[0].id,
-          office_id: result.rows[0].office_id,
-          full_name: result.rows[0].full_name,
-          email: result.rows[0].email,
-          role: result.rows[0].role
+          id: account.id,
+          office_id: account.office_id,
+          full_name: account.full_name,
+          email: account.email,
+          role: account.role
         },
         csrf_token: csrfToken
       }
     });
   } catch (error) {
-    console.error("Login failed:", error);
+    if (transactionStarted) {
+      try { await client.query("rollback"); } catch {}
+    }
+    logSafeError("Login failed", error);
     return res.status(500).json({ error: "authentication_error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -522,12 +699,27 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
-  await pool.query(
-    "update auth_sessions set revoked_at = now() where id = $1 and revoked_at is null",
-    [req.auth.sessionId]
-  );
-  setClearAuthCookies(res);
-  return res.json({ ok: true });
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const revoked = await client.query(
+      "update auth_sessions set revoked_at = now() where id = $1 and user_id = $2 and office_id = $3 and revoked_at is null returning id",
+      [req.auth.sessionId, req.auth.userId, req.auth.officeId]
+    );
+    if (revoked.rowCount) {
+      await writeAuditLog(client, req.auth, "logout", "auth_session", revoked.rows[0].id, req);
+    }
+    await client.query("commit");
+    setClearAuthCookies(res);
+    return res.json({ ok: true });
+  } catch (error) {
+    try { await client.query("rollback"); } catch {}
+    logSafeError("Logout failed", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
 });
 
 
@@ -600,7 +792,7 @@ app.get("/api/dashboard", requireAuth, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Dashboard data failed:", error);
+    logSafeError("Dashboard data failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -661,7 +853,7 @@ app.get("/api/clients", requireAuth, async (req, res) => {
       pagination: { page, limit, returned: result.rows.length }
     });
   } catch (error) {
-    console.error("List clients failed:", error);
+    logSafeError("List clients failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -701,7 +893,7 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
     return res.status(201).json({ data: created });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create client failed:", error);
+    logSafeError("Create client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -730,7 +922,7 @@ app.get("/api/clients/lookup", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "client_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Lookup client failed:", error);
+    logSafeError("Lookup client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -755,7 +947,7 @@ app.get("/api/clients/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "client_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get client failed:", error);
+    logSafeError("Get client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -814,7 +1006,7 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
     return res.json({ data: updated });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update client failed:", error);
+    logSafeError("Update client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -850,7 +1042,7 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete client failed:", error);
+    logSafeError("Delete client failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -921,7 +1113,7 @@ app.get("/api/cases", requireAuth, async (req, res) => {
     );
     return res.json({ data: result.rows, pagination: { page, limit, returned: result.rows.length } });
   } catch (error) {
-    console.error("List cases failed:", error);
+    logSafeError("List cases failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -966,15 +1158,12 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
     );
 
     const created = result.rows[0];
-    await writeAuditLog(client, req.auth, "create", "case", created.id, req, {
-      client_id: created.client_id,
-      case_number: created.case_number
-    });
+    await writeAuditLog(client, req.auth, "create", "case", created.id, req);
     await client.query("commit");
     return res.status(201).json({ data: created });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create case failed:", error);
+    logSafeError("Create case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1007,7 +1196,7 @@ app.get("/api/cases/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "case_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get case failed:", error);
+    logSafeError("Get case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1070,7 +1259,7 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
     return res.json({ data: updated });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update case failed:", error);
+    logSafeError("Update case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1103,7 +1292,7 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete case failed:", error);
+    logSafeError("Delete case failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1149,7 +1338,7 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
     `, values);
     return res.json({ data: result.rows, pagination: { limit, offset, returned: result.rows.length } });
   } catch (error) {
-    console.error("List hearings failed:", error);
+    logSafeError("List hearings failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1172,7 +1361,7 @@ app.get("/api/hearings/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "hearing_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get hearing failed:", error);
+    logSafeError("Get hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1204,12 +1393,12 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
       data.reminder_minutes, data.notes ?? null, req.auth.userId]);
     const hearing = result.rows[0];
     await syncCaseNextHearing(client, req.auth.officeId, hearing.case_id);
-    await writeAuditLog(client, req.auth, "create", "hearing", hearing.id, req, { case_id: hearing.case_id });
+    await writeAuditLog(client, req.auth, "create", "hearing", hearing.id, req);
     await client.query("commit");
     return res.status(201).json({ data: hearing });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create hearing failed:", error);
+    logSafeError("Create hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1270,7 +1459,7 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     return res.json({ data: result.rows[0] });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update hearing failed:", error);
+    logSafeError("Update hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1293,12 +1482,12 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
       return res.status(404).json({ error: "hearing_not_found" });
     }
     await syncCaseNextHearing(client, req.auth.officeId, result.rows[0].case_id);
-    await writeAuditLog(client, req.auth, "delete", "hearing", id.data, req, { case_id: result.rows[0].case_id });
+    await writeAuditLog(client, req.auth, "delete", "hearing", id.data, req);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete hearing failed:", error);
+    logSafeError("Delete hearing failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1317,7 +1506,7 @@ app.get("/api/actions/assignees", requireAuth, async (req, res) => {
     );
     return res.json({ data: result.rows });
   } catch (error) {
-    console.error("List case action assignees failed:", error);
+    logSafeError("List case action assignees failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1359,7 +1548,7 @@ app.get("/api/actions", requireAuth, async (req, res) => {
     `, values);
     return res.json({ data: result.rows });
   } catch (error) {
-    console.error("List case actions failed:", error);
+    logSafeError("List case actions failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1379,7 +1568,7 @@ app.get("/api/actions/:id", requireAuth, async (req, res) => {
     if (!result.rowCount) return res.status(404).json({ error: "action_not_found" });
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error("Get case action failed:", error);
+    logSafeError("Get case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   }
@@ -1421,13 +1610,13 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
       data.status === "completed" ? new Date() : null]);
     const action = result.rows[0];
     await writeAuditLog(client, req.auth, "create", "case_action", action.id, req, {
-      case_id: action.case_id, status: action.status
+      status: action.status
     });
     await client.query("commit");
     return res.status(201).json({ data: action });
   } catch (error) {
     await client.query("rollback");
-    console.error("Create case action failed:", error);
+    logSafeError("Create case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1498,7 +1687,7 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
     return res.json({ data: result.rows[0] });
   } catch (error) {
     await client.query("rollback");
-    console.error("Update case action failed:", error);
+    logSafeError("Update case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1525,7 +1714,7 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     return res.status(204).send();
   } catch (error) {
     await client.query("rollback");
-    console.error("Delete case action failed:", error);
+    logSafeError("Delete case action failed", error);
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
@@ -1533,6 +1722,161 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
   }
 });
 
+
+const documentTypeSchema = z.enum(["petition","pleading","contract","evidence","court_order","correspondence","identity","receipt","other"]);
+const documentConfidentialitySchema = z.enum(["normal","confidential","restricted"]);
+const canReadCaseDocument = (role, level) => ["owner","admin","lawyer"].includes(role) || (role==="assistant" && ["normal","confidential"].includes(level)) || (role==="viewer" && level==="normal");
+const canCreateCaseDocument = (role, level) => ["owner","admin","lawyer"].includes(role) || (role==="assistant" && ["normal","confidential"].includes(level));
+const canEditCaseDocument = (role, level) => ["owner","admin","lawyer"].includes(role) || (role==="assistant" && ["normal","confidential"].includes(level));
+const canChangeDocumentConfidentiality = role => ["owner","admin"].includes(role);
+const documentAccessDenied = res => res.status(404).json({error:"document_not_found"});
+const documentDateSchema = z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/)
+  .refine((value) => { const date = new Date(value + "T00:00:00.000Z"); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; });
+const originalFilenameSchema = z.string().trim().min(1).max(255)
+  .refine((value) => value !== "." && value !== ".." && !/[\/\\\u0000-\u001f\u007f]/.test(value), {
+    message: "Filename must be a basename without path separators or control characters"
+  });
+const caseDocumentCreateSchema = z.object({
+  case_id: z.string().uuid(),
+  title: z.string().trim().min(2).max(200),
+  document_type: documentTypeSchema.default("other"),
+  confidentiality: documentConfidentialitySchema.default("confidential"),
+  description: z.string().trim().max(3000).optional().nullable(),
+  original_filename: originalFilenameSchema.optional().nullable(),
+  mime_type: z.string().trim().max(127).optional().nullable(),
+  size_bytes: z.number().int().min(0).max(25 * 1024 * 1024).optional().nullable(),
+  document_date: documentDateSchema.optional().nullable(),
+  reference_number: z.string().trim().max(120).optional().nullable()
+}).strict();
+const caseDocumentPatchSchema = z.object({
+  title: z.string().trim().min(2).max(200).optional(),
+  document_type: documentTypeSchema.optional(),
+  confidentiality: documentConfidentialitySchema.optional(),
+  description: z.string().trim().max(3000).optional().nullable(),
+  original_filename: originalFilenameSchema.optional().nullable(),
+  mime_type: z.string().trim().max(127).optional().nullable(),
+  size_bytes: z.number().int().min(0).max(25 * 1024 * 1024).optional().nullable(),
+  document_date: documentDateSchema.optional().nullable(),
+  reference_number: z.string().trim().max(120).optional().nullable()
+}).strict().refine((v) => Object.keys(v).length > 0, {message:"At least one field is required"});
+
+app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
+  const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
+  if (cid && !cid.success) return res.status(400).json({error:"invalid_case_id"});
+  const values=[req.auth.officeId,req.auth.userId];
+  const where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null",
+    "((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))"];
+  if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
+  try {
+    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$2 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
+    return res.json({data:result.rows});
+  } catch(error){logSafeError("List case documents failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
+});
+app.get("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
+  const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});
+  try {
+    const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$3 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null and ((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))",[id.data,req.auth.officeId,req.auth.userId]);
+    if(!q.rowCount) return documentAccessDenied(res);
+    return res.json({data:q.rows[0]});
+  }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
+});
+app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, createDocumentRateLimit, async(req,res)=>{
+   const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;
+   if(!canCreateCaseDocument(req.auth.role,d.confidentiality)) return res.status(403).json({error:"document_confidentiality_forbidden"});
+   const idempotencyKey=req.get("idempotency-key");
+   if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
+   const fingerprint=hashToken(JSON.stringify(d));let c;
+   try{c=await acquireClient(pool);
+     await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);if (!actor.ok) { await rollbackQuietly(c, "create actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }if (!canCreateCaseDocument(actor.role, d.confidentiality)) { await rollbackQuietly(c, "create confidentiality forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
+     if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
+     const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,d.confidentiality,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
+     if(!q.rowCount && idempotencyKey){
+       const existing=await c.query("select id,request_fingerprint,deleted_at,confidentiality from case_documents where office_id=$1 and created_by=$2 and idempotency_key=$3 for update",[req.auth.officeId,req.auth.userId,idempotencyKey]);
+       if(existing.rowCount && existing.rows[0].request_fingerprint===fingerprint && !existing.rows[0].deleted_at){
+         if(!canReadCaseDocument(req.auth.role,existing.rows[0].confidentiality)){
+           await rollbackQuietly(c,"idempotency replay access denied");
+           return documentAccessDenied(res);
+         }
+         const replay=await c.query("select id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at from case_documents where id=$1 and office_id=$2 and deleted_at is null",[existing.rows[0].id,req.auth.officeId]);
+         if(!replay.rowCount){await rollbackQuietly(c,"idempotency replay document missing");return documentAccessDenied(res);}
+         await c.query("commit");return res.status(200).json({data:replay.rows[0],idempotent_replay:true});
+       }
+       await rollbackQuietly(c,"idempotency key conflict");return res.status(409).json({error:"idempotency_key_reused"});
+     }
+     const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
+   }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+ });
+app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
+  const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);
+  if(!id.success)return res.status(400).json({error:"invalid_document_id"});
+  if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
+  const keyResult=parseDocumentMutationIdempotencyKey(req);
+  if(!keyResult.ok)return res.status(400).json({error:"invalid_idempotency_key"});
+  if(Object.hasOwn(p.data,"confidentiality")&&!canChangeDocumentConfidentiality(req.auth.role)) return res.status(403).json({error:"document_confidentiality_forbidden"});
+  const key=keyResult.key,fingerprint=documentMutationFingerprint("PATCH",id.data,p.data);
+  const fields=["title","document_type","confidentiality","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
+  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(f+"=$"+v.length);}
+  v.push(req.auth.userId);sets.push("updated_by=$"+v.length);v.push(id.data,req.auth.officeId);let c;
+  try{
+    c=await acquireClient(pool);await c.query("begin");
+    const actor=await lockLiveDocumentActor(c, req, ["owner","admin","lawyer","assistant"]);
+    if(!actor.ok){await rollbackQuietly(c,"update actor no longer authorized");return res.status(actor.status).json({error:actor.error});}
+    if(Object.hasOwn(p.data,"confidentiality")&&!canChangeDocumentConfidentiality(actor.role)){await rollbackQuietly(c,"classification change forbidden");return res.status(403).json({error:"document_confidentiality_forbidden"});}
+    const idem=await beginDocumentMutationIdempotency(c,req,key,"PATCH",id.data,fingerprint);
+    if(idem.kind==="conflict"){await rollbackQuietly(c,"document PATCH idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
+    if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document PATCH idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="replay"){
+      if(idem.status!==200){await rollbackQuietly(c,"invalid document PATCH replay status");return res.status(500).json({error:"database_error"});}
+      const replay=await c.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at from case_documents d join cases cs on cs.id=d.case_id and cs.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and cs.deleted_at is null for update of d",[id.data,req.auth.officeId]);
+      if(!replay.rowCount||!canReadCaseDocument(actor.role,replay.rows[0].confidentiality)){await rollbackQuietly(c,"document PATCH replay access denied");return documentAccessDenied(res);}
+      await c.query("commit");return res.status(200).json({data:replay.rows[0]});
+    }
+    const current=await c.query("select confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
+    if(!current.rowCount||!canEditCaseDocument(actor.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
+    const q=await c.query("update case_documents set "+sets.join(",")+",updated_at=now() where id=$"+(v.length-1)+" and office_id=$"+v.length+" and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",v);
+    if(!q.rowCount){await rollbackQuietly(c,"update missing document");return documentAccessDenied(res);}
+    const auditMetadata={fields:Object.keys(p.data)};
+    if(Object.hasOwn(p.data,"confidentiality")&&current.rows[0].confidentiality!==q.rows[0].confidentiality)auditMetadata.confidentiality_change={from:current.rows[0].confidentiality,to:q.rows[0].confidentiality};
+    await writeAuditLog(c,req.auth,"update","case_document",id.data,req,auditMetadata);
+    await completeDocumentMutationIdempotency(c,req,key,200);
+    await c.query("commit");return res.status(200).json({data:q.rows[0]});
+  }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+});
+
+app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
+  const id=parseUuid.safeParse(req.params.id);
+  if(!id.success)return res.status(400).json({error:"invalid_document_id"});
+  const keyResult=parseDocumentMutationIdempotencyKey(req);
+  if(!keyResult.ok)return res.status(400).json({error:"invalid_idempotency_key"});
+  const key=keyResult.key,fingerprint=documentMutationFingerprint("DELETE",id.data);
+  let c;
+  try{
+    c=await acquireClient(pool);await c.query("begin");
+    const actor=await lockLiveDocumentActor(c, req, ["owner","admin"]);
+    if(!actor.ok){await rollbackQuietly(c,"delete actor no longer authorized");return res.status(actor.status).json({error:actor.error});}
+    const idem=await beginDocumentMutationIdempotency(c,req,key,"DELETE",id.data,fingerprint);
+    if(idem.kind==="conflict"){await rollbackQuietly(c,"document DELETE idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
+    if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document DELETE idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="replay"){
+      if(idem.status!==204){await rollbackQuietly(c,"invalid document DELETE replay status");return res.status(500).json({error:"database_error"});}
+      await c.query("commit");return res.status(204).send();
+    }
+    const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
+    if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
+    await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);
+    await completeDocumentMutationIdempotency(c,req,key,204);
+    await c.query("commit");return res.status(204).send();
+  }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"delete case document");logSafeError("Delete case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
+});
+
+
+app.use((error, _req, res, next) => {
+  logSafeError("Unhandled request error", error);
+  if (res.headersSent) return next(error);
+  if (error?.type === "entity.too.large") return res.status(413).json({ error: "request_too_large" });
+  if (error instanceof SyntaxError && Object.hasOwn(error, "body")) return res.status(400).json({ error: "invalid_json" });
+  return res.status(500).json({ error: "internal_server_error" });
+});
 app.use((_req, res) => {
   res.status(404).json({ error: "not_found" });
 });
