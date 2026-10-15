@@ -6,6 +6,7 @@
 \ir ../migrations/004_case_documents_metadata.sql
 \ir ../migrations/005_shared_rate_limits.sql
 \ir ../migrations/006_case_document_mutation_idempotency.sql
+\ir ../migrations/007_case_document_mutation_tombstones.sql
 
 DO $catalog$
 DECLARE cols text[]; status_check text; constraint_names text[];
@@ -306,7 +307,7 @@ BEGIN
     AND a.attnum>0 AND NOT a.attisdropped;
   IF cols IS DISTINCT FROM ARRAY[
     'office_id','user_id','idempotency_key','operation','entity_id',
-    'request_fingerprint','response_status','created_at'
+    'request_fingerprint','response_status','created_at','purged_at'
   ]::text[] THEN
     RAISE EXCEPTION 'Unexpected mutation idempotency column inventory: %', cols;
   END IF;
