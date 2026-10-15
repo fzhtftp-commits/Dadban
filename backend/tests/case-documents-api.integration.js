@@ -63,7 +63,7 @@ async function waitForServer(portToCheck = port) {
   throw new Error("Dadban API did not become healthy in time");
 }
 
-async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true, idempotencyKey, extraHeaders = {}, portToUse = port } = {}) {
+async function request(path, { token, csrf, method = "GET", body, originHeader = origin, csrfHeader = true, idempotencyKey, extraHeaders = {}, portToUse = port, hostToUse = "127.0.0.1" } = {}) {
   const headers = { origin: originHeader, cookie: `dadban_session=${token}; dadban_csrf=${csrf}`, ...extraHeaders };
   if (csrfHeader && ["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
     headers["x-csrf-token"] = csrf;
@@ -72,7 +72,7 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
     headers["content-type"] = "application/json";
   }
   if (idempotencyKey !== undefined) headers["idempotency-key"] = idempotencyKey;
-  const response = await fetch(`http://127.0.0.1:${portToUse}${path}`, {
+  const response = await fetch(`http://${hostToUse}:${portToUse}${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
   });
@@ -632,7 +632,7 @@ try {
   await pool.query("create trigger fail_transient_document_mutations_trigger before insert or update on case_documents for each row execute function fail_transient_document_mutations()");
   // This isolated integration case uses a fresh test-only rate-limit window after earlier API scenarios.
   await pool.query("delete from public.rate_limit_counters where bucket_name='document_create'");
-  const transientCreateFailed = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload });
+  const transientCreateFailed = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload, hostToUse: "127.0.0.2" });
   assert.equal(transientCreateFailed.status, 503, "deadlock with confirmed rollback should be explicitly retryable");
   assert.deepEqual(transientCreateFailed.body, { error: "database_retryable" });
   assert.equal((await pool.query("select count(*)::int as count from case_documents where title=$1", [retryCreatePayload.title])).rows[0].count, 0, "deadlocked create must roll back its document and idempotency key");
@@ -654,7 +654,7 @@ try {
   }
   await pool.query("drop trigger fail_transient_document_mutations_trigger on case_documents");
   await pool.query("drop function fail_transient_document_mutations()");
-  const transientCreateRetried = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload });
+  const transientCreateRetried = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload, hostToUse: "127.0.0.2" });
   assert.equal(transientCreateRetried.status, 201, "same idempotency key must succeed after deadlock rollback");
   assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [transientCreateRetried.body.data.id])).rows[0].count, 1, "retried create must have exactly one audit event");
   const transientUpdateRetried = await request("/api/case-documents/" + retryUpdateId, { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "PATCH", body: transientUpdateBody });
