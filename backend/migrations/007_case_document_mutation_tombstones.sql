@@ -40,8 +40,7 @@ BEGIN
      OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
      OR NEW.operation IS DISTINCT FROM OLD.operation
      OR NEW.entity_id IS DISTINCT FROM OLD.entity_id
-     OR NEW.request_fingerprint IS DISTINCT FROM OLD.request_fingerprint
-     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+     OR NEW.request_fingerprint IS DISTINCT FROM OLD.request_fingerprint THEN
     RAISE EXCEPTION 'idempotency operation identity is immutable'
       USING ERRCODE = 'restrict_violation';
   END IF;
