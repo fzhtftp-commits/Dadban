@@ -87,6 +87,7 @@ try {
   // This script is only permitted to reset its dedicated, disposable localhost test DB.
   await pool.query(`
     drop function if exists public.prevent_case_document_idempotency_delete() cascade;
+    drop function if exists public.prevent_case_document_idempotency_reopen() cascade;
     drop table if exists case_document_mutation_idempotency cascade;
     drop table if exists case_documents cascade;
     drop table if exists audit_logs cascade;
