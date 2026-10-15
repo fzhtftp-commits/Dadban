@@ -4,6 +4,7 @@
 \ir ../../database/migrations/20261010_office_isolation_constraints.sql
 \ir ../../database/migrations/20261014_case_actions.sql
 \ir ../migrations/004_case_documents_metadata.sql
+\ir ../migrations/005_shared_rate_limits.sql
 
 DO $catalog$
 DECLARE cols text[]; status_check text; constraint_names text[];
@@ -64,3 +65,44 @@ BEGIN
   IF ok IS DISTINCT FROM false THEN RAISE EXCEPTION 'quarantined unexpectedly accepted'; END IF;
 END
 $probe$;
+
+
+DO $rate_limit_catalog$
+DECLARE cols text[]; pk_columns text[]; digest_check boolean; expiry_index boolean;
+BEGIN
+  SELECT array_agg(a.attname::text ORDER BY a.attnum) INTO cols
+  FROM pg_attribute a
+  WHERE a.attrelid='public.rate_limit_counters'::regclass
+    AND a.attnum>0 AND NOT a.attisdropped;
+  IF cols IS DISTINCT FROM ARRAY[
+    'bucket_name','key_digest','window_start','request_count','expires_at'
+  ]::text[] THEN
+    RAISE EXCEPTION 'Unexpected rate_limit_counters columns: %', cols;
+  END IF;
+  SELECT array_agg(a.attname::text ORDER BY k.ordinality) INTO pk_columns
+  FROM pg_constraint c
+  CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ordinality)
+  JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum
+  WHERE c.conrelid='public.rate_limit_counters'::regclass AND c.contype='p';
+  IF pk_columns IS DISTINCT FROM ARRAY['bucket_name','key_digest','window_start']::text[] THEN
+    RAISE EXCEPTION 'Unexpected rate_limit_counters primary key: %', pk_columns;
+  END IF;
+  SELECT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='public.rate_limit_counters'::regclass AND contype='c'
+      AND pg_get_constraintdef(oid,true) LIKE '%octet_length(key_digest)%'
+  ) INTO digest_check;
+  IF NOT digest_check THEN RAISE EXCEPTION 'Missing 32-byte digest check'; END IF;
+  SELECT EXISTS (
+    SELECT 1 FROM pg_index i JOIN pg_class ix ON ix.oid=i.indexrelid
+    WHERE i.indrelid='public.rate_limit_counters'::regclass
+      AND ix.relname='rate_limit_counters_expires_at_idx'
+      AND i.indisvalid AND i.indisready AND i.indisunique=false
+      AND pg_get_indexdef(i.indexrelid) ILIKE '%(expires_at)%'
+  ) INTO expiry_index;
+  IF NOT expiry_index THEN RAISE EXCEPTION 'Missing valid expiry cleanup index'; END IF;
+  IF has_table_privilege('public', 'public.rate_limit_counters', 'SELECT') THEN
+    RAISE EXCEPTION 'PUBLIC must not receive counter table SELECT';
+  END IF;
+END
+$rate_limit_catalog$;
