@@ -76,6 +76,15 @@ jobs:
         run: bash tests/case-documents-negative-index-migration.sh
         working-directory: backend
 
+      - name: Verify audit log SQL privileges and RLS in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: |
+          createdb -h localhost -U postgres dadban_audit_security_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_audit_security_test' EXIT
+          bash tests/audit-logs-security.sh
+        working-directory: backend
+
       - name: Verify two-office API isolation over HTTP
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
