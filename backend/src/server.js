@@ -1061,9 +1061,7 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
     );
 
     const created = result.rows[0];
-    await writeAuditLog(client, req.auth, "create", "case", created.id, req, {
-      client_id: created.client_id
-    });
+    await writeAuditLog(client, req.auth, "create", "case", created.id, req);
     await client.query("commit");
     return res.status(201).json({ data: created });
   } catch (error) {
@@ -1298,7 +1296,7 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
       data.reminder_minutes, data.notes ?? null, req.auth.userId]);
     const hearing = result.rows[0];
     await syncCaseNextHearing(client, req.auth.officeId, hearing.case_id);
-    await writeAuditLog(client, req.auth, "create", "hearing", hearing.id, req, { case_id: hearing.case_id });
+    await writeAuditLog(client, req.auth, "create", "hearing", hearing.id, req);
     await client.query("commit");
     return res.status(201).json({ data: hearing });
   } catch (error) {
@@ -1387,7 +1385,7 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
       return res.status(404).json({ error: "hearing_not_found" });
     }
     await syncCaseNextHearing(client, req.auth.officeId, result.rows[0].case_id);
-    await writeAuditLog(client, req.auth, "delete", "hearing", id.data, req, { case_id: result.rows[0].case_id });
+    await writeAuditLog(client, req.auth, "delete", "hearing", id.data, req);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
@@ -1515,7 +1513,7 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
       data.status === "completed" ? new Date() : null]);
     const action = result.rows[0];
     await writeAuditLog(client, req.auth, "create", "case_action", action.id, req, {
-      case_id: action.case_id, status: action.status
+      status: action.status
     });
     await client.query("commit");
     return res.status(201).json({ data: action });
@@ -1708,7 +1706,7 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
        }
        await rollbackQuietly(c,"idempotency key conflict");return res.status(409).json({error:"idempotency_key_reused"});
      }
-     const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{case_id:doc.case_id,storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
+     const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
    }catch(error){await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
  });
 app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
