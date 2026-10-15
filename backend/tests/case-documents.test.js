@@ -35,6 +35,8 @@ test("document write transactions revalidate and lock the live session and user"
  assert.match(server, /const lockLiveDocumentActor = async/);
  assert.match(server, /for update of s, u/);
  assert.equal((server.match(/lockLiveDocumentActor\(c, req,/g) || []).length, 3, "create, update, and delete must revalidate actor state inside their transactions");
+ assert.match(server, /rollbackSucceeded && \["40001", "40P01", "55P03", "57014"\]\.includes\(error\?\.code\)/);
+ assert.match(server, /dbError\(error,rollbackSucceeded\)/);
 });
 
 test("confidentiality policy is enforced by API and audit", () => {
