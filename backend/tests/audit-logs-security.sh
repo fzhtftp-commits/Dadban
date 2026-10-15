@@ -67,7 +67,10 @@ psql -v ON_ERROR_STOP=1 -f ../supabase/migrations/0002_security_rls.sql
 psql -v ON_ERROR_STOP=1 <<'SQL'
 DO $assert_privileges$
 BEGIN
-  IF NOT has_table_privilege('anon', 'public.audit_logs', 'SELECT,INSERT,UPDATE,DELETE') IS FALSE THEN
+  IF has_table_privilege('anon', 'public.audit_logs', 'SELECT')
+     OR has_table_privilege('anon', 'public.audit_logs', 'INSERT')
+     OR has_table_privilege('anon', 'public.audit_logs', 'UPDATE')
+     OR has_table_privilege('anon', 'public.audit_logs', 'DELETE') THEN
     RAISE EXCEPTION 'anon unexpectedly has audit_logs privileges';
   END IF;
   IF NOT has_table_privilege('authenticated', 'public.audit_logs', 'INSERT') THEN
