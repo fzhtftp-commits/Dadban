@@ -68,10 +68,8 @@ CREATE TABLE case_documents (
 CREATE UNIQUE INDEX case_documents_idempotency_unique_idx
   ON case_documents (office_id, created_by, idempotency_key)
   WHERE idempotency_key IS NOT NULL;
-CREATE INDEX case_documents_office_case_created_idx
-  ON case_documents (office_id, case_id, created_at DESC) WHERE deleted_at IS NULL;
-CREATE INDEX case_documents_office_created_idx
-  ON case_documents (office_id, created_at DESC) WHERE deleted_at IS NULL;
+create index case_documents_office_case_created_idx on case_documents (office_id, case_id, created_at desc) where deleted_at is null;
+create index case_documents_office_created_idx on case_documents (office_id, created_at desc) where deleted_at is null;
 CREATE TRIGGER case_documents_set_updated_at
   BEFORE UPDATE ON case_documents FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 COMMIT;
