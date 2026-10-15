@@ -249,6 +249,61 @@ try {
   assert.equal(await countAudit("user", "login"), loginAuditBefore, "failed login must not leave an audit row");
   console.log("PASS: login rolls back the new session when audit INSERT fails");
 
+  // Invalid credentials are logged after the login transaction rolls back.
+  // The event intentionally carries no account, office, email, password, or token identifier.
+  for (const [label, credentials] of [
+    ["known account with wrong password", { email: "audit-mutation-owner@example.test", password: "WrongPassword!234" }],
+    ["unknown account", { email: "unknown-audit-login@example.test", password: "WrongPassword!234" }]
+  ]) {
+    const failedAttemptsBefore = Number((await pool.query(
+      "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
+    )).rows[0].count);
+    const response = await request("/api/auth/login", "POST", credentials);
+    assert.equal(response.status, 401, `${label}: invalid credentials must remain a generic 401`);
+    assert.deepEqual(response.body, { error: "invalid_credentials" });
+    const events = await pool.query(
+      "select office_id, user_id, entity_id, metadata, ip_address, user_agent from audit_logs where action='login_failed' and entity_type='authentication' order by created_at desc limit 1"
+    );
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
+    )).rows[0].count), failedAttemptsBefore + 1, `${label}: failed attempt must create one audit event`);
+    assert.equal(events.rowCount, 1);
+    assert.equal(events.rows[0].office_id, null);
+    assert.equal(events.rows[0].user_id, null);
+    assert.equal(events.rows[0].entity_id, null);
+    assert.deepEqual(events.rows[0].metadata, { reason: "invalid_credentials" });
+    assert.equal(events.rows[0].user_agent, "dadban-audit-mutation-test");
+    console.log(`PASS: ${label} is audited without account identifiers or credentials`);
+  }
+
+  // A failure in the independent audit write must not change the public 401 result.
+  await pool.query(`
+    create function reject_failed_login_audit() returns trigger language plpgsql as $
+    begin
+      if new.action = 'login_failed' and new.entity_type = 'authentication' then
+        raise exception 'forced failed-login audit INSERT failure in disposable integration test';
+      end if;
+      return new;
+    end;
+    $;
+    create trigger reject_failed_login_audit_trigger
+      before insert on audit_logs for each row execute function reject_failed_login_audit();
+  `);
+  const failedAttemptsBeforeAuditOutage = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
+  )).rows[0].count);
+  const auditUnavailableLogin = await request("/api/auth/login", "POST", {
+    email: "audit-mutation-owner@example.test",
+    password: "WrongPassword!234"
+  });
+  assert.equal(auditUnavailableLogin.status, 401, "failed-login audit outage must not turn invalid credentials into 500");
+  assert.deepEqual(auditUnavailableLogin.body, { error: "invalid_credentials" });
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
+  )).rows[0].count), failedAttemptsBeforeAuditOutage, "failed audit insert must not leave a partial event");
+  await pool.query("drop trigger reject_failed_login_audit_trigger on audit_logs; drop function reject_failed_login_audit()");
+  console.log("PASS: failed-login audit write failure preserves generic 401 response");
+
   const logoutAuditBefore = await countAudit("auth_session", "logout");
   const failedLogout = await request("/api/auth/logout", "POST");
   assert.equal(failedLogout.status, 500, "logout must fail when its audit insert fails");
