@@ -47,3 +47,24 @@ test("audit metadata must not serialize request payloads or secrets", () => {
       "audit metadata must not include credentials or tokens");
   }
 });
+
+test("audit-write failures must take the mutation route's rollback path", () => {
+  const writes = routeBlocks().filter(({ method, path }) =>
+    ["POST", "PATCH", "PUT", "DELETE"].includes(method) &&
+    /^\/api\/(clients|cases|hearings|actions|case-documents)(\/|$)/.test(path)
+  );
+
+  for (const route of writes) {
+    const auditAt = route.body.indexOf("writeAuditLog(");
+    assert.notEqual(auditAt, -1, `${route.method} ${route.path} must contain an audit write`);
+
+    const catchAt = route.body.indexOf("catch", auditAt);
+    assert.notEqual(catchAt, -1, `${route.method} ${route.path} must catch audit-write errors`);
+    const catchBody = route.body.slice(catchAt, route.body.indexOf("finally", catchAt) === -1
+      ? undefined
+      : route.body.indexOf("finally", catchAt));
+
+    assert.match(catchBody, /rollbackQuietly\s*\(|query\(["']rollback["']\)/,
+      `${route.method} ${route.path} must roll back when the audit write fails`);
+  }
+});
