@@ -26,3 +26,11 @@ Status: review finding; no production database was accessed or changed.
 - Whether personal data in metadata, IP addresses, and user-agent strings needs minimization or a distinct retention schedule.
 
 Until those decisions are approved, preserve existing records and do not introduce automatic deletion.
+
+## Event coverage and metadata review (2026-10-15)
+
+- The reviewed resource mutation routes for clients, cases, hearings, case actions, and case-document metadata call `writeAuditLog` before committing their transaction. This keeps the business mutation and its audit row atomic: an audit insert failure rolls back the business change in these handlers.
+- Their current metadata is limited to identifiers, action context, changed field names, document storage status, and confidentiality transitions. The reviewed call sites do not pass the whole request body or credential/token values to the audit helper.
+- Registration, login, and logout do not currently write audit rows in the reviewed backend. Whether to audit successful/failed authentication, session creation/revocation, and registration should be explicitly decided; failed-login events in particular need careful rate/volume and privacy handling. This review does not silently expand that event scope.
+- A regression test now asserts that each of the 15 resource mutation routes writes an audit row before commit and that audit calls do not serialize request payloads or credential/token values. This is a source-contract test; it complements, but does not replace, integration tests against the database.
+
