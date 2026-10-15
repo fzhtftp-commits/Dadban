@@ -9,7 +9,7 @@ create table cases (
  id uuid not null, office_id uuid not null references offices(id),
  primary key (id), unique (id, office_id)
 );
-create function set_updated_at() returns trigger language plpgsql as $ begin new.updated_at = now(); return new; end $;
+create function set_updated_at() returns trigger language plpgsql as $fn$ begin new.updated_at = now(); return new; end $fn$;
 insert into offices(id) values
  ('11111111-1111-4111-8111-111111111111'),
  ('22222222-2222-4222-8222-222222222222');
