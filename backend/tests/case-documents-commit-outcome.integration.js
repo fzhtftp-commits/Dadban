@@ -155,7 +155,7 @@ try {
           responseParseOffset = 0;
           return;
         }
-        if (type === "C" && payload.toString("latin1") === "COMMIT\\0") sawCommitComplete = true;
+        if (type === "C" && payload.toString("latin1") === "COMMIT\0") sawCommitComplete = true;
         responseParseOffset += totalLength;
         if (type === "Z" && sawCommitComplete) {
           droppedCommitResponses++;
