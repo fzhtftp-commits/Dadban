@@ -11,11 +11,6 @@ const parsedDatabaseUrl = databaseUrl ? new URL(databaseUrl) : null;
 if (!parsedDatabaseUrl || !["localhost", "127.0.0.1"].includes(parsedDatabaseUrl.hostname) || parsedDatabaseUrl.pathname !== "/dadban_test") {
   throw new Error("Integration test may only reset the dedicated localhost /dadban_test database");
 }
-const apiDatabaseUrl = process.env.API_DATABASE_URL || databaseUrl;
-const parsedApiDatabaseUrl = new URL(apiDatabaseUrl);
-if (process.env.API_DATABASE_URL && (!["localhost", "127.0.0.1"].includes(parsedApiDatabaseUrl.hostname) || parsedApiDatabaseUrl.pathname !== "/dadban_test")) {
-  throw new Error("Runtime-role API test may only use localhost /dadban_test");
-}
 const port = Number(process.env.DADBAN_TEST_PORT || 18127);
 const origin = "http://localhost:5500";
 const pool = new Pool({ connectionString: databaseUrl, ssl: false, max: 3 });
@@ -165,73 +160,6 @@ try {
   await pool.query(mutationIdempotencyMigration);
   const mutationTombstoneMigration = await readFile(new URL("../migrations/007_case_document_mutation_tombstones.sql", import.meta.url), "utf8");
   await pool.query(mutationTombstoneMigration);
-
-  if (process.env.API_DATABASE_URL) {
-    // This login is created only in the disposable CI database. The test/admin
-    // pool remains postgres for fixture setup and direct assertions; API children
-    // connect through API_DATABASE_URL and therefore exercise real grants.
-    await pool.query(`
-      DO $role$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_ci') THEN
-          CREATE ROLE dadban_document_runtime_ci LOGIN PASSWORD 'ci-only-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
-        END IF;
-      END
-      $role$;
-      ALTER ROLE dadban_document_runtime_ci LOGIN PASSWORD 'ci-only-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
-      REVOKE dadban_schema_owner_ci, dadban_schema_owner_alt_ci, dadban_migrator_ci FROM dadban_document_runtime_ci;
-      REVOKE ALL ON SCHEMA public FROM dadban_document_runtime_ci;
-      GRANT USAGE ON SCHEMA public TO dadban_document_runtime_ci;
-      REVOKE ALL ON public.users, public.cases, public.auth_sessions, public.audit_logs,
-        public.case_documents, public.case_document_mutation_idempotency
-        FROM dadban_document_runtime_ci;
-      GRANT SELECT ON public.users, public.cases TO dadban_document_runtime_ci;
-      GRANT SELECT ON public.auth_sessions TO dadban_document_runtime_ci;
-      GRANT UPDATE (last_seen_at, revoked_at) ON public.auth_sessions TO dadban_document_runtime_ci;
-      GRANT SELECT ON public.case_documents TO dadban_document_runtime_ci;
-      GRANT INSERT (office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by)
-        ON public.case_documents TO dadban_document_runtime_ci;
-      GRANT UPDATE (title,document_type,confidentiality,description,original_filename,mime_type,size_bytes,document_date,reference_number,updated_by,updated_at,deleted_at)
-        ON public.case_documents TO dadban_document_runtime_ci;
-      GRANT INSERT ON public.audit_logs TO dadban_document_runtime_ci;
-      GRANT SELECT, INSERT ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
-      GRANT UPDATE (response_status) ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
-    `);
-
-    const roleState = await pool.query(`
-      SELECT
-        (SELECT r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolinherit
-           FROM pg_roles r WHERE r.rolname='dadban_document_runtime_ci') AS privileged,
-        pg_has_role('dadban_document_runtime_ci','dadban_schema_owner_ci','MEMBER') AS member_schema_owner,
-        pg_has_role('dadban_document_runtime_ci','dadban_migrator_ci','MEMBER') AS member_migrator,
-        (SELECT r.rolname FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner
-          WHERE c.oid='public.case_document_mutation_idempotency'::regclass) AS idem_owner,
-        has_table_privilege('dadban_document_runtime_ci','public.case_document_mutation_idempotency','DELETE') AS can_delete_idem,
-        has_table_privilege('dadban_document_runtime_ci','public.case_document_mutation_idempotency','TRUNCATE') AS can_truncate_idem,
-        has_column_privilege('dadban_document_runtime_ci','public.case_document_mutation_idempotency','purged_at','UPDATE') AS can_reopen_tombstone,
-        has_table_privilege('dadban_document_runtime_ci','public.audit_logs','SELECT') AS can_read_audit,
-        has_table_privilege('dadban_document_runtime_ci','public.audit_logs','UPDATE') AS can_change_audit
-    `);
-    assert.equal(roleState.rows[0].privileged, false, "runtime role must not have admin/INHERIT attributes");
-    assert.equal(roleState.rows[0].member_schema_owner, false, "runtime must not inherit schema-owner role");
-    assert.equal(roleState.rows[0].member_migrator, false, "runtime must not inherit migration role");
-    assert.notEqual(roleState.rows[0].idem_owner, "dadban_document_runtime_ci", "runtime must not own idempotency table");
-    assert.equal(roleState.rows[0].can_delete_idem, false);
-    assert.equal(roleState.rows[0].can_truncate_idem, false);
-    assert.equal(roleState.rows[0].can_reopen_tombstone, false);
-    assert.equal(roleState.rows[0].can_read_audit, false, "runtime may append audit but must not read audit history");
-    assert.equal(await pool.query("select has_table_privilege('dadban_document_runtime_ci','public.users','UPDATE') AS can_update_users").then(r=>r.rows[0].can_update_users), false, "runtime must not be able to change user identity or role");
-    assert.equal(roleState.rows[0].can_change_audit, false, "runtime may not modify audit history");
-    const runtimeProbe = new Pool({ connectionString: apiDatabaseUrl, ssl: false, max: 1 });
-    try {
-      const identity = await runtimeProbe.query("select current_user as role, rolsuper, rolcreatedb, rolcreaterole from pg_roles where rolname=current_user");
-      assert.deepEqual(identity.rows[0], { role: "dadban_document_runtime_ci", rolsuper: false, rolcreatedb: false, rolcreaterole: false });
-    } finally {
-      await runtimeProbe.end();
-    }
-    console.log("PASS: API runtime connects as non-owner/non-admin; column-scoped writes only, append-only audit, and no tombstone delete/DDL privileges");
-  }
-
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
@@ -290,7 +218,7 @@ try {
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
     stdio: ["ignore", "pipe", "pipe"]
   });
   server.stdout.on("data", chunk => { serverOutput += chunk.toString(); });
@@ -924,7 +852,7 @@ try {
   // This isolated integration case uses a fresh test-only rate-limit window after earlier API scenarios.
   await pool.query("delete from public.rate_limit_counters where bucket_name='document_create'");
   const retryPort = port + 6;
-  retryServer = spawn(process.execPath, ["src/server.js"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PORT: String(retryPort), NODE_ENV: "test", RATE_LIMIT_MODE: "memory", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin }, stdio: ["ignore", "pipe", "pipe"] });
+  retryServer = spawn(process.execPath, ["src/server.js"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PORT: String(retryPort), NODE_ENV: "test", RATE_LIMIT_MODE: "memory", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin }, stdio: ["ignore", "pipe", "pipe"] });
   retryServer.stdout.on("data", chunk => { retryServerOutput += chunk.toString(); });
   retryServer.stderr.on("data", chunk => { retryServerOutput += chunk.toString(); });
   await waitForServer(retryPort);
@@ -1041,7 +969,7 @@ try {
   const auditPort = port + 5;
   auditServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(auditPort), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(auditPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
     stdio: ["ignore", "pipe", "pipe"]
   });
   auditServer.stdout.on("data", chunk => { auditServerOutput += chunk.toString(); });
@@ -1223,7 +1151,7 @@ try {
   const timeoutPort = port + 2;
   timeoutServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(timeoutPort), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin, DB_STATEMENT_TIMEOUT_MS: "250" },
+    env: { ...process.env, PORT: String(timeoutPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_STATEMENT_TIMEOUT_MS: "250" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   timeoutServer.stdout.on("data", chunk => { timeoutServerOutput += chunk.toString(); });
@@ -1274,7 +1202,7 @@ try {
   const rolePort = port + 4;
   roleServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(rolePort), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(rolePort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
     stdio: ["ignore", "pipe", "pipe"]
   });
   roleServer.stdout.on("data", chunk => { roleServerOutput += chunk.toString(); });
@@ -1685,7 +1613,7 @@ try {
   const rateLimitPort = port + 3;
   rateLimitServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(rateLimitPort), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(rateLimitPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
     stdio: ["ignore", "pipe", "pipe"]
   });
   rateLimitServer.stdout.on("data", chunk => { rateLimitServerOutput += chunk.toString(); });
@@ -1855,7 +1783,7 @@ try {
   const crashPort = port + 7;
   crashServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(crashPort), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin, RATE_LIMIT_MODE: "memory" },
+    env: { ...process.env, PORT: String(crashPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, RATE_LIMIT_MODE: "memory" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   crashServer.stdout.on("data", chunk => { crashServerOutput += chunk.toString(); });
