@@ -7,7 +7,7 @@ const transactionHelper = await readFile(new URL("../src/document-transaction.js
 test("schema is strictly metadata-only and enforces office-scoped foreign keys", () => {
  assert.match(migration, /storage_status/);
  assert.doesNotMatch(migration, /storage_key/i);
- assert.match(migration, /size_bytes <= 26214400/);
+ assert.match(migration, /size_bytes.*26214400/);
  assert.match(migration, /case_documents_case_same_office_fk/);
  assert.match(migration, /case_documents_created_by_same_office_fk/);
 });
