@@ -86,6 +86,7 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
 try {
   // This script is only permitted to reset its dedicated, disposable localhost test DB.
   await pool.query(`
+    drop function if exists public.prevent_case_document_idempotency_delete() cascade;
     drop table if exists case_document_mutation_idempotency cascade;
     drop table if exists case_documents cascade;
     drop table if exists audit_logs cascade;
@@ -156,6 +157,8 @@ try {
   await pool.query(migration);
   const mutationIdempotencyMigration = await readFile(new URL("../migrations/006_case_document_mutation_idempotency.sql", import.meta.url), "utf8");
   await pool.query(mutationIdempotencyMigration);
+  const mutationTombstoneMigration = await readFile(new URL("../migrations/007_case_document_mutation_tombstones.sql", import.meta.url), "utf8");
+  await pool.query(mutationTombstoneMigration);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
