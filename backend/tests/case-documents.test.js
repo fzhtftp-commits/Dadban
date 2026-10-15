@@ -146,6 +146,10 @@ test("document creation is idempotent and sensitive endpoints are rate limited",
  assert.match(server, /createConfiguredRateLimiter\(\{ bucket: "register", maxRequests: 5 \}\)/);
  assert.match(server, /createConfiguredRateLimiter\(\{ bucket: "login", maxRequests: 10 \}\)/);
  assert.match(server, /createConfiguredRateLimiter\(\{ bucket: "document_create", maxRequests: 20 \}\)/);
+ // Keep the shared limiter attached to the intended route, before handlers run.
+ assert.match(server, /app\.post\("\/api\/auth\/register", requireTrustedOrigin, registerRateLimit, async \(req, res\) =>/);
+ assert.match(server, /app\.post\("\/api\/auth\/login", requireTrustedOrigin, loginRateLimit, async \(req, res\) =>/);
+ assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant"\), requireTrustedOrigin, requireCsrf, createDocumentRateLimit, async\(req,res\)=>/);
  assert.match(server, /RATE_LIMIT_MODE=postgres requires RATE_LIMIT_HMAC_KEY/);
  assert.match(server, /RATE_LIMIT_MODE=postgres/);
  assert.match(sharedRateLimiter, /createHmac\("sha256"/);
