@@ -84,26 +84,61 @@ try {
 
   // Exercise the actual runtime role, not the PostgreSQL superuser used to
   // provision the disposable CI database.
+  const roleNameResult = await poolA.query("SELECT current_user AS name");
+  const roleName = () => roleNameResult.rows[0].name;
   const roleCheck = await poolA.query(`
     SELECT r.rolsuper,
       has_schema_privilege(current_user, 'public', 'USAGE') AS schema_usage,
-      has_table_privilege(current_user, 'public.rate_limit_counters', 'SELECT') AS can_select,
-      has_table_privilege(current_user, 'public.rate_limit_counters', 'INSERT') AS can_insert,
-      has_table_privilege(current_user, 'public.rate_limit_counters', 'UPDATE') AS can_update,
-      has_table_privilege(current_user, 'public.rate_limit_counters', 'DELETE') AS can_delete,
-      has_table_privilege(current_user, 'public.rate_limit_counters', 'TRUNCATE') AS can_truncate,
-      has_table_privilege(current_user, 'public.rate_limit_counters', 'REFERENCES') AS can_reference,
-      has_table_privilege(current_user, 'public.rate_limit_counters', 'TRIGGER') AS can_trigger
-    FROM pg_roles r WHERE r.rolname = current_user
+      has_schema_privilege(current_user, 'public', 'CREATE') AS schema_create,
+      pg_get_userbyid(n.nspowner) AS schema_owner,
+      pg_get_userbyid(c.relowner) AS table_owner,
+      c.relowner = r.oid AS owns_table,
+      (SELECT count(*)::integer
+         FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) acl
+        WHERE acl.grantee = 0) AS public_table_privilege_count,
+      (SELECT count(*)::integer
+         FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
+        WHERE acl.grantee = 0) AS public_schema_privilege_count,
+      has_table_privilege(current_user, c.oid, 'SELECT') AS can_select,
+      has_table_privilege(current_user, c.oid, 'INSERT') AS can_insert,
+      has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
+      has_table_privilege(current_user, c.oid, 'DELETE') AS can_delete,
+      has_table_privilege(current_user, c.oid, 'TRUNCATE') AS can_truncate,
+      has_table_privilege(current_user, c.oid, 'REFERENCES') AS can_reference,
+      has_table_privilege(current_user, c.oid, 'TRIGGER') AS can_trigger
+    FROM pg_roles r
+    JOIN pg_class c ON c.oid = 'public.rate_limit_counters'::regclass
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE r.rolname = current_user
   `);
-  assert.equal(roleCheck.rows[0].rolsuper, false, "rate-limit integration must not run as a superuser");
-  assert.equal(roleCheck.rows[0].schema_usage, true);
+  const role = roleCheck.rows[0];
+  assert.ok(role, "must resolve the effective connected role and counter table");
+  assert.equal(role.rolsuper, false, "rate-limit integration must not run as a superuser");
+  assert.equal(role.schema_usage, true);
+  assert.equal(role.schema_create, false, "runtime role must not create objects in public");
+  assert.notEqual(role.table_owner, currentUserName(), "runtime role must not own the counter table");
+  assert.equal(role.owns_table, false, "runtime role must not own the counter table");
+  assert.equal(role.public_table_privilege_count, 0, "PUBLIC must have no direct counter-table privileges");
+  assert.equal(role.public_schema_privilege_count, 0, "PUBLIC must have no direct public-schema privileges");
   for (const privilege of ["can_select", "can_insert", "can_update", "can_delete"]) {
-    assert.equal(roleCheck.rows[0][privilege], true, `runtime role requires ${privilege}`);
+    assert.equal(role[privilege], true, `runtime role requires ${privilege}`);
   }
   for (const privilege of ["can_truncate", "can_reference", "can_trigger"]) {
-    assert.equal(roleCheck.rows[0][privilege], false, `runtime role must not have ${privilege}`);
+    assert.equal(role[privilege], false, `runtime role must not have ${privilege}`);
   }
+
+  // Verify effective DDL denial, not only ACL/catalog snapshots. These attempts
+  // target the disposable CI database and must fail with insufficient_privilege.
+  await assert.rejects(
+    poolA.query("CREATE TABLE public.rate_limit_role_ddl_probe (id integer)"),
+    error => error?.code === "42501",
+    "runtime role must not create schema objects"
+  );
+  await assert.rejects(
+    poolA.query("ALTER TABLE public.rate_limit_counters ADD COLUMN ddl_probe integer"),
+    error => error?.code === "42501",
+    "runtime role must not alter an owned-by-another-role table"
+  );
 
   // IPv4-mapped IPv6 must share the same counter bucket as its IPv4 address.
   await poolA.query("DELETE FROM public.rate_limit_counters");
