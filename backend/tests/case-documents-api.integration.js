@@ -392,7 +392,9 @@ try {
   const failedCreateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
   assert.equal(failedCreateAudit.rows[0].count, createAuditBeforeFailure.rows[0].count, "failed create must not leave an audit row");
   const failedIdempotentCreate = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
+    // Use a separate office-A admin principal so this rollback assertion is not
+    // masked by the owner principal's independent create-rate-limit budget.
+    token: roleAccounts[1].token, csrf: roleAccounts[1].csrf, method: "POST", idempotencyKey: "retry-after-db-failure-01",
     body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
   });
   assert.equal(failedIdempotentCreate.status, 500, "audit failure must fail idempotent creation");
