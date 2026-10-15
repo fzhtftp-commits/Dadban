@@ -570,11 +570,6 @@ try {
     token: tokenA, csrf: csrfA, method: "DELETE"
   });
   assert.equal(deletedIdempotent.status, 204, "idempotent fixture document should soft-delete");
-  const deletedReplay = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-key-12345678", body: idempotentPayload
-  });
-  assert.equal(deletedReplay.status, 409, "retry after soft deletion must not resurrect or replay the deleted document");
-  assert.deepEqual(deletedReplay.body, { error: "idempotency_key_reused" });
   const deletedIdempotentState = await pool.query(
     "select deleted_at from case_documents where id=$1",
     [idempotentFirst.body.data.id]
@@ -862,6 +857,14 @@ try {
   roleServer.stderr.on("data", chunk => { roleServerOutput += chunk.toString(); });
   await waitForServer(rolePort);
 
+  // Use the isolated role-policy server's fresh in-memory rate-limit budget for
+  // the deleted-idempotency replay check; do not perturb later rate-limit regressions.
+  const deletedReplay = await request("/api/case-documents", {
+    token: tokenA, csrf: csrfA, method: "POST", portToUse: rolePort,
+    idempotencyKey: "retry-key-12345678", body: idempotentPayload
+  });
+  assert.equal(deletedReplay.status, 409, "retry after soft deletion must not resurrect or replay the deleted document");
+  assert.deepEqual(deletedReplay.body, { error: "idempotency_key_reused" });
 
   const createFixture = async (title, confidentiality) => {
     const result = await request("/api/case-documents", { token: tokenA, csrf: csrfA, method: "POST", portToUse: rolePort, body: { case_id: ids.caseA, title, document_type: "evidence", confidentiality } });
