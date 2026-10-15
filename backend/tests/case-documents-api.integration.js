@@ -488,7 +488,7 @@ try {
   assert.ok(racePersisted.rows[0].deleted_at, "concurrent mutation race must end in a soft-deleted state");
 
   const timeoutCreated = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST",
+    token: tokenA, csrf: csrfA, method: "POST", portToUse: auditPort,
     body: { case_id: ids.caseA, title: "Database statement timeout regression" }
   });
   assert.equal(timeoutCreated.status, 201, "timeout-test document should be created");
