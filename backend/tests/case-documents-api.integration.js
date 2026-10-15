@@ -1686,6 +1686,11 @@ try {
   console.log("PASS: logout clears cookies, revokes session, rejects subsequent requests and blocks idempotent replay");
 
 
+  // The earlier expired-session scenario intentionally expires tokenA; restore this
+  // synthetic test-only session before the isolated crash/retry case.
+  await pool.query("update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
+    [hash(tokenA), ids.userA, ids.officeA]);
+
   // Kill a dedicated API process while a row trigger pauses the PATCH after its
   // idempotency reservation but before the document UPDATE completes. This avoids
   // depending on audit INSERT query text and proves uncommitted reservations vanish.
