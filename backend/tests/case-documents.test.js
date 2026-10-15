@@ -82,7 +82,7 @@ test("every document API route enforces office-scoped access predicates", () => 
  assert.match(list, /d\.office_id = \$1/);
  assert.match(detail, /d\.id=\$1 and d\.office_id=\$2/);
  assert.match(create, /cases where id=\$1 and office_id=\$2/);
- assert.match(update, /where id=\$\$\{v\.length-1\} and office_id=\$\$\{v\.length\}/);
+ assert.ok(update.includes('sets.join(",")') && update.includes('where id=$"+(v.length-1)+" and office_id=$"+v.length+"'), "PATCH must bind its generated SQL parameters");
  assert.match(remove, /where id=\$1 and office_id=\$2 and deleted_at is null/);
 });
 

@@ -1816,7 +1816,7 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
   v.push(req.auth.userId);sets.push("updated_by=$"+v.length);v.push(id.data,req.auth.officeId);let c;
   try{
     c=await acquireClient(pool);await c.query("begin");
-    const actor=await lockLiveDocumentActor(c,req,["owner","admin","lawyer","assistant"]);
+    const actor=await lockLiveDocumentActor(c, req, ["owner","admin","lawyer","assistant"]);
     if(!actor.ok){await rollbackQuietly(c,"update actor no longer authorized");return res.status(actor.status).json({error:actor.error});}
     if(Object.hasOwn(p.data,"confidentiality")&&!canChangeDocumentConfidentiality(actor.role)){await rollbackQuietly(c,"classification change forbidden");return res.status(403).json({error:"document_confidentiality_forbidden"});}
     const idem=await beginDocumentMutationIdempotency(c,req,key,"PATCH",id.data,fingerprint);
@@ -1849,7 +1849,7 @@ app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", 
   let c;
   try{
     c=await acquireClient(pool);await c.query("begin");
-    const actor=await lockLiveDocumentActor(c,req,["owner","admin"]);
+    const actor=await lockLiveDocumentActor(c, req, ["owner","admin"]);
     if(!actor.ok){await rollbackQuietly(c,"delete actor no longer authorized");return res.status(actor.status).json({error:actor.error});}
     const idem=await beginDocumentMutationIdempotency(c,req,key,"DELETE",id.data,fingerprint);
     if(idem.kind==="conflict"){await rollbackQuietly(c,"document DELETE idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}

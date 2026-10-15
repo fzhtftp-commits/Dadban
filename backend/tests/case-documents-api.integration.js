@@ -665,6 +665,14 @@ try {
   const deleteReplay=await request("/api/case-documents/"+deleteReplayFixture,{token:tokenA,csrf:csrfA,method:"DELETE",idempotencyKey:deleteReplayKey});
   assert.equal(deleteReplay.status,204,"retry after a lost DELETE response must replay 204 rather than 404");
   assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'",[deleteReplayFixture])).rows[0].count,1,"keyed DELETE and replay must create exactly one audit event");
+  const concurrentDeleteFixture=(await pool.query("insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Concurrent delete replay','evidence',$3,$3) returning id",[ids.officeA,ids.caseA,ids.userA])).rows[0].id;
+  const concurrentDeleteKey="delete-concurrent-key-01";
+  const concurrentDeletes=await Promise.all([
+    request("/api/case-documents/"+concurrentDeleteFixture,{token:tokenA,csrf:csrfA,method:"DELETE",idempotencyKey:concurrentDeleteKey}),
+    request("/api/case-documents/"+concurrentDeleteFixture,{token:tokenA,csrf:csrfA,method:"DELETE",idempotencyKey:concurrentDeleteKey})
+  ]);
+  assert.deepEqual(concurrentDeletes.map(result=>result.status),[204,204],"concurrent identical DELETE retries must both return 204");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'",[concurrentDeleteFixture])).rows[0].count,1,"concurrent DELETE retries must emit exactly one audit event");
   const otherDeleteFixture=(await pool.query("insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Different delete target','evidence',$3,$3) returning id",[ids.officeA,ids.caseA,ids.userA])).rows[0].id;
   const deleteKeyConflict=await request("/api/case-documents/"+otherDeleteFixture,{token:tokenA,csrf:csrfA,method:"DELETE",idempotencyKey:deleteReplayKey});
   assert.equal(deleteKeyConflict.status,409,"DELETE key must not be reused for a different target");
