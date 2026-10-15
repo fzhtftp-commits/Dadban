@@ -608,6 +608,25 @@ try {
   assert.equal(assistantConfidentialEdit.status,200,"assistant may edit confidential metadata");
   const assistantRestrictedEdit=await request(`/api/case-documents/${idsByLevel.restricted}`,{token:assistant.token,csrf:assistant.csrf,method:"PATCH",portToUse:rolePort,body:{description:"must not edit restricted metadata"}});
   assert.equal(assistantRestrictedEdit.status,404,"assistant must not edit restricted metadata");
+  assert.equal((await pool.query("select description from case_documents where id=$1",[idsByLevel.restricted])).rows[0].description,null,
+    "denied assistant update must not mutate restricted metadata");
+  for(const level of ["confidential","restricted"]){
+    for(const account of roleAccounts){
+      const result=await request(`/api/case-documents/${idsByLevel[level]}`,{
+        token:account.token,csrf:account.csrf,method:"PATCH",portToUse:rolePort,
+        body:{description:`matrix edit ${account.role} ${level}`}
+      });
+      const expected=["owner","admin","lawyer"].includes(account.role) ||
+        (account.role==="assistant"&&level==="confidential");
+      assert.equal(result.status,expected?200:(account.role==="assistant"?404:403),
+        `${account.role} edit policy for ${level}`);
+      if(!expected){
+        const stored=(await pool.query("select description from case_documents where id=$1",[idsByLevel[level]])).rows[0].description;
+        assert.notEqual(stored,`matrix edit ${account.role} ${level}`,
+          `denied ${account.role} edit must not mutate ${level} metadata`);
+      }
+    }
+  }
   for(const account of roleAccounts){
     const result=await request(`/api/case-documents/${idsByLevel.normal}`,{token:account.token,csrf:account.csrf,method:"PATCH",portToUse:rolePort,body:{description:`updated by ${account.role}`}});
     if(["owner","admin","lawyer","assistant"].includes(account.role))assert.equal(result.status,200,`${account.role} may edit normal`);
