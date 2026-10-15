@@ -345,7 +345,7 @@ const requireDocumentRole = (...allowedRoles) => (req, res, next) => {
 };
 
 const lockLiveDocumentActor = async (client, req, allowedRoles) => {
-  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 and s.revoked_at is null and s.expires_at > now() and u.is_active = true and u.deleted_at is null for update of s, u", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
+  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 and s.revoked_at is null and s.expires_at > clock_timestamp() and u.is_active = true and u.deleted_at is null for update of s, u", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
   if (!result.rowCount) return { ok: false, status: 401, error: "authentication_required" };
   if (!allowedRoles.includes(result.rows[0].role)) return { ok: false, status: 403, error: "document_role_forbidden" };
   return { ok: true, role: result.rows[0].role };
@@ -1867,6 +1867,13 @@ app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", 
 });
 
 
+app.use((error, _req, res, next) => {
+  logSafeError("Unhandled request error", error);
+  if (res.headersSent) return next(error);
+  if (error?.type === "entity.too.large") return res.status(413).json({ error: "request_too_large" });
+  if (error instanceof SyntaxError && Object.hasOwn(error, "body")) return res.status(400).json({ error: "invalid_json" });
+  return res.status(500).json({ error: "internal_server_error" });
+});
 app.use((_req, res) => {
   res.status(404).json({ error: "not_found" });
 });
