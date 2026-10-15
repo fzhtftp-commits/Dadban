@@ -478,6 +478,15 @@ app.post("/api/auth/register", requireTrustedOrigin, registerRateLimit, async (r
       [user.rows[0].id, user.rows[0].office_id, hashToken(sessionToken), hashToken(csrfToken)]
     );
 
+    await writeAuditLog(
+      client,
+      { officeId: user.rows[0].office_id, userId: user.rows[0].id },
+      "register",
+      "user",
+      user.rows[0].id,
+      req,
+      { role: user.rows[0].role }
+    );
     await client.query("commit");
     setAuthCookies(res, sessionToken, csrfToken);
 
@@ -502,9 +511,14 @@ app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, re
   if (!parsed.success) return res.status(400).json({ error: "invalid_login" });
 
   const { email, password } = parsed.data;
+  const client = await pool.connect();
+  let transactionStarted = false;
 
   try {
-    const result = await pool.query(
+    await client.query("begin");
+    transactionStarted = true;
+
+    const result = await client.query(
       `
         select u.id, u.office_id, u.full_name, u.email, u.role, c.password_hash
         from users u
@@ -518,43 +532,56 @@ app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, re
     );
 
     if (!result.rowCount || !(await verifyPassword(password, result.rows[0].password_hash))) {
+      await client.query("rollback");
+      transactionStarted = false;
       return res.status(401).json({ error: "invalid_credentials" });
     }
 
+    const account = result.rows[0];
     const sessionToken = crypto.randomBytes(32).toString("base64url");
     const csrfToken = crypto.randomBytes(32).toString("base64url");
 
-    await pool.query(
+    await client.query(
       `
         insert into auth_sessions
           (user_id, office_id, token_hash, csrf_hash, expires_at)
         values ($1,$2,$3,$4,now()+interval '8 hours')
       `,
-      [
-        result.rows[0].id,
-        result.rows[0].office_id,
-        hashToken(sessionToken),
-        hashToken(csrfToken)
-      ]
+      [account.id, account.office_id, hashToken(sessionToken), hashToken(csrfToken)]
     );
+    await writeAuditLog(
+      client,
+      { officeId: account.office_id, userId: account.id },
+      "login",
+      "user",
+      account.id,
+      req,
+      { role: account.role }
+    );
+    await client.query("commit");
+    transactionStarted = false;
 
     setAuthCookies(res, sessionToken, csrfToken);
-
     return res.json({
       data: {
         user: {
-          id: result.rows[0].id,
-          office_id: result.rows[0].office_id,
-          full_name: result.rows[0].full_name,
-          email: result.rows[0].email,
-          role: result.rows[0].role
+          id: account.id,
+          office_id: account.office_id,
+          full_name: account.full_name,
+          email: account.email,
+          role: account.role
         },
         csrf_token: csrfToken
       }
     });
   } catch (error) {
+    if (transactionStarted) {
+      try { await client.query("rollback"); } catch {}
+    }
     logSafeError("Login failed", error);
     return res.status(500).json({ error: "authentication_error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -573,12 +600,27 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
-  await pool.query(
-    "update auth_sessions set revoked_at = now() where id = $1 and revoked_at is null",
-    [req.auth.sessionId]
-  );
-  setClearAuthCookies(res);
-  return res.json({ ok: true });
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const revoked = await client.query(
+      "update auth_sessions set revoked_at = now() where id = $1 and user_id = $2 and office_id = $3 and revoked_at is null returning id",
+      [req.auth.sessionId, req.auth.userId, req.auth.officeId]
+    );
+    if (revoked.rowCount) {
+      await writeAuditLog(client, req.auth, "logout", "auth_session", revoked.rows[0].id, req);
+    }
+    await client.query("commit");
+    setClearAuthCookies(res);
+    return res.json({ ok: true });
+  } catch (error) {
+    try { await client.query("rollback"); } catch {}
+    logSafeError("Logout failed", error);
+    const failure = dbError(error);
+    return res.status(failure.status).json(failure.body);
+  } finally {
+    client.release();
+  }
 });
 
 
