@@ -1042,6 +1042,15 @@ try {
     }
     throw new Error("Timed out waiting for role-race heartbeat trigger");
   };
+  const waitForActorLockWait = async () => {
+    const deadline=Date.now()+5000;
+    while(Date.now()<deadline){
+      const waiting=await pool.query("select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select s.id, u.role from auth_sessions%'");
+      if(waiting.rows[0].count>0)return;
+      await delay(10);
+    }
+    throw new Error("Timed out waiting for document actor row lock");
+  };
   try {
     for (const read of [
       {label:"list",path:"/api/case-documents"},
@@ -1101,6 +1110,32 @@ try {
     assert.equal(downgradedDelete.status, 403, "DELETE must reject an admin downgraded after authentication");
     assert.equal((await pool.query("select deleted_at from case_documents where id=$1", [adminDocument])).rows[0].deleted_at, null, "role downgrade race must not soft-delete metadata");
     await pool.query("update users set role='admin' where id=$1", [roleRaceAdmin.id]);
+
+    // A session can expire while actor-row locking waits; expiry must be rechecked after locks are acquired.
+    const expiryBlocker = await pool.connect();
+    let pendingExpiryPatch;
+    try {
+      await expiryBlocker.query("begin");
+      await expiryBlocker.query("select id from users where id=$1 for update", [roleRaceLawyer.id]);
+      await pool.query("update auth_sessions set expires_at=clock_timestamp()+interval '2 seconds' where token_hash=$1", [lawyerTokenHash]);
+      const expiryTitle = (await pool.query("select title from case_documents where id=$1", [idsByLevel.normal])).rows[0].title;
+      const expiryAuditCount = (await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1", [idsByLevel.normal])).rows[0].count;
+      pendingExpiryPatch = request("/api/case-documents/" + idsByLevel.normal, { token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "PATCH", portToUse: rolePort, body: { title: "must not update after expiry while waiting for lock" } });
+      await waitForRoleHeartbeat();
+      await waitForActorLockWait();
+      await delay(2200);
+      await expiryBlocker.query("commit");
+      const expiredWhileWaiting = await pendingExpiryPatch;
+      assert.equal(expiredWhileWaiting.status, 401, "write must reject a session that expires while actor row locks are waiting");
+      assert.deepEqual(expiredWhileWaiting.body, { error: "authentication_required" });
+      assert.equal((await pool.query("select title from case_documents where id=$1", [idsByLevel.normal])).rows[0].title, expiryTitle, "expired session must not mutate document metadata");
+      assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1", [idsByLevel.normal])).rows[0].count, expiryAuditCount, "expired request must not add an audit event");
+    } finally {
+      await expiryBlocker.query("rollback").catch(()=>{});
+      expiryBlocker.release();
+      if (pendingExpiryPatch) await pendingExpiryPatch.catch(()=>{});
+      await pool.query("update auth_sessions set expires_at=clock_timestamp()+interval '1 hour' where token_hash=$1", [lawyerTokenHash]);
+    }
   } finally {
     await pool.query("drop trigger delay_lawyer_session_heartbeat_trigger on auth_sessions").catch(()=>{});
     await pool.query("drop function delay_lawyer_session_heartbeat()").catch(()=>{});
