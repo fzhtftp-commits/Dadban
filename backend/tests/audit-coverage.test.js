@@ -26,14 +26,15 @@ test("every state-changing API route audits before commit", () => {
   assert.equal(writes.length, 18, "all auth, session, and resource mutation routes should be covered");
 
   for (const route of writes) {
+    const routeName = route.method + " " + route.path;
     const auditAt = route.body.indexOf("writeAuditLog(");
     const commitPositions = [...route.body.matchAll(/query\(["']commit["']\)/g)].map(match => match.index);
-    assert.notEqual(auditAt, -1, \`\${route.method} \${route.path} must write an audit row for its mutation path\`);
-    assert.ok(commitPositions.length > 0, \`\${route.method} \${route.path} must commit its transaction\`);
+    assert.notEqual(auditAt, -1, routeName + " must write an audit row for its mutation path");
+    assert.ok(commitPositions.length > 0, routeName + " must commit its transaction");
     assert.ok(commitPositions.some(position => position > auditAt),
-      \`\${route.method} \${route.path} must write the audit row before committing the mutation\`);
+      routeName + " must write the audit row before committing the mutation");
     assert.ok(/query\(["']begin["']\)/.test(route.body),
-      \`\${route.method} \${route.path} must start a transaction\`);
+      routeName + " must start a transaction");
   }
 });
 
@@ -51,14 +52,15 @@ test("audit metadata must not serialize request payloads or secrets", () => {
 
 test("audit-write failures must take the mutation route's rollback path", () => {
   for (const route of mutationRoutes()) {
+    const routeName = route.method + " " + route.path;
     const auditAt = route.body.indexOf("writeAuditLog(");
-    assert.notEqual(auditAt, -1, \`\${route.method} \${route.path} must contain an audit write\`);
+    assert.notEqual(auditAt, -1, routeName + " must contain an audit write");
 
     const catchAt = route.body.indexOf("catch", auditAt);
-    assert.notEqual(catchAt, -1, \`\${route.method} \${route.path} must catch audit-write errors\`);
+    assert.notEqual(catchAt, -1, routeName + " must catch audit-write errors");
     const finallyAt = route.body.indexOf("finally", catchAt);
     const catchBody = route.body.slice(catchAt, finallyAt === -1 ? undefined : finallyAt);
     assert.match(catchBody, /rollbackQuietly\s*\(|query\(["']rollback["']\)/,
-      \`\${route.method} \${route.path} must roll back when the audit write fails\`);
+      routeName + " must roll back when the audit write fails");
   }
 });
