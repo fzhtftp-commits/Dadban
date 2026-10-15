@@ -599,6 +599,17 @@ try {
   const deniedCreate=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:"Denied restricted assistant create",confidentiality:"restricted"}});
   assert.equal(deniedCreate.status,403);assert.deepEqual(deniedCreate.body,{error:"document_confidentiality_forbidden"});
   assert.equal((await pool.query("select count(*)::int as count from case_documents where title='Denied restricted assistant create'")).rows[0].count,0);
+  const replayKey="assistant-confidential-replay-01";
+  const replayCreate=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,idempotencyKey:replayKey,body:{case_id:ids.caseA,title:"Replay becomes restricted",confidentiality:"confidential"}});
+  assert.equal(replayCreate.status,201,"assistant can initially create confidential document");
+  const replayDocId=replayCreate.body.data.id;
+  const elevateReplayDoc=await request(`/api/case-documents/${replayDocId}`,{token:tokenA,csrf:csrfA,method:"PATCH",portToUse:rolePort,body:{confidentiality:"restricted"}});
+  assert.equal(elevateReplayDoc.status,200,"owner can elevate document classification");
+  const deniedReplay=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,idempotencyKey:replayKey,body:{case_id:ids.caseA,title:"Replay becomes restricted",confidentiality:"confidential"}});
+  assert.equal(deniedReplay.status,404,"idempotency replay must not bypass restricted read policy");
+  assert.deepEqual(deniedReplay.body,{error:"document_not_found"});
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1",[replayDocId])).rows[0].confidentiality,"restricted",
+    "denied idempotency replay must not change classification");
   const assistantConfidentialCreate=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:"Assistant confidential create allowed",confidentiality:"confidential"}});
   assert.equal(assistantConfidentialCreate.status,201,"assistant may create confidential documents");
   const lawyer=roleAccounts.find(a=>a.role==="lawyer");

@@ -1653,9 +1653,14 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
      if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
      const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,d.confidentiality,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
      if(!q.rowCount && idempotencyKey){
-       const existing=await c.query("select id,request_fingerprint,deleted_at from case_documents where office_id=$1 and created_by=$2 and idempotency_key=$3",[req.auth.officeId,req.auth.userId,idempotencyKey]);
+       const existing=await c.query("select id,request_fingerprint,deleted_at,confidentiality from case_documents where office_id=$1 and created_by=$2 and idempotency_key=$3",[req.auth.officeId,req.auth.userId,idempotencyKey]);
        if(existing.rowCount && existing.rows[0].request_fingerprint===fingerprint && !existing.rows[0].deleted_at){
-         const replay=await c.query("select id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at from case_documents where id=$1",[existing.rows[0].id]);
+         if(!canReadCaseDocument(req.auth.role,existing.rows[0].confidentiality)){
+           await rollbackQuietly(c,"idempotency replay access denied");
+           return documentAccessDenied(res);
+         }
+         const replay=await c.query("select id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at from case_documents where id=$1 and office_id=$2 and deleted_at is null",[existing.rows[0].id,req.auth.officeId]);
+         if(!replay.rowCount){await rollbackQuietly(c,"idempotency replay document missing");return documentAccessDenied(res);}
          await c.query("commit");return res.status(200).json({data:replay.rows[0],idempotent_replay:true});
        }
        await rollbackQuietly(c,"idempotency key conflict");return res.status(409).json({error:"idempotency_key_reused"});
