@@ -130,7 +130,7 @@ test("rate limiter expires stale keys and caps per-process key storage", () => {
 
 test("logout revokes server-side session and clears both auth cookies", () => {
  assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant"\), requireTrustedOrigin, requireCsrf/);
- assert.match(server, /update auth_sessions set revoked_at = now\(\) where id = \$1 and revoked_at is null/);
+ assert.match(server, /update auth_sessions set revoked_at = now\(\) where id = \$1 and user_id = \$2 and office_id = \$3 and revoked_at is null returning id/);
  assert.match(server, /setClearAuthCookies\(res\)/);
  assert.match(server, /s\.revoked_at is null/);
  assert.match(server, /s\.expires_at > now\(\)/);
