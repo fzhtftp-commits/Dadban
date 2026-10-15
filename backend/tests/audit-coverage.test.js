@@ -38,6 +38,43 @@ test("every state-changing API route audits before commit", () => {
   }
 });
 
+test("protected resource read routes constrain results to the authenticated office", () => {
+  const protectedReads = routeBlocks().filter(({ method, path }) =>
+    method === "GET" && /^\\/api\\/(dashboard|clients(?:\\/|$)|cases(?:\\/|$)|hearings(?:\\/|$)|actions(?:\\/|$)|case-documents(?:\\/|$))/.test(path)
+  );
+  const expected = [
+    "GET /api/dashboard",
+    "GET /api/clients",
+    "GET /api/clients/lookup",
+    "GET /api/clients/:id",
+    "GET /api/cases",
+    "GET /api/cases/:id",
+    "GET /api/hearings",
+    "GET /api/hearings/:id",
+    "GET /api/actions/assignees",
+    "GET /api/actions",
+    "GET /api/actions/:id",
+    "GET /api/case-documents",
+    "GET /api/case-documents/:id"
+  ];
+  assert.deepEqual(protectedReads.map(route => route.method + " " + route.path), expected);
+  for (const route of protectedReads) {
+    const routeName = route.method + " " + route.path;
+    assert.match(route.body, /req\\.auth\\.officeId/, routeName + " must derive its office from authenticated context");
+    assert.match(route.body, /(?:[a-z]\\.)?office_id\\s*=\\s*\\$[12]/i,
+      routeName + " must include a parameterized office_id predicate");
+  }
+  for (const route of protectedReads.filter(route => /\\/api\\/(?:dashboard|cases|hearings|actions|case-documents)/.test(route.path))) {
+    const routeName = route.method + " " + route.path;
+    if (/join clients cl/.test(route.body)) {
+      assert.match(route.body, /cl\\.office_id\\s*=\\s*c\\.office_id/, routeName + " must join clients within the case office");
+    }
+    if (/join cases c/.test(route.body)) {
+      assert.match(route.body, /c\\.office_id\\s*=\\s*[had]\\.office_id/, routeName + " must join related records within the same office");
+    }
+  }
+});
+
 test("audit metadata must not serialize request payloads or secrets", () => {
   const calls = [...source.matchAll(/writeAuditLog\(([\s\S]*?)\);/g)].map(match => match[1]);
   assert.ok(calls.length >= 18, "expected audit calls for all state-changing API routes");
