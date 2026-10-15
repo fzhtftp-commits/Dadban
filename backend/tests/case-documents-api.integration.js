@@ -106,8 +106,8 @@ try {
       national_id text, birth_date date, occupation text, company_name text,
       national_company_id text, registration_no text, mobile text, phone text,
       email text, source text, address text, notes text,
-      status text not null default 'active', created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now(), deleted_at timestamptz,
+      status text not null default 'active', created_by uuid, updated_by uuid,
+      created_at timestamptz not null default now(), updated_at timestamptz not null default now(), deleted_at timestamptz,
       unique (id, office_id)
     );
     create table cases (
@@ -115,7 +115,7 @@ try {
       client_id uuid not null, case_number text not null, title text not null,
       case_type text, court_name text, branch_name text, opposing_party text,
       status text not null default 'active', priority text, filing_date date,
-      next_hearing_at timestamptz, description text, notes text,
+      next_hearing_at timestamptz, description text, notes text, created_by uuid, updated_by uuid,
       created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
       deleted_at timestamptz, unique (id, office_id)
     );
@@ -123,14 +123,14 @@ try {
       id uuid primary key, office_id uuid not null references offices(id),
       case_id uuid not null, hearing_at timestamptz not null, hearing_type text,
       court_name text, branch_name text, status text not null default 'scheduled',
-      reminder_minutes integer, notes text, created_at timestamptz not null default now(),
+      reminder_minutes integer, notes text, created_by uuid, updated_by uuid, created_at timestamptz not null default now(),
       updated_at timestamptz not null default now(), deleted_at timestamptz
     );
     create table case_actions (
       id uuid primary key, office_id uuid not null references offices(id),
       case_id uuid not null, title text not null, description text, due_at timestamptz,
       status text not null default 'todo', priority text, assigned_to uuid,
-      completed_at timestamptz, created_at timestamptz not null default now(),
+      completed_at timestamptz, created_by uuid, updated_by uuid, created_at timestamptz not null default now(),
       updated_at timestamptz not null default now(), deleted_at timestamptz
     );
     create table auth_sessions (
@@ -442,6 +442,102 @@ try {
   assert.equal(assigneesB.status, 200);
   assert.ok(assigneesB.body.data.some(row => row.id === ids.userB), "office B assignee list must include its own user");
   assert.equal(assigneesB.body.data.some(row => row.id === ids.userA), false, "office B assignee list must hide office A users");
+
+  // Write-path isolation is distinct from the read/list coverage above. Exercise the
+  // real HTTP handlers and assert both rejection status and persisted state.
+  const forgedClientCreate = await request("/api/clients", {
+    token: tokenB, csrf: csrfB, method: "POST",
+    body: { client_type: "individual", full_name: "Office B Created Client", national_id: "1122334455", office_id: ids.officeA }
+  });
+  assert.equal(forgedClientCreate.status, 201, "client creation should derive tenant from authenticated session");
+  assert.equal(forgedClientCreate.body.data.office_id, ids.officeB, "client payload must not override authenticated office");
+  const clientCrossPatch = await request("/api/clients/" + clientA, {
+    token: tokenB, csrf: csrfB, method: "PATCH", body: { full_name: "Cross-office tamper" }
+  });
+  assert.equal(clientCrossPatch.status, 404, "cross-office client update must return not found");
+  const clientCrossDelete = await request("/api/clients/" + clientA, {
+    token: tokenB, csrf: csrfB, method: "DELETE"
+  });
+  assert.equal(clientCrossDelete.status, 404, "cross-office client delete must return not found");
+  const clientAfterWriteAttempts = await pool.query("select full_name, deleted_at from clients where id=$1", [clientA]);
+  assert.equal(clientAfterWriteAttempts.rows[0].full_name, "Client A", "cross-office client update must not mutate data");
+  assert.equal(clientAfterWriteAttempts.rows[0].deleted_at, null, "cross-office client delete must not soft-delete data");
+
+  const caseForeignClientCreate = await request("/api/cases", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { client_id: clientB, case_number: "A-FOREIGN", title: "Foreign client case" }
+  });
+  assert.equal(caseForeignClientCreate.status, 400, "case creation must reject a client from another office");
+  const caseForeignClientPatch = await request("/api/cases/" + ids.caseA, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { client_id: clientB }
+  });
+  assert.equal(caseForeignClientPatch.status, 400, "case update must reject reassignment to another office's client");
+  const caseCrossPatch = await request("/api/cases/" + ids.caseA, {
+    token: tokenB, csrf: csrfB, method: "PATCH", body: { title: "Cross-office tamper" }
+  });
+  assert.equal(caseCrossPatch.status, 404, "cross-office case update must return not found");
+  const caseCrossDelete = await request("/api/cases/" + ids.caseA, {
+    token: tokenB, csrf: csrfB, method: "DELETE"
+  });
+  assert.equal(caseCrossDelete.status, 404, "cross-office case delete must return not found");
+  const caseAfterWriteAttempts = await pool.query("select title, client_id, deleted_at from cases where id=$1", [ids.caseA]);
+  assert.equal(caseAfterWriteAttempts.rows[0].title, "Case A", "cross-office case update must not mutate data");
+  assert.equal(caseAfterWriteAttempts.rows[0].client_id, clientA, "invalid client reassignment must not change the case link");
+  assert.equal(caseAfterWriteAttempts.rows[0].deleted_at, null, "cross-office case delete must not soft-delete data");
+
+  const hearingForeignCaseCreate = await request("/api/hearings", {
+    token: tokenA, csrf: csrfA, method: "POST",
+    body: { case_id: ids.caseB, hearing_at: new Date(Date.now() + 86400000).toISOString(), hearing_type: "trial" }
+  });
+  assert.equal(hearingForeignCaseCreate.status, 400, "hearing creation must reject a case from another office");
+  const hearingForeignCasePatch = await request("/api/hearings/" + hearingA, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: ids.caseB }
+  });
+  assert.equal(hearingForeignCasePatch.status, 400, "hearing update must reject reassignment to another office's case");
+  const hearingCrossPatch = await request("/api/hearings/" + hearingA, {
+    token: tokenB, csrf: csrfB, method: "PATCH", body: { notes: "Cross-office tamper" }
+  });
+  assert.equal(hearingCrossPatch.status, 404, "cross-office hearing update must return not found");
+  const hearingCrossDelete = await request("/api/hearings/" + hearingA, {
+    token: tokenB, csrf: csrfB, method: "DELETE"
+  });
+  assert.equal(hearingCrossDelete.status, 404, "cross-office hearing delete must return not found");
+  const hearingAfterWriteAttempts = await pool.query("select case_id, notes, deleted_at from hearings where id=$1", [hearingA]);
+  assert.equal(hearingAfterWriteAttempts.rows[0].case_id, ids.caseA, "invalid hearing reassignment must not change its case link");
+  assert.equal(hearingAfterWriteAttempts.rows[0].notes, null, "cross-office hearing update must not mutate data");
+  assert.equal(hearingAfterWriteAttempts.rows[0].deleted_at, null, "cross-office hearing delete must not soft-delete data");
+
+  const actionForeignCaseCreate = await request("/api/actions", {
+    token: tokenA, csrf: csrfA, method: "POST", body: { case_id: ids.caseB, title: "Foreign case action" }
+  });
+  assert.equal(actionForeignCaseCreate.status, 400, "action creation must reject a case from another office");
+  const actionForeignAssigneeCreate = await request("/api/actions", {
+    token: tokenA, csrf: csrfA, method: "POST", body: { case_id: ids.caseA, title: "Foreign assignee action", assigned_to: ids.userB }
+  });
+  assert.equal(actionForeignAssigneeCreate.status, 400, "action creation must reject an assignee from another office");
+  const actionForeignCasePatch = await request("/api/actions/" + actionA, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: ids.caseB }
+  });
+  assert.equal(actionForeignCasePatch.status, 400, "action update must reject reassignment to another office's case");
+  const actionForeignAssigneePatch = await request("/api/actions/" + actionA, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { assigned_to: ids.userB }
+  });
+  assert.equal(actionForeignAssigneePatch.status, 400, "action update must reject an assignee from another office");
+  const actionCrossPatch = await request("/api/actions/" + actionA, {
+    token: tokenB, csrf: csrfB, method: "PATCH", body: { title: "Cross-office tamper" }
+  });
+  assert.equal(actionCrossPatch.status, 404, "cross-office action update must return not found");
+  const actionCrossDelete = await request("/api/actions/" + actionA, {
+    token: tokenB, csrf: csrfB, method: "DELETE"
+  });
+  assert.equal(actionCrossDelete.status, 404, "cross-office action delete must return not found");
+  const actionAfterWriteAttempts = await pool.query("select case_id, title, assigned_to, deleted_at from case_actions where id=$1", [actionA]);
+  assert.equal(actionAfterWriteAttempts.rows[0].case_id, ids.caseA, "invalid action reassignment must not change its case link");
+  assert.equal(actionAfterWriteAttempts.rows[0].title, "Action A", "cross-office action update must not mutate data");
+  assert.equal(actionAfterWriteAttempts.rows[0].assigned_to, ids.userA, "invalid assignee assignment must not change the assignee");
+  assert.equal(actionAfterWriteAttempts.rows[0].deleted_at, null, "cross-office action delete must not soft-delete data");
+  console.log("PASS: cross-office HTTP mutation isolation for clients, cases, hearings and actions");
+
   console.log("PASS: cross-office HTTP isolation for clients, cases, hearings, actions and assignees");
 
   const createAudit = await pool.query("select action, entity_id from audit_logs where entity_type='case_document' and entity_id=$1", [documentId]);
