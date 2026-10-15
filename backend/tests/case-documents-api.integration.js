@@ -618,20 +618,19 @@ try {
   assert.equal(concurrentAudit.rows[0].count, 1, "concurrent retry must create exactly one audit event");
   // Transient PostgreSQL errors are retryable only after the write transaction is confirmed rolled back.
   const retryPrincipal = roleAccounts[1];
+  const retryCreatePrincipal = roleAccounts[3];
   const retryCreateKey = "transient-create-retry-01";
-  const retryCreatePayload = { case_id: ids.caseA, title: "Transient create retry", document_type: "evidence" };
-  const retryUpdateFixture = await request("/api/case-documents", { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "POST", body: { case_id: ids.caseA, title: "Before transient update", document_type: "evidence" } });
-  assert.equal(retryUpdateFixture.status, 201);
-  const retryUpdateId = retryUpdateFixture.body.data.id;
-  const retryConfidentialityFixture = await request("/api/case-documents", { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "POST", body: { case_id: ids.caseA, title: "Transient confidentiality retry", document_type: "evidence", confidentiality: "normal" } });
-  assert.equal(retryConfidentialityFixture.status, 201);
-  const retryConfidentialityId = retryConfidentialityFixture.body.data.id;
-  const retryDeleteFixture = await request("/api/case-documents", { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "POST", body: { case_id: ids.caseA, title: "Transient delete retry", document_type: "evidence" } });
-  assert.equal(retryDeleteFixture.status, 201);
-  const retryDeleteId = retryDeleteFixture.body.data.id;
+  const retryCreatePayload = { case_id: ids.caseA, title: "Transient create retry", document_type: "evidence", confidentiality: "normal" };
+  const insertRetryFixture = async (title, confidentiality = "normal") => {
+    const result = await pool.query("insert into case_documents(office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'evidence',$4,$5,$5) returning id", [ids.officeA, ids.caseA, title, confidentiality, ids.userA]);
+    return result.rows[0].id;
+  };
+  const retryUpdateId = await insertRetryFixture("Before transient update");
+  const retryConfidentialityId = await insertRetryFixture("Transient confidentiality retry");
+  const retryDeleteId = await insertRetryFixture("Transient delete retry");
   await pool.query("create or replace function fail_transient_document_mutations() returns trigger language plpgsql as $fn$ begin if TG_OP = 'INSERT' and NEW.title = 'Transient create retry' then raise exception 'simulated deadlock' using errcode = '40P01'; end if; if TG_OP = 'UPDATE' and NEW.title = 'Transient update retry' then raise exception 'simulated lock timeout' using errcode = '55P03'; end if; if TG_OP = 'UPDATE' and OLD.title = 'Transient confidentiality retry' and NEW.confidentiality = 'restricted' and OLD.confidentiality is distinct from NEW.confidentiality then raise exception 'simulated statement timeout' using errcode = '57014'; end if; if TG_OP = 'UPDATE' and OLD.title = 'Transient delete retry' and NEW.deleted_at is not null and OLD.deleted_at is null then raise exception 'simulated serialization failure' using errcode = '40001'; end if; return NEW; end; $fn$");
   await pool.query("create trigger fail_transient_document_mutations_trigger before insert or update on case_documents for each row execute function fail_transient_document_mutations()");
-  const transientCreateFailed = await request("/api/case-documents", { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload });
+  const transientCreateFailed = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload });
   assert.equal(transientCreateFailed.status, 503, "deadlock with confirmed rollback should be explicitly retryable");
   assert.deepEqual(transientCreateFailed.body, { error: "database_retryable" });
   assert.equal((await pool.query("select count(*)::int as count from case_documents where title=$1", [retryCreatePayload.title])).rows[0].count, 0, "deadlocked create must roll back its document and idempotency key");
@@ -653,7 +652,7 @@ try {
   }
   await pool.query("drop trigger fail_transient_document_mutations_trigger on case_documents");
   await pool.query("drop function fail_transient_document_mutations()");
-  const transientCreateRetried = await request("/api/case-documents", { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload });
+  const transientCreateRetried = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload });
   assert.equal(transientCreateRetried.status, 201, "same idempotency key must succeed after deadlock rollback");
   assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [transientCreateRetried.body.data.id])).rows[0].count, 1, "retried create must have exactly one audit event");
   const transientUpdateRetried = await request("/api/case-documents/" + retryUpdateId, { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "PATCH", body: transientUpdateBody });
