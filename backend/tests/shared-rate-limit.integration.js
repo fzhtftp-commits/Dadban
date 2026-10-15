@@ -82,6 +82,48 @@ try {
   assert.equal(ipv6Results.filter(x => x.status === 429).length, 1,
     "equivalent IPv6 representations must share a bucket");
 
+  // Exercise the actual runtime role, not the PostgreSQL superuser used to
+  // provision the disposable CI database.
+  const roleCheck = await poolA.query(`
+    SELECT r.rolsuper,
+      has_schema_privilege(current_user, 'public', 'USAGE') AS schema_usage,
+      has_table_privilege(current_user, 'public.rate_limit_counters', 'SELECT') AS can_select,
+      has_table_privilege(current_user, 'public.rate_limit_counters', 'INSERT') AS can_insert,
+      has_table_privilege(current_user, 'public.rate_limit_counters', 'UPDATE') AS can_update,
+      has_table_privilege(current_user, 'public.rate_limit_counters', 'DELETE') AS can_delete,
+      has_table_privilege(current_user, 'public.rate_limit_counters', 'TRUNCATE') AS can_truncate,
+      has_table_privilege(current_user, 'public.rate_limit_counters', 'REFERENCES') AS can_reference,
+      has_table_privilege(current_user, 'public.rate_limit_counters', 'TRIGGER') AS can_trigger
+    FROM pg_roles r WHERE r.rolname = current_user
+  `);
+  assert.equal(roleCheck.rows[0].rolsuper, false, "rate-limit integration must not run as a superuser");
+  assert.equal(roleCheck.rows[0].schema_usage, true);
+  for (const privilege of ["can_select", "can_insert", "can_update", "can_delete"]) {
+    assert.equal(roleCheck.rows[0][privilege], true, `runtime role requires ${privilege}`);
+  }
+  for (const privilege of ["can_truncate", "can_reference", "can_trigger"]) {
+    assert.equal(roleCheck.rows[0][privilege], false, `runtime role must not have ${privilege}`);
+  }
+
+  // IPv4-mapped IPv6 must share the same counter bucket as its IPv4 address.
+  await poolA.query("DELETE FROM public.rate_limit_counters");
+  const mappedA = createPostgresRateLimiter(poolA, {
+    secret, bucket: "register", maxRequests: 2, cleanupIntervalMs: 60_000
+  });
+  const mappedB = createPostgresRateLimiter(poolB, {
+    secret, bucket: "register", maxRequests: 2, cleanupIntervalMs: 60_000
+  });
+  const mappedResults = await Promise.all([
+    invoke(mappedA, "192.0.2.123"),
+    invoke(mappedB, "::ffff:192.0.2.123"),
+    invoke(mappedA, "::ffff:c000:027b")
+  ]);
+  assert.equal(mappedResults.filter(x => x.status === 200).length, 2);
+  assert.equal(mappedResults.filter(x => x.status === 429).length, 1,
+    "IPv4 and IPv4-mapped IPv6 representations must share a bucket");
+  const mappedRows = await poolA.query("SELECT count(*)::integer AS n FROM public.rate_limit_counters");
+  assert.equal(mappedRows.rows[0].n, 1, "mapped and IPv4 requests must produce one digest row");
+
   // Cleanup is bounded to one batch of 500 even when more rows have expired.
   await poolA.query("DELETE FROM public.rate_limit_counters");
   await poolA.query(`
