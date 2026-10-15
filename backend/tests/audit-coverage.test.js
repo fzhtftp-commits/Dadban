@@ -61,7 +61,8 @@ test("audit metadata excludes case content and direct identifiers", () => {
 });
 
 test("last_seen_at is scoped operational telemetry, not a business audit event", () => {
-  assert.match(source, /update auth_sessions set last_seen_at = now\(\) where id = \$1 and user_id = \$2 and office_id = \$3 and revoked_at is null/);
+  assert.match(source, /update auth_sessions set last_seen_at = now\(\) where id = \$1 and user_id = \$2 and office_id = \$3 and revoked_at is null returning id/);
+  assert.match(source, /if \(!activity\.rowCount\) return res\.status\(401\)/);
   assert.match(source, /\[req\.auth\.sessionId, req\.auth\.userId, req\.auth\.officeId\]/);
   const authBlock = source.slice(source.indexOf("const requireAuth ="), source.indexOf("const requireDocumentRole ="));
   assert.match(authBlock, /Activity heartbeat is operational telemetry/);
