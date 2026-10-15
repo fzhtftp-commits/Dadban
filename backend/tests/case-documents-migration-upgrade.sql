@@ -5,6 +5,7 @@
 \ir ../../database/migrations/20261014_case_actions.sql
 \ir ../migrations/004_case_documents_metadata.sql
 \ir ../migrations/005_shared_rate_limits.sql
+\ir ../migrations/006_case_document_mutation_idempotency.sql
 
 DO $catalog$
 DECLARE cols text[]; status_check text; constraint_names text[];
@@ -295,3 +296,29 @@ BEGIN
   END IF;
 END
 $rate_limit_catalog$;
+
+DO $mutation_idempotency_catalog$
+DECLARE cols text[];
+BEGIN
+  SELECT array_agg(a.attname::text ORDER BY a.attnum) INTO cols
+  FROM pg_attribute a
+  WHERE a.attrelid='public.case_document_mutation_idempotency'::regclass
+    AND a.attnum>0 AND NOT a.attisdropped;
+  IF cols IS DISTINCT FROM ARRAY[
+    'office_id','user_id','idempotency_key','operation','entity_id',
+    'request_fingerprint','response_status','created_at'
+  ]::text[] THEN
+    RAISE EXCEPTION 'Unexpected mutation idempotency column inventory: %', cols;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='public.case_document_mutation_idempotency'::regclass
+      AND conname='case_document_mutation_idempotency_pkey' AND contype='p'
+  ) THEN RAISE EXCEPTION 'Mutation idempotency primary key missing'; END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='public.case_document_mutation_idempotency'::regclass
+      AND contype='f' AND convalidated
+  ) THEN RAISE EXCEPTION 'Mutation idempotency office/user FK missing'; END IF;
+END
+$mutation_idempotency_catalog$;

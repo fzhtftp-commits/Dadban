@@ -84,6 +84,7 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
 try {
   // This script is only permitted to reset its dedicated, disposable localhost test DB.
   await pool.query(`
+    drop table if exists case_document_mutation_idempotency cascade;
     drop table if exists case_documents cascade;
     drop table if exists audit_logs cascade;
     drop table if exists auth_sessions cascade;
@@ -151,6 +152,8 @@ try {
 
   const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
   await pool.query(migration);
+  const mutationIdempotencyMigration = await readFile(new URL("../migrations/006_case_document_mutation_idempotency.sql", import.meta.url), "utf8");
+  await pool.query(mutationIdempotencyMigration);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
@@ -618,6 +621,57 @@ try {
     [concurrentCreates[0].body.data.id]
   );
   assert.equal(concurrentAudit.rows[0].count, 1, "concurrent retry must create exactly one audit event");
+  // Discarding the first committed response models a network loss after commit.
+  const patchReplayFixture=(await pool.query("insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Before idempotent PATCH','evidence',$3,$3) returning id",[ids.officeA,ids.caseA,ids.userA])).rows[0].id;
+  const patchReplayKey="patch-replay-key-0001",patchReplayPayload={title:"After idempotent PATCH"};
+  const discardedPatchResponse=await request("/api/case-documents/"+patchReplayFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:patchReplayKey,body:patchReplayPayload});
+  assert.equal(discardedPatchResponse.status,200,"first keyed PATCH must commit");
+  const patchReplay=await request("/api/case-documents/"+patchReplayFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:patchReplayKey,body:patchReplayPayload});
+  assert.equal(patchReplay.status,200,"retry after a lost PATCH response must replay successfully");
+  assert.equal(patchReplay.body.data.title,"After idempotent PATCH");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'",[patchReplayFixture])).rows[0].count,1,"lost-response PATCH retry must leave exactly one audit event");
+  const patchKeyConflict=await request("/api/case-documents/"+patchReplayFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:patchReplayKey,body:{title:"Different payload must conflict"}});
+  assert.equal(patchKeyConflict.status,409,"same PATCH key with a different payload must conflict");
+  assert.deepEqual(patchKeyConflict.body,{error:"idempotency_key_reused"});
+  assert.equal((await pool.query("select title from case_documents where id=$1",[patchReplayFixture])).rows[0].title,"After idempotent PATCH","conflicting payload must not mutate the document");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'",[patchReplayFixture])).rows[0].count,1,"conflicting PATCH must not add an audit event");
+
+  const concurrentPatchFixture=(await pool.query("insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Before concurrent keyed PATCH','evidence',$3,$3) returning id",[ids.officeA,ids.caseA,ids.userA])).rows[0].id;
+  const concurrentPatchKey="patch-concurrent-key-01",concurrentPatchPayload={title:"Concurrent keyed PATCH"};
+  const concurrentPatches=await Promise.all([
+    request("/api/case-documents/"+concurrentPatchFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:concurrentPatchKey,body:concurrentPatchPayload}),
+    request("/api/case-documents/"+concurrentPatchFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:concurrentPatchKey,body:concurrentPatchPayload})
+  ]);
+  assert.deepEqual(concurrentPatches.map(result=>result.status),[200,200],"concurrent identical PATCH requests must both succeed");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'",[concurrentPatchFixture])).rows[0].count,1,"concurrent keyed PATCH must emit exactly one audit event");
+
+  const classificationReplayFixture=(await pool.query("insert into case_documents(office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,'Before keyed classification','evidence','normal',$3,$3) returning id",[ids.officeA,ids.caseA,ids.userA])).rows[0].id;
+  const classificationReplayKey="classification-replay-01",classificationPayload={confidentiality:"confidential"};
+  const classificationFirst=await request("/api/case-documents/"+classificationReplayFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:classificationReplayKey,body:classificationPayload});
+  assert.equal(classificationFirst.status,200,"first keyed confidentiality change must succeed");
+  const classificationReplay=await request("/api/case-documents/"+classificationReplayFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:classificationReplayKey,body:classificationPayload});
+  assert.equal(classificationReplay.status,200,"same confidentiality request must replay");
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1",[classificationReplayFixture])).rows[0].confidentiality,"confidential");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' and metadata ? 'confidentiality_change'",[classificationReplayFixture])).rows[0].count,1,"idempotent confidentiality change must create exactly one transition audit");
+  const classificationConflict=await request("/api/case-documents/"+classificationReplayFixture,{token:tokenA,csrf:csrfA,method:"PATCH",idempotencyKey:classificationReplayKey,body:{confidentiality:"restricted"}});
+  assert.equal(classificationConflict.status,409,"same key with different confidentiality must conflict");
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1",[classificationReplayFixture])).rows[0].confidentiality,"confidential","conflicting classification must not mutate the document");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'",[classificationReplayFixture])).rows[0].count,1,"conflicting classification must not add audit rows");
+
+  const deleteReplayFixture=(await pool.query("insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Delete replay fixture','evidence',$3,$3) returning id",[ids.officeA,ids.caseA,ids.userA])).rows[0].id;
+  const deleteReplayKey="delete-replay-key-01";
+  const deleteFirst=await request("/api/case-documents/"+deleteReplayFixture,{token:tokenA,csrf:csrfA,method:"DELETE",idempotencyKey:deleteReplayKey});
+  assert.equal(deleteFirst.status,204,"first keyed DELETE must succeed");
+  const deleteReplay=await request("/api/case-documents/"+deleteReplayFixture,{token:tokenA,csrf:csrfA,method:"DELETE",idempotencyKey:deleteReplayKey});
+  assert.equal(deleteReplay.status,204,"retry after a lost DELETE response must replay 204 rather than 404");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'",[deleteReplayFixture])).rows[0].count,1,"keyed DELETE and replay must create exactly one audit event");
+  const otherDeleteFixture=(await pool.query("insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Different delete target','evidence',$3,$3) returning id",[ids.officeA,ids.caseA,ids.userA])).rows[0].id;
+  const deleteKeyConflict=await request("/api/case-documents/"+otherDeleteFixture,{token:tokenA,csrf:csrfA,method:"DELETE",idempotencyKey:deleteReplayKey});
+  assert.equal(deleteKeyConflict.status,409,"DELETE key must not be reused for a different target");
+  assert.equal((await pool.query("select deleted_at from case_documents where id=$1",[otherDeleteFixture])).rows[0].deleted_at,null,"conflicting DELETE must not mutate a different document");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'",[otherDeleteFixture])).rows[0].count,0,"conflicting DELETE must not add an audit event");
+  console.log("PASS: keyed PATCH/classification/DELETE retries, payload conflicts and exact-once audit");
+
   // Transient PostgreSQL errors are retryable only after the write transaction is confirmed rolled back.
   const retryPrincipal = roleAccounts[1];
   const retryCreatePrincipal = roleAccounts[3];

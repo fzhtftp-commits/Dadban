@@ -351,6 +351,42 @@ const lockLiveDocumentActor = async (client, req, allowedRoles) => {
   return { ok: true, role: result.rows[0].role };
 };
 
+
+const parseDocumentMutationIdempotencyKey = (req) => {
+  const key = req.get("idempotency-key");
+  if (key === undefined) return { ok: true, key: null };
+  return /^[A-Za-z0-9._:-]{8,128}$/.test(key) ? { ok: true, key } : { ok: false, key: null };
+};
+const documentMutationFingerprint = (operation, entityId, payload = null) => {
+  const canonicalPayload = payload === null ? null : Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b)));
+  return hashToken(JSON.stringify({ operation, entityId: String(entityId).toLowerCase(), payload: canonicalPayload }));
+};
+const beginDocumentMutationIdempotency = async (client, req, key, operation, entityId, fingerprint) => {
+  if (!key) return { kind: "new" };
+  const inserted = await client.query(
+    "insert into case_document_mutation_idempotency(office_id,user_id,idempotency_key,operation,entity_id,request_fingerprint,response_status) values($1,$2,$3,$4,$5,$6,null) on conflict (office_id,user_id,idempotency_key) do nothing returning idempotency_key",
+    [req.auth.officeId, req.auth.userId, key, operation, entityId, fingerprint]
+  );
+  if (inserted.rowCount) return { kind: "new" };
+  const existing = await client.query(
+    "select operation,entity_id,request_fingerprint,response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
+    [req.auth.officeId, req.auth.userId, key]
+  );
+  if (!existing.rowCount) throw new Error("Document mutation idempotency record disappeared");
+  const row = existing.rows[0];
+  if (row.operation !== operation || String(row.entity_id) !== String(entityId).toLowerCase() || row.request_fingerprint !== fingerprint) return { kind: "conflict" };
+  if (row.response_status === null) return { kind: "incomplete" };
+  return { kind: "replay", status: row.response_status };
+};
+const completeDocumentMutationIdempotency = async (client, req, key, status) => {
+  if (!key) return;
+  const result = await client.query(
+    "update case_document_mutation_idempotency set response_status=$4 where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is null returning idempotency_key",
+    [req.auth.officeId, req.auth.userId, key, status]
+  );
+  if (!result.rowCount) throw new Error("Document mutation idempotency completion failed");
+};
+
 const requireCsrf = (req, res, next) => {
   const cookies = parseCookies(req.headers.cookie);
   const header = req.get("x-csrf-token");
@@ -1768,41 +1804,68 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
    }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
  });
 app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
-  const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
+  const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);
+  if(!id.success)return res.status(400).json({error:"invalid_document_id"});
+  if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
+  const keyResult=parseDocumentMutationIdempotencyKey(req);
+  if(!keyResult.ok)return res.status(400).json({error:"invalid_idempotency_key"});
   if(Object.hasOwn(p.data,"confidentiality")&&!canChangeDocumentConfidentiality(req.auth.role)) return res.status(403).json({error:"document_confidentiality_forbidden"});
+  const key=keyResult.key,fingerprint=documentMutationFingerprint("PATCH",id.data,p.data);
   const fields=["title","document_type","confidentiality","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
-  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
-  v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);let c;
+  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(f+"=$"+v.length);}
+  v.push(req.auth.userId);sets.push("updated_by=$"+v.length);v.push(id.data,req.auth.officeId);let c;
   try{
     c=await acquireClient(pool);await c.query("begin");
-    const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);
-    if (!actor.ok) { await rollbackQuietly(c, "update actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }
-    if (Object.hasOwn(p.data, "confidentiality") && !canChangeDocumentConfidentiality(actor.role)) { await rollbackQuietly(c, "classification change forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }
+    const actor=await lockLiveDocumentActor(c,req,["owner","admin","lawyer","assistant"]);
+    if(!actor.ok){await rollbackQuietly(c,"update actor no longer authorized");return res.status(actor.status).json({error:actor.error});}
+    if(Object.hasOwn(p.data,"confidentiality")&&!canChangeDocumentConfidentiality(actor.role)){await rollbackQuietly(c,"classification change forbidden");return res.status(403).json({error:"document_confidentiality_forbidden"});}
+    const idem=await beginDocumentMutationIdempotency(c,req,key,"PATCH",id.data,fingerprint);
+    if(idem.kind==="conflict"){await rollbackQuietly(c,"document PATCH idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
+    if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document PATCH idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="replay"){
+      if(idem.status!==200){await rollbackQuietly(c,"invalid document PATCH replay status");return res.status(500).json({error:"database_error"});}
+      const replay=await c.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at from case_documents d join cases cs on cs.id=d.case_id and cs.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and cs.deleted_at is null for update of d",[id.data,req.auth.officeId]);
+      if(!replay.rowCount||!canReadCaseDocument(actor.role,replay.rows[0].confidentiality)){await rollbackQuietly(c,"document PATCH replay access denied");return documentAccessDenied(res);}
+      await c.query("commit");return res.status(200).json({data:replay.rows[0]});
+    }
     const current=await c.query("select confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
     if(!current.rowCount||!canEditCaseDocument(actor.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
-    const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at`,v);
+    const q=await c.query("update case_documents set "+sets.join(",")+",updated_at=now() where id=$"+(v.length-1)+" and office_id=$"+v.length+" and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",v);
     if(!q.rowCount){await rollbackQuietly(c,"update missing document");return documentAccessDenied(res);}
     const auditMetadata={fields:Object.keys(p.data)};
-    if(Object.hasOwn(p.data,"confidentiality")&&current.rows[0].confidentiality!==q.rows[0].confidentiality) auditMetadata.confidentiality_change={from:current.rows[0].confidentiality,to:q.rows[0].confidentiality};
-    await writeAuditLog(c,req.auth,"update","case_document",id.data,req,auditMetadata);await c.query("commit");return res.json({data:q.rows[0]});
+    if(Object.hasOwn(p.data,"confidentiality")&&current.rows[0].confidentiality!==q.rows[0].confidentiality)auditMetadata.confidentiality_change={from:current.rows[0].confidentiality,to:q.rows[0].confidentiality};
+    await writeAuditLog(c,req.auth,"update","case_document",id.data,req,auditMetadata);
+    await completeDocumentMutationIdempotency(c,req,key,200);
+    await c.query("commit");return res.status(200).json({data:q.rows[0]});
   }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
+
 app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
-  const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});let c;
-  try{c=await acquireClient(pool);await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin"]);if (!actor.ok) { await rollbackQuietly(c, "delete actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
+  const id=parseUuid.safeParse(req.params.id);
+  if(!id.success)return res.status(400).json({error:"invalid_document_id"});
+  const keyResult=parseDocumentMutationIdempotencyKey(req);
+  if(!keyResult.ok)return res.status(400).json({error:"invalid_idempotency_key"});
+  const key=keyResult.key,fingerprint=documentMutationFingerprint("DELETE",id.data);
+  let c;
+  try{
+    c=await acquireClient(pool);await c.query("begin");
+    const actor=await lockLiveDocumentActor(c,req,["owner","admin"]);
+    if(!actor.ok){await rollbackQuietly(c,"delete actor no longer authorized");return res.status(actor.status).json({error:actor.error});}
+    const idem=await beginDocumentMutationIdempotency(c,req,key,"DELETE",id.data,fingerprint);
+    if(idem.kind==="conflict"){await rollbackQuietly(c,"document DELETE idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
+    if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document DELETE idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="replay"){
+      if(idem.status!==204){await rollbackQuietly(c,"invalid document DELETE replay status");return res.status(500).json({error:"database_error"});}
+      await c.query("commit");return res.status(204).send();
+    }
+    const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
-    await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);await c.query("commit");return res.status(204).send();
+    await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);
+    await completeDocumentMutationIdempotency(c,req,key,204);
+    await c.query("commit");return res.status(204).send();
   }catch(error){const rollbackSucceeded=await rollbackQuietly(c,"delete case document");logSafeError("Delete case document failed",error);const f=dbError(error,rollbackSucceeded);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 
-
-app.use((error, _req, res, next) => {
-  logSafeError("Unhandled request error", error);
-  if (res.headersSent) return next(error);
-  if (error?.type === "entity.too.large") return res.status(413).json({ error: "request_too_large" });
-  if (error instanceof SyntaxError && Object.hasOwn(error, "body")) return res.status(400).json({ error: "invalid_json" });
-  return res.status(500).json({ error: "internal_server_error" });
-});
 
 app.use((_req, res) => {
   res.status(404).json({ error: "not_found" });

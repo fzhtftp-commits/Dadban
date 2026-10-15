@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
 const sharedRateLimitMigration = await readFile(new URL("../migrations/005_shared_rate_limits.sql", import.meta.url), "utf8");
+const mutationIdempotencyMigration = await readFile(new URL("../migrations/006_case_document_mutation_idempotency.sql", import.meta.url), "utf8");
 const sharedRateLimiter = await readFile(new URL("../src/shared-rate-limiter.js", import.meta.url), "utf8");
 const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 const transactionHelper = await readFile(new URL("../src/document-transaction.js", import.meta.url), "utf8");
@@ -29,6 +30,17 @@ test("case-document routes enforce the approved role matrix centrally", () => {
  assert.match(server, /app\.post\("\/api\/case-documents", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant"\)/);
  assert.match(server, /app\.patch\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin", "lawyer", "assistant"\)/);
  assert.match(server, /app\.delete\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin"\)/);
+});
+
+test("PATCH and DELETE idempotency keys are persisted without duplicating document payloads", () => {
+ assert.match(mutationIdempotencyMigration, /case_document_mutation_idempotency/);
+ assert.match(mutationIdempotencyMigration, /PRIMARY KEY/);
+ assert.match(mutationIdempotencyMigration, /request_fingerprint/);
+ assert.match(mutationIdempotencyMigration, /response_status/);
+ assert.doesNotMatch(mutationIdempotencyMigration, /response_body|original_filename|description/i);
+ assert.match(server, /beginDocumentMutationIdempotency/);
+ assert.match(server, /completeDocumentMutationIdempotency/);
+ assert.match(server, /idempotency_key_reused/);
 });
 
 test("document write transactions revalidate and lock the live session and user", () => {

@@ -47,3 +47,16 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/005_shared_rate_li
 Run it from the repository root; use the same migration file reviewed in the PR. Confirm the table, constraints and expiry index exist, then grant only the required `SELECT`, `INSERT`, `UPDATE`, and `DELETE` privileges to the verified backend role (or establish an equivalent least-privilege owner arrangement). Those four table privileges are needed by the current canonicalization/counter UPSERT/RETURNING and bounded cleanup queries; do not grant schema ownership, DDL, or privileges to unrelated roles. Do not guess the runtime role or infer its effective grants from a local superuser test. The migration intentionally does not grant privileges to `PUBLIC` or guess a deployment role.
 
 After the key and grants are verified on every instance, set `RATE_LIMIT_MODE=postgres` and deploy using the normal reviewed process. A counter DB error returns a generic HTTP 503 rather than a misleading 429; shared mode never silently falls back to per-process counters. Existing limits remain registration 5, login 10, and document creation 20 requests per 15-minute window. Do not change production settings as part of this PR.
+
+
+## Idempotent case-document mutations
+
+Apply `backend/migrations/006_case_document_mutation_idempotency.sql` explicitly after the metadata migration and before enabling clients that send idempotency keys for PATCH or DELETE:
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/migrations/006_case_document_mutation_idempotency.sql
+```
+
+For `PATCH /api/case-documents/:id` and `DELETE /api/case-documents/:id`, clients may send an `Idempotency-Key` containing 8–128 ASCII letters, digits, dots, underscores, colons, or hyphens. Reuse the same key for retries of the same operation and target. The key is scoped to the authenticated user and office; reusing it with a different operation, target, or payload returns `409 idempotency_key_reused`. The mutation, its audit row, and the completed key record commit together. Replays do not add audit rows. PATCH replay returns the currently readable document representation; DELETE replay returns `204`, including when the original response was lost after commit. Keys are persistent and must not be reused for a new operation.
+
+This migration is intentionally manual. Do not apply it to production as part of this PR or change Render settings.
