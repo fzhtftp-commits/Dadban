@@ -101,7 +101,13 @@ BEGIN
       AND pg_get_indexdef(i.indexrelid) ILIKE '%(expires_at)%'
   ) INTO expiry_index;
   IF NOT expiry_index THEN RAISE EXCEPTION 'Missing valid expiry cleanup index'; END IF;
-  IF has_table_privilege('public', 'public.rate_limit_counters', 'SELECT') THEN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class rel
+    CROSS JOIN LATERAL aclexplode(coalesce(rel.relacl, acldefault('r', rel.relowner))) acl
+    WHERE rel.oid='public.rate_limit_counters'::regclass
+      AND acl.grantee=0 AND acl.privilege_type='SELECT'
+  ) THEN
     RAISE EXCEPTION 'PUBLIC must not receive counter table SELECT';
   END IF;
 END
