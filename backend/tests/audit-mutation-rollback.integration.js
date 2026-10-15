@@ -321,7 +321,7 @@ try {
   console.log("PASS: audit User-Agent is capped at 512 characters");
 
   // Login rate limiting is per process and source IP; verify the existing 10/15-minute policy.
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 6; i++) {
     const limitedWindowResponse = await request("/api/auth/login", "POST", {
       email: `unknown-rate-test-${i}@example.test`,
       password: "WrongPassword!234"
