@@ -99,6 +99,16 @@ try {
     "insert into users(id,office_id,full_name,email,role) values ($1,$2,'Audit Mutation Test Owner','audit-mutation-owner@example.test','owner')",
     [ids.user, ids.office]
   );
+
+  const passwordSalt = Buffer.from("dadban-audit-test-salt");
+  const passwordDigest = crypto.scryptSync("TestPassword!234", passwordSalt, 64, {
+    N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024
+  });
+  const passwordHash = `scrypt$16384$8$1${passwordSalt.toString("base64url")}${passwordDigest.toString("base64url")}`;
+  await pool.query(
+    "insert into auth_credentials(user_id,password_hash) values ($1,$2)",
+    [ids.user, passwordHash]
+  );
   await pool.query(
     "insert into clients(id,office_id,client_type,full_name,national_id,status,created_by,updated_by) values ($1,$2,'individual','Original Audit Test Client','1234567890','active',$3,$3)",
     [ids.client, ids.office, ids.user]
@@ -124,8 +134,10 @@ try {
   await pool.query(`
     create function reject_business_mutation_audit() returns trigger language plpgsql as $$
     begin
-      if new.entity_type in ('client','case','hearing','case_action')
-         and new.action in ('create','update','delete') then
+      if (new.entity_type in ('client','case','hearing','case_action')
+          and new.action in ('create','update','delete'))
+         or (new.entity_type = 'user' and new.action in ('register','login'))
+         or (new.entity_type = 'auth_session' and new.action = 'logout') then
         raise exception 'forced audit INSERT failure in disposable integration test';
       end if;
       return new;
@@ -208,10 +220,48 @@ try {
   ];
 
   for (const item of cases) await expectAuditFailure(item);
+
+  const registerBefore = await pool.query("select (select count(*) from offices)::int as offices, (select count(*) from users)::int as users, (select count(*) from auth_credentials)::int as credentials, (select count(*) from auth_sessions)::int as sessions");
+  const registerAuditBefore = await countAudit("user", "register");
+  const failedRegister = await request("/api/auth/register", "POST", {
+    full_name: "Must Roll Back Registered User",
+    email: "register-audit-failure@example.test",
+    password: "StrongPassword!234",
+    office_name: "Must Roll Back Registration Office"
+  });
+  assert.equal(failedRegister.status, 500, "registration must fail when its audit insert fails");
+  assert.deepEqual(failedRegister.body, { error: "database_error" }, "registration audit failure must be sanitized");
+  const registerAfter = await pool.query("select (select count(*) from offices)::int as offices, (select count(*) from users)::int as users, (select count(*) from auth_credentials)::int as credentials, (select count(*) from auth_sessions)::int as sessions");
+  assert.deepEqual(registerAfter.rows[0], registerBefore.rows[0], "registration failure must roll back office, user, credential, and session rows");
+  assert.equal(await countAudit("user", "register"), registerAuditBefore, "failed registration must not leave an audit row");
+  console.log("PASS: registration rolls back office/user/credentials/session when audit INSERT fails");
+
+  const loginSessionsBefore = await pool.query("select count(*)::int as count from auth_sessions");
+  const loginAuditBefore = await countAudit("user", "login");
+  const failedLogin = await request("/api/auth/login", "POST", {
+    email: "audit-mutation-owner@example.test",
+    password: "TestPassword!234"
+  });
+  assert.equal(failedLogin.status, 500, "login must fail when its audit insert fails");
+  assert.deepEqual(failedLogin.body, { error: "authentication_error" }, "login audit failure must remain generic");
+  assert.equal((await pool.query("select count(*)::int as count from auth_sessions")).rows[0].count,
+    loginSessionsBefore.rows[0].count, "login failure must roll back the newly created session");
+  assert.equal(await countAudit("user", "login"), loginAuditBefore, "failed login must not leave an audit row");
+  console.log("PASS: login rolls back the new session when audit INSERT fails");
+
+  const logoutAuditBefore = await countAudit("auth_session", "logout");
+  const failedLogout = await request("/api/auth/logout", "POST");
+  assert.equal(failedLogout.status, 500, "logout must fail when its audit insert fails");
+  assert.deepEqual(failedLogout.body, { error: "database_error" }, "logout audit failure must be sanitized");
+  assert.equal((await pool.query("select revoked_at from auth_sessions where token_hash=$1", [hash(token)] )).rows[0].revoked_at,
+    null, "logout failure must roll back session revocation");
+  assert.equal(await countAudit("auth_session", "logout"), logoutAuditBefore, "failed logout must not leave an audit row");
+  console.log("PASS: logout rolls back session revocation when audit INSERT fails");
+
   assert.equal(serverOutput.includes("audit-mutation-test-session-token"), false, "server output must not expose the session token");
   assert.equal(serverOutput.includes("audit-mutation-test-csrf-token"), false, "server output must not expose the CSRF token");
   assert.equal(serverOutput.includes("Must Not Persist"), false, "server output must not echo mutation payloads");
-  console.log("PASS: all 12 client/case/hearing/case-action mutation rollback scenarios");
+  console.log("PASS: all 15 business and authentication mutation rollback scenarios");
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
