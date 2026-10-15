@@ -731,7 +731,7 @@ try {
     "Concurrent keyed PATCH", "concurrent same-key PATCH must apply the mutation exactly once");
 
   // A replay must re-evaluate current classification and authenticated office scope.
-  const assistant = roleAccounts.find(account => account.role === "assistant");
+  const scopeReplayAssistant = roleAccounts.find(account => account.role === "assistant");
   const scopeReplayFixture = (await pool.query(
     "insert into case_documents(office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,'Confidential replay scope fixture','evidence','confidential',$3,$3) returning id",
     [ids.officeA, ids.caseA, ids.userA]
@@ -739,7 +739,7 @@ try {
   const scopeReplayKey = "assistant-patch-replay-01";
   const scopeReplayPayload = { description: "assistant's original permitted update" };
   const assistantPatch = await request("/api/case-documents/" + scopeReplayFixture, {
-    token: assistant.token, csrf: assistant.csrf, method: "PATCH",
+    token: scopeReplayAssistant.token, csrf: scopeReplayAssistant.csrf, method: "PATCH",
     idempotencyKey: scopeReplayKey, body: scopeReplayPayload
   });
   assert.equal(assistantPatch.status, 200, "assistant may initially edit a confidential document");
@@ -752,7 +752,7 @@ try {
     [ids.officeA, scopeReplayFixture]
   )).rows[0].count;
   const deniedRestrictedReplay = await request("/api/case-documents/" + scopeReplayFixture, {
-    token: assistant.token, csrf: assistant.csrf, method: "PATCH",
+    token: scopeReplayAssistant.token, csrf: scopeReplayAssistant.csrf, method: "PATCH",
     idempotencyKey: scopeReplayKey, body: scopeReplayPayload
   });
   assert.equal(deniedRestrictedReplay.status, 404, "replay must not bypass current restricted-document read policy");
@@ -764,7 +764,7 @@ try {
   )).rows[0].count, auditBeforeDeniedReplay, "denied replay must not append an audit event");
   assert.equal((await pool.query(
     "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
-    [ids.officeA, assistant.id, scopeReplayKey]
+    [ids.officeA, scopeReplayAssistant.id, scopeReplayKey]
   )).rows[0].count, 1, "denied replay must preserve the original actor-scoped idempotency row");
 
   const crossOfficeReplay = await request("/api/case-documents/" + scopeReplayFixture, {
