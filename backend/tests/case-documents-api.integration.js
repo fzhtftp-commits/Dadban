@@ -287,13 +287,25 @@ try {
   });
   assert.equal(oversizedBody.status, 413, "oversized JSON request must receive 413");
   assert.deepEqual(oversizedBody.body, { error: "request_too_large" }, "oversized request response must not disclose parser internals");
+  const auditUserAgent = "Dadban-Audit-Test/1.0";
   const created = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST",
+    extraHeaders: { "user-agent": auditUserAgent, "x-forwarded-for": "203.0.113.77" },
     body: { case_id: ids.caseA, title: "Confidential Office A document", document_type: "evidence", confidentiality: "restricted" }
   });
   assert.equal(created.status, 201, `office A create failed: ${JSON.stringify(created.body)}`);
   assert.equal(created.body.data.confidentiality, "restricted", "API must persist and return requested confidentiality");
   const documentId = created.body.data.id;
+  const requestAudit = await pool.query(
+    "select ip_address, user_agent from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'",
+    [documentId]
+  );
+  assert.equal(requestAudit.rowCount, 1, "successful create should emit one request-attributed audit event");
+  assert.ok(["127.0.0.1", "::ffff:127.0.0.1"].includes(requestAudit.rows[0].ip_address),
+    "audit IP must use the socket peer and ignore untrusted X-Forwarded-For");
+  assert.notEqual(requestAudit.rows[0].ip_address, "203.0.113.77",
+    "untrusted forwarded IP must not override the direct peer");
+  assert.equal(requestAudit.rows[0].user_agent, auditUserAgent, "audit must capture the request User-Agent");
 
   const filteredOwn = await request("/api/case-documents?case_id=" + ids.caseA, { token: tokenA, csrf: csrfA });
   assert.equal(filteredOwn.status, 200, "valid case_id filter must work");
@@ -398,6 +410,12 @@ try {
   });
   assert.equal(failedCreate.status, 500, "audit failure must reject document creation");
   assert.deepEqual(failedCreate.body, { error: "database_error" }, "create audit failure response must be sanitized");
+  assert.equal(auditServerOutput.includes("forced audit failure for rollback test"), false,
+    "server stderr must not expose raw database exception messages");
+  assert.equal(auditServerOutput.includes("Create must roll back with audit"), false,
+    "server stderr must not echo sensitive request/document values");
+  assert.equal(auditServerOutput.includes(tokenA), false, "server stderr must not disclose session tokens");
+  assert.equal(auditServerOutput.includes(csrfA), false, "server stderr must not disclose CSRF tokens");
   const failedCreateRow = await pool.query("select count(*)::int as count from case_documents where title='Create must roll back with audit'");
   assert.equal(failedCreateRow.rows[0].count, 0, "failed create must roll back the document row");
   const failedCreateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
