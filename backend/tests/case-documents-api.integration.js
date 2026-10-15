@@ -197,6 +197,14 @@ try {
       ($21,$22,$23,$24,now()+interval '1 hour')
   `, sessionValues);
 
+  const expiredToken = "test-session-expired-document".padEnd(48, "m");
+  const revokedToken = "test-session-revoked-document".padEnd(48, "n");
+  await pool.query(`
+    insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at,revoked_at) values
+      ($1,$2,$3,$4,now()-interval '1 minute',null),
+      ($1,$2,$5,$4,now()+interval '1 hour',now())
+  `, [ids.userA,ids.officeA,hash(expiredToken),hash(csrfA),hash(revokedToken)]);
+
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
     env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
@@ -231,6 +239,15 @@ try {
   const unauthenticated = await fetch(`http://127.0.0.1:${port}/api/case-documents`);
   assert.equal(unauthenticated.status, 401, "document listing must require a valid session");
   assert.deepEqual(await unauthenticated.json(), { error: "authentication_required" }, "unauthenticated response must remain generic");
+
+  for (const [label, token] of [["expired", expiredToken], ["revoked", revokedToken]]) {
+    const expiredList = await request("/api/case-documents", { token, csrf: csrfA });
+    assert.equal(expiredList.status, 401, `${label} session must not read document metadata`);
+    assert.deepEqual(expiredList.body, { error: "authentication_required" });
+    const expiredDetail = await request("/api/case-documents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa99", { token, csrf: csrfA });
+    assert.equal(expiredDetail.status, 401, `${label} session must not read document detail metadata`);
+    assert.deepEqual(expiredDetail.body, { error: "authentication_required" });
+  }
   const invalidCsrf = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST", csrfHeader: false,
     body: { case_id: ids.caseA, title: "Missing CSRF regression" }
@@ -877,6 +894,57 @@ try {
     restricted: await createFixture("Policy restricted fixture", "restricted")
   };
   const readable = {owner:["normal","confidential","restricted"],admin:["normal","confidential","restricted"],lawyer:["normal","confidential","restricted"],assistant:["normal","confidential"],viewer:["normal"]};
+  // Force a role downgrade after requireAuth has read the session role but before
+  // the document GET query runs. The GET query must authorize using the live DB role.
+  const lawyer = roleAccounts.find(a=>a.role==="lawyer");
+  const lawyerTokenHash = hash(lawyer.token);
+  await pool.query(`
+    create or replace function delay_lawyer_session_heartbeat() returns trigger language plpgsql as $fn$
+    begin
+      if old.token_hash = '${lawyerTokenHash}' then perform pg_sleep(0.6); end if;
+      return new;
+    end;
+    $fn$;
+    create trigger delay_lawyer_session_heartbeat_trigger
+      before update of last_seen_at on auth_sessions
+      for each row execute function delay_lawyer_session_heartbeat();
+  `);
+  const waitForRoleHeartbeat = async () => {
+    const deadline=Date.now()+5000;
+    while(Date.now()<deadline){
+      const waiting=await pool.query("select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Timeout' and query ilike 'update auth_sessions set last_seen_at%'");
+      if(waiting.rows[0].count>0)return;
+      await delay(10);
+    }
+    throw new Error("Timed out waiting for role-race heartbeat trigger");
+  };
+  try {
+    for (const read of [
+      {label:"list",path:"/api/case-documents"},
+      {label:"detail",path:null}
+    ]) {
+      await pool.query("update users set role='lawyer' where id=$1",[lawyer.id]);
+      const pendingRead=request(read.path || `/api/case-documents/${idsByLevel.restricted}`,{
+        token:lawyer.token,csrf:lawyer.csrf,portToUse:rolePort
+      });
+      await waitForRoleHeartbeat();
+      await pool.query("update users set role='viewer' where id=$1",[lawyer.id]);
+      const response=await pendingRead;
+      if(read.label==="list"){
+        assert.equal(response.status,200);
+        assert.equal(response.body.data.some(d=>d.id===idsByLevel.restricted),false,
+          "list must not disclose restricted metadata after role is downgraded during authentication");
+      }else{
+        assert.equal(response.status,404,
+          "detail must hide restricted metadata after role is downgraded during authentication");
+        assert.deepEqual(response.body,{error:"document_not_found"});
+      }
+    }
+  } finally {
+    await pool.query("drop trigger delay_lawyer_session_heartbeat_trigger on auth_sessions").catch(()=>{});
+    await pool.query("drop function delay_lawyer_session_heartbeat()").catch(()=>{});
+    await pool.query("update users set role='lawyer' where id=$1",[lawyer.id]);
+  }
   for (const account of roleAccounts) {
     const list=await request("/api/case-documents",{token:account.token,csrf:account.csrf,portToUse:rolePort});
     assert.equal(list.status,200);
