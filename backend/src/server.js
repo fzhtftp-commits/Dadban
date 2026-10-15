@@ -418,7 +418,7 @@ const writeAuditLog = async (client, auth, action, entityType, entityId, req, me
       entityId,
       metadata ? JSON.stringify(metadata) : null,
       req.ip || null,
-      req.get("user-agent") || null
+      typeof req.get("user-agent") === "string" ? req.get("user-agent").slice(0, 512) : null
     ]
   );
 };
@@ -436,7 +436,7 @@ const writeFailedLoginAudit = async (req) => {
       [
         JSON.stringify({ reason: "invalid_credentials" }),
         req.ip || null,
-        req.get("user-agent") || null
+        typeof req.get("user-agent") === "string" ? req.get("user-agent").slice(0, 512) : null
       ]
     );
   } catch (error) {
