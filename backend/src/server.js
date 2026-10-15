@@ -1715,7 +1715,7 @@ app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin"
   const values=[req.auth.officeId,req.auth.userId];
   const where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null",
     "((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))"];
-  if(cid){values.push(cid.data);where.push(`d.case_id = ${values.length}`);}
+  if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
   try {
     const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$2 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
