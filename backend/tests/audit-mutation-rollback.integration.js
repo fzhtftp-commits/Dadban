@@ -104,7 +104,7 @@ try {
   const passwordDigest = crypto.scryptSync("TestPassword!234", passwordSalt, 64, {
     N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024
   });
-  const passwordHash = `scrypt$16384$8$1${passwordSalt.toString("base64url")}${passwordDigest.toString("base64url")}`;
+  const passwordHash = `scrypt$16384$8$1$${passwordSalt.toString("base64url")}$${passwordDigest.toString("base64url")}`;
   await pool.query(
     "insert into auth_credentials(user_id,password_hash) values ($1,$2)",
     [ids.user, passwordHash]
