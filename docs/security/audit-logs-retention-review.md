@@ -64,3 +64,65 @@ Do **not** switch the application to a purported shared limiter in this review c
 Recommended next implementation, after confirming the migration rollout path and configuring one stable secret in the deployment environment: add a separate additive rate-limit migration; use HMAC-SHA-256 over a normalized address with a domain-separated limiter key; perform atomic fixed-window increments in PostgreSQL; return 429 with `Retry-After` from the shared decision; add a bounded, indexed expiry cleanup; test simultaneous increments across independent app instances, window reset, cleanup, missing configuration, and database errors in disposable PostgreSQL. Define fail-closed behavior for login/registration and document writes before implementation: silently falling back to local memory is not acceptable for a feature advertised as shared. The database is already a dependency for these routes, but limiter-specific failure handling still needs explicit tests and a product decision.
 
 Until that follow-up is complete, the existing map remains an explicitly single-process safeguard. Do not treat the current 10/5/20 per-15-minute limits as effective across multiple backend instances.
+
+## Migration/deployment-path verification and shared limiter design (2026-10-15)
+
+Reviewed branch: `feature/unified-case-documents-metadata-only-2026-10`, starting SHA `d7150b7e086aca3410198b228568395a509dba1d`. This is a design review only; no operational database, Render configuration, or secrets were accessed or changed.
+
+### What the repository actually does
+
+- The baseline schema is `database/schema.sql`. `backend/README.md` instructs operators to execute it manually before starting the API.
+- `backend/migrations/` contains only `004_case_documents_metadata.sql` on this branch. It is a feature-specific migration with strict catalog preflight and transactional DDL; it is not a general migration runner or migration ledger.
+- `.github/workflows/case-documents-tests.yml` starts disposable PostgreSQL 16 for CI, runs `npm test`, and applies the baseline through `backend/tests/case-documents-migration-upgrade.sql` before validating migration 004. This does not establish which schema is currently deployed in Render.
+- `backend/package.json` has no migration script; `backend/src/server.js` does not automatically apply migrations. `backend/.env.example` documents `PORT`, `DATABASE_URL`, and `CORS_ORIGIN` only. No stable rate-limit HMAC secret is configured/documented in the visible branch.
+- The current rate limiters use independent in-process Maps: registration 5, login 10, and document creation 20 requests per 15 minutes, capped at 10,000 keys. They do not coordinate across instances. `trust proxy` is deliberately false; arbitrary forwarding headers must not be trusted.
+
+### Proposed implementation — design only, not yet enabled
+
+**Migration and rollout.** Add a separate additive migration after 004 (proposed filename `backend/migrations/005_shared_rate_limits.sql`), leaving migration 004 and `audit_logs` untouched. Because there is no general migration runner, do not apply DDL automatically from every app instance at startup. Extend the existing disposable-PostgreSQL migration checks and document an explicit production apply step before shared mode can be enabled.
+
+**Counter table contract.** A dedicated `rate_limit_counters` table should contain only:
+- `bucket_name` restricted to known limiter names;
+- `key_digest bytea` with a 32-byte check (HMAC-SHA-256, not raw IP/account data);
+- aligned `window_start timestamptz`;
+- positive `request_count integer`;
+- `expires_at timestamptz`;
+- primary/unique key `(bucket_name, key_digest, window_start)` and an index on `expires_at`.
+
+No raw IP, email, user-agent, token, payload, or office/user identifier belongs in this counter table. Verify the actual runtime DB role and RLS/privileges before writing grants or policies; do not assume the app role equals the local migration owner.
+
+**Atomic shared decision.** Compute a fixed 900-second window using database time so instances agree on the same window. Use one atomic statement, not read-then-write:
+
+```sql
+INSERT INTO rate_limit_counters
+  (bucket_name, key_digest, window_start, request_count, expires_at)
+VALUES ($1, $2, $3, 1, $4)
+ON CONFLICT (bucket_name, key_digest, window_start)
+DO UPDATE SET request_count = rate_limit_counters.request_count + 1
+RETURNING request_count, window_start, expires_at;
+```
+
+The implementation must derive the aligned window from one database-side timestamp and return the window end for `Retry-After`. Keep the existing limits and generic 429 response/headers. Avoid automatic retries after an ambiguous connection failure because they can double-count.
+
+**HMAC and IP canonicalization.** Require a stable high-entropy secret (at least 32 random bytes) supplied via deployment secret configuration, for example `RATE_LIMIT_HMAC_KEY`, shared identically by all instances. Never generate a new key at boot, commit it, log it, or store it in PostgreSQL. Canonicalize IP addresses before HMAC so equivalent IPv6 spellings cannot bypass the same bucket; use a reviewed IP parser or PostgreSQL `host($1::inet)` canonicalization. Derive a domain-separated digest such as `HMAC-SHA-256(secret, "dadban-rate-limit:v1:" + bucket + ":" + canonicalIp)`. Store only the digest. Keep proxy trust disabled unless deployment topology is verified to overwrite forwarding headers and block direct origin access; test forged `X-Forwarded-For`.
+
+**Bounded cleanup.** Use the indexed `expires_at` column and a bounded deletion batch (maximum 500 rows) selected in a CTE ordered by expiry with `FOR UPDATE SKIP LOCKED`. Throttle cleanup attempts per process to avoid running a delete for every request; this throttle must affect only cleanup frequency, not rate-limit correctness. Do not add an unreviewed timer per instance. Expired rows may remain temporarily without changing the decision, but table-growth monitoring/limits must be decided before production.
+
+**Failure policy.** Shared mode must not silently fall back to local Maps. Missing/invalid HMAC configuration should prevent explicit shared mode from starting. If the shared counter cannot decide because of a DB timeout/error, return a sanitized temporary-unavailable response (not a false 429); choose and document fail-closed behavior per route before enabling. Do not expose SQL errors, IPs, key material, or connection details. Do not change live Render settings in this PR.
+
+### Tests to add by extending the existing harness (no duplicate suite)
+
+Use only disposable PostgreSQL in CI. Extend existing migration/API integration scripts where practical:
+1. Catalog assertions for exact columns/types, primary key, checks, expiry index and least-privilege grants; rollback and incompatible-table migration tests.
+2. Parallel increments through two independent limiter instances (preferably separate Node processes): for limit N, exactly N are allowed and no concurrent update is lost.
+3. Window boundary/reset and consistent positive Retry-After using database time.
+4. Privacy assertion that rows contain only digest/window/count metadata and no raw IP, email, user-agent, token or payload.
+5. IPv6 canonicalization; deterministic handling for invalid/missing address without merging unrelated clients into a shared attacker-controlled key.
+6. Bounded cleanup removes no more than 500 expired rows and preserves unexpired rows during concurrent increments.
+7. Missing key, timeout and database error behavior; no local fallback and no false 429.
+8. Proxy spoofing tests with trust proxy disabled.
+9. Preserve existing generic login 401/audit behavior and the existing 5/10/20 per-15-minute limits.
+
+### Go/no-go
+
+Do not enable the shared limiter until migration execution is documented for production, a stable secret is configured on all instances, DB role privileges are verified, cross-instance concurrency tests pass, and failure behavior is approved. Until then, the current runtime remains a single-process safeguard and must not be described as distributed rate limiting.
