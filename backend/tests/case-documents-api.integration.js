@@ -1686,6 +1686,71 @@ try {
   console.log("PASS: logout clears cookies, revokes session, rejects subsequent requests and blocks idempotent replay");
 
 
+  // Deterministic race: authorization has passed and the transaction is paused
+  // in the document UPDATE when logout revokes the session. An in-flight request may
+  // linearize before revocation (200) or be rejected (401); either way its DB effects
+  // must be atomic and any later replay must fail authentication.
+  const raceSessionToken = "test-session-revoke-race-".padEnd(48, "g");
+  const raceSessionCsrf = "test-csrf-revoke-race-".padEnd(48, "h");
+  await pool.query("insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values($1,$2,$3,$4,now()+interval '1 hour')",
+    [ids.userA, ids.officeA, hash(raceSessionToken), hash(raceSessionCsrf)]);
+  const revokeRaceDoc = (await pool.query(
+    "insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Before session race','evidence',$3,$3) returning id",
+    [ids.officeA, ids.caseA, ids.userA]
+  )).rows[0].id;
+  const revokeRaceKey = "session-revoke-race-01";
+  await pool.query(`
+    create or replace function pause_session_revoke_race() returns trigger language plpgsql as $fn$
+    begin
+      if new.id = '${revokeRaceDoc}'::uuid and new.title = 'Mutation raced with logout' then perform pg_sleep(3); end if;
+      return new;
+    end;
+    $fn$;
+    create trigger pause_session_revoke_race_trigger before update on case_documents
+      for each row execute function pause_session_revoke_race();
+  `);
+  const racePatchPromise = request("/api/case-documents/" + revokeRaceDoc, {
+    token: raceSessionToken, csrf: raceSessionCsrf, method: "PATCH", idempotencyKey: revokeRaceKey,
+    body: { title: "Mutation raced with logout" }
+  }).catch(() => ({ status: 0, body: null }));
+  const raceDeadline = Date.now() + 8000;
+  let raceBackendPid = null;
+  while (Date.now() < raceDeadline) {
+    const active = await pool.query("select pid from pg_stat_activity where datname=current_database() and wait_event='PgSleep' and query ilike '%update case_documents%'");
+    if (active.rowCount) { raceBackendPid = active.rows[0].pid; break; }
+    await delay(25);
+  }
+  assert.ok(raceBackendPid, "PATCH must reach the controlled pause before logout");
+  const raceLogout = await request("/api/auth/logout", { token: raceSessionToken, csrf: raceSessionCsrf, method: "POST" });
+  assert.equal(raceLogout.status, 200, "logout must revoke the session during the in-flight request");
+  const racePatch = await racePatchPromise;
+  assert.ok([200,401].includes(racePatch.status), "racing request must have a defined authorization outcome");
+  assert.ok((await pool.query("select revoked_at from auth_sessions where token_hash=$1", [hash(raceSessionToken)])).rows[0].revoked_at,
+    "logout must remain durable after the race");
+  const raceDocState = (await pool.query("select title from case_documents where id=$1", [revokeRaceDoc])).rows[0].title;
+  const raceKeyRows = await pool.query("select response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, revokeRaceKey]);
+  const raceAuditRows = await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, revokeRaceDoc]);
+  if (racePatch.status === 200) {
+    assert.equal(raceDocState, "Mutation raced with logout");
+    assert.equal(raceKeyRows.rowCount, 1);
+    assert.equal(raceKeyRows.rows[0].response_status, 200);
+    assert.equal(raceAuditRows.rows[0].count, 1, "successful in-flight request must have exactly one audit event");
+  } else {
+    assert.equal(raceDocState, "Before session race");
+    assert.equal(raceKeyRows.rowCount, 0, "rejected in-flight request must not leave an idempotency reservation");
+    assert.equal(raceAuditRows.rows[0].count, 0, "rejected in-flight request must not write audit");
+  }
+  const raceReplayAfterLogout = await request("/api/case-documents/" + revokeRaceDoc, {
+    token: raceSessionToken, csrf: raceSessionCsrf, method: "PATCH", idempotencyKey: revokeRaceKey,
+    body: { title: "Mutation raced with logout" }
+  });
+  assert.equal(raceReplayAfterLogout.status, 401, "replay after logout must be denied regardless of in-flight ordering");
+  await pool.query("drop trigger pause_session_revoke_race_trigger on case_documents");
+  await pool.query("drop function pause_session_revoke_race()");
+  console.log("PASS: in-flight mutation/logout race has atomic DB outcome and every post-logout replay is rejected");
+
   // The earlier expired-session scenario intentionally expires tokenA; restore this
   // synthetic test-only session before the isolated crash/retry case.
   await pool.query("update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
