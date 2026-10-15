@@ -428,6 +428,8 @@ try {
   });
   assert.equal(ownUpdate.status, 200, "office A can update its own document");
   assert.equal(ownUpdate.body.data.document_type, "evidence", "title-only patch must not silently reset document type to the create default");
+  const firstUpdateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
+  assert.equal(firstUpdateAudit.rows[0].count, 1, "first successful update must create exactly one audit event");
   const confidentialityUpdate = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "normal" } });
   assert.equal(confidentialityUpdate.status, 200);
   assert.equal(confidentialityUpdate.body.data.confidentiality, "normal");
@@ -436,7 +438,7 @@ try {
   const invalidConfidentiality = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "public" } });
   assert.equal(invalidConfidentiality.status, 400);
   const updateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
-  assert.equal(updateAudit.rows[0].count, 1, "successful update must be audited once");
+  assert.equal(updateAudit.rows[0].count, 2, "each of two successful updates must be audited exactly once");
   await pool.query(`
     create trigger reject_document_mutation_audit_trigger
       before insert on audit_logs for each row execute function reject_document_mutation_audit();
