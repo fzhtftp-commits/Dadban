@@ -366,6 +366,21 @@ try {
   assert.ok(cleanupKeyRows.rows[0].purged_at instanceof Date);
   assert.equal(await countAudit(patchId, "update"), 1,
     "tombstone replay must not duplicate the audit event");
+  const reopenTombstone = await pool.query(
+    "update case_document_mutation_idempotency set purged_at=null where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  ).then(() => null, error => error);
+  assert.ok(reopenTombstone, "database trigger must reject clearing purged_at");
+  const rewriteIdentity = await pool.query(
+    "update case_document_mutation_idempotency set request_fingerprint=repeat('0',64) where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  ).then(() => null, error => error);
+  assert.ok(rewriteIdentity, "database trigger must reject rewriting the operation fingerprint");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and purged_at is not null",
+    [ids.office, ids.user, patchKey]
+  )).rows[0].count, 1, "tombstone must remain irreversible after rejected updates");
+  console.log("PASS: tombstone cannot be reopened and operation identity cannot be rewritten, even by privileged test connection");
   const forbiddenDelete = await pool.query(
     "delete from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
     [ids.office, ids.user, patchKey]
