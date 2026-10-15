@@ -89,33 +89,83 @@ try {
   // discard the broken connection, and resolve it through the durable same-key retry.
   proxy = net.createServer(client => {
     const upstream = net.connect(5432, "127.0.0.1");
-    let tail = "";
+    let frontendBuffer = Buffer.alloc(0);
+    let startupComplete = false;
+    let responseBuffer = Buffer.alloc(0);
+    let responseParseOffset = 0;
     let dropThisCommitResponse = false;
+    let sawCommitComplete = false;
     const queued = [];
 
     client.on("data", data => {
-      const combined = tail + data.toString("latin1");
-      if (armed && /\bcommit\b/i.test(combined)) {
-        armed = false;
-        dropThisCommitResponse = true;
+      frontendBuffer = Buffer.concat([frontendBuffer, data]);
+      let offset = 0;
+      while (true) {
+        if (!startupComplete) {
+          if (frontendBuffer.length - offset < 4) break;
+          const startupLength = frontendBuffer.readInt32BE(offset);
+          if (startupLength < 8 || frontendBuffer.length - offset < startupLength) break;
+          startupComplete = true;
+          offset += startupLength;
+          continue;
+        }
+        if (frontendBuffer.length - offset < 5) break;
+        const type = String.fromCharCode(frontendBuffer[offset]);
+        const messageLength = frontendBuffer.readInt32BE(offset + 1);
+        const totalLength = 1 + messageLength;
+        if (messageLength < 4 || frontendBuffer.length - offset < totalLength) break;
+        if (type === "Q" && armed) {
+          const sql = frontendBuffer.subarray(offset + 5, offset + totalLength - 1).toString("utf8").trim().replace(/;$/, "").trim();
+          if (/^commit$/i.test(sql)) {
+            armed = false;
+            dropThisCommitResponse = true;
+            responseBuffer = Buffer.alloc(0);
+            responseParseOffset = 0;
+            sawCommitComplete = false;
+          }
+        }
+        offset += totalLength;
       }
-      tail = combined.slice(-40);
+      frontendBuffer = frontendBuffer.subarray(offset);
       if (upstream.connecting) queued.push(data);
       else upstream.write(data);
     });
+
     upstream.on("connect", () => {
       for (const chunk of queued.splice(0)) upstream.write(chunk);
     });
+
     upstream.on("data", data => {
-      if (dropThisCommitResponse) {
-        dropThisCommitResponse = false;
-        droppedCommitResponses++;
-        // PostgreSQL has sent the COMMIT result, but the client never receives it.
-        client.destroy();
-        upstream.destroy();
+      if (!dropThisCommitResponse) {
+        if (!client.destroyed) client.write(data);
         return;
       }
-      if (!client.destroyed) client.write(data);
+      responseBuffer = Buffer.concat([responseBuffer, data]);
+      while (responseBuffer.length - responseParseOffset >= 5) {
+        const type = String.fromCharCode(responseBuffer[responseParseOffset]);
+        const messageLength = responseBuffer.readInt32BE(responseParseOffset + 1);
+        const totalLength = 1 + messageLength;
+        if (messageLength < 4 || responseBuffer.length - responseParseOffset < totalLength) break;
+        const payload = responseBuffer.subarray(responseParseOffset + 5, responseParseOffset + totalLength);
+        if (type === "E") {
+          // COMMIT returned an error instead of success; preserve the server response.
+          dropThisCommitResponse = false;
+          if (!client.destroyed) client.write(responseBuffer);
+          responseBuffer = Buffer.alloc(0);
+          responseParseOffset = 0;
+          return;
+        }
+        if (type === "C" && payload.toString("latin1") === "COMMIT\\0") sawCommitComplete = true;
+        responseParseOffset += totalLength;
+        if (type === "Z" && sawCommitComplete) {
+          droppedCommitResponses++;
+          // PostgreSQL has completed COMMIT and sent ReadyForQuery, but neither reply
+          // is delivered to the application, so its transaction outcome is unknown.
+          client.destroy();
+          upstream.destroy();
+          return;
+        }
+      }
     });
     client.on("error", () => upstream.destroy());
     upstream.on("error", () => client.destroy());
