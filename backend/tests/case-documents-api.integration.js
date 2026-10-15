@@ -896,8 +896,8 @@ try {
   const readable = {owner:["normal","confidential","restricted"],admin:["normal","confidential","restricted"],lawyer:["normal","confidential","restricted"],assistant:["normal","confidential"],viewer:["normal"]};
   // Force a role downgrade after requireAuth has read the session role but before
   // the document GET query runs. The GET query must authorize using the live DB role.
-  const lawyer = roleAccounts.find(a=>a.role==="lawyer");
-  const lawyerTokenHash = hash(lawyer.token);
+  const roleRaceLawyer = roleAccounts.find(a=>a.role==="lawyer");
+  const lawyerTokenHash = hash(roleRaceLawyer.token);
   await pool.query(`
     create or replace function delay_lawyer_session_heartbeat() returns trigger language plpgsql as $fn$
     begin
@@ -923,12 +923,12 @@ try {
       {label:"list",path:"/api/case-documents"},
       {label:"detail",path:null}
     ]) {
-      await pool.query("update users set role='lawyer' where id=$1",[lawyer.id]);
+      await pool.query("update users set role='lawyer' where id=$1",[roleRaceLawyer.id]);
       const pendingRead=request(read.path || `/api/case-documents/${idsByLevel.restricted}`,{
-        token:lawyer.token,csrf:lawyer.csrf,portToUse:rolePort
+        token:roleRaceLawyer.token,csrf:roleRaceLawyer.csrf,portToUse:rolePort
       });
       await waitForRoleHeartbeat();
-      await pool.query("update users set role='viewer' where id=$1",[lawyer.id]);
+      await pool.query("update users set role='viewer' where id=$1",[roleRaceLawyer.id]);
       const response=await pendingRead;
       if(read.label==="list"){
         assert.equal(response.status,200);
@@ -943,7 +943,7 @@ try {
   } finally {
     await pool.query("drop trigger delay_lawyer_session_heartbeat_trigger on auth_sessions").catch(()=>{});
     await pool.query("drop function delay_lawyer_session_heartbeat()").catch(()=>{});
-    await pool.query("update users set role='lawyer' where id=$1",[lawyer.id]);
+    await pool.query("update users set role='lawyer' where id=$1",[roleRaceLawyer.id]);
   }
   for (const account of roleAccounts) {
     const list=await request("/api/case-documents",{token:account.token,csrf:account.csrf,portToUse:rolePort});
