@@ -422,6 +422,14 @@ try {
   assert.equal(afterFailedUpdate.rows[0].title, "Confidential Office A document", "document update must roll back when audit insert fails");
   const failedUpdateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
   assert.equal(failedUpdateAudit.rows[0].count, 0, "failed update must not leave an audit row");
+  const failedClassification = await request(`/api/case-documents/${documentId}`, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "confidential" }
+  });
+  assert.equal(failedClassification.status, 500, "classification change must fail when its audit insert fails");
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1", [documentId])).rows[0].confidentiality,
+    "restricted", "classification change must roll back when audit insert fails");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId])).rows[0].count,
+    0, "failed classification update must not leave an audit row");
   await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
   const ownUpdate = await request(`/api/case-documents/${documentId}`, {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { title: "Updated by Office A" }
@@ -694,6 +702,66 @@ try {
   assert.equal(adminChange.status,200);
   audit=(await pool.query("select metadata from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' order by created_at desc limit 1",[idsByLevel.normal])).rows[0].metadata;
   assert.deepEqual(audit.confidentiality_change,{from:"confidential",to:"restricted"});
+
+  // Deterministic two-PATCH race: hold the row lock, queue PATCH 1 then PATCH 2,
+  // and release only after PostgreSQL reports both API statements waiting on that row.
+  const concurrentClassDoc=await request("/api/case-documents",{
+    token:admin.token,csrf:admin.csrf,method:"POST",portToUse:rolePort,
+    body:{case_id:ids.caseA,title:"Concurrent confidentiality PATCH audit chain",confidentiality:"normal"}
+  });
+  assert.equal(concurrentClassDoc.status,201,"race fixture document should be created");
+  const concurrentClassId=concurrentClassDoc.body.data.id;
+  const classificationBlocker=await pool.connect();
+  let firstClassPatch,secondClassPatch;
+  const waitForBlockedPatchCount=async expected=>{
+    const deadline=Date.now()+10000;
+    while(Date.now()<deadline){
+      const waiting=await pool.query(
+        "select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select confidentiality from case_documents%'"
+      );
+      if(waiting.rows[0].count>=expected)return;
+      await delay(25);
+    }
+    throw new Error(`Timed out waiting for ${expected} blocked classification PATCH query/queries`);
+  };
+  try{
+    await classificationBlocker.query("begin");
+    await classificationBlocker.query("select id from case_documents where id=$1 for update",[concurrentClassId]);
+    firstClassPatch=request(`/api/case-documents/${concurrentClassId}`,{
+      token:tokenA,csrf:csrfA,method:"PATCH",portToUse:rolePort,body:{confidentiality:"confidential"}
+    });
+    await waitForBlockedPatchCount(1);
+    secondClassPatch=request(`/api/case-documents/${concurrentClassId}`,{
+      token:admin.token,csrf:admin.csrf,method:"PATCH",portToUse:rolePort,body:{confidentiality:"restricted"}
+    });
+    await waitForBlockedPatchCount(2);
+    await classificationBlocker.query("commit");
+    const [firstClassResult,secondClassResult]=await Promise.all([firstClassPatch,secondClassPatch]);
+    assert.equal(firstClassResult.status,200,"first queued classification PATCH must succeed");
+    assert.equal(firstClassResult.body.data.confidentiality,"confidential","first PATCH must apply its requested level");
+    assert.equal(secondClassResult.status,200,"second queued classification PATCH must succeed");
+    assert.equal(secondClassResult.body.data.confidentiality,"restricted","second PATCH must apply after first");
+    const classificationState=await pool.query("select confidentiality from case_documents where id=$1",[concurrentClassId]);
+    assert.equal(classificationState.rows[0].confidentiality,"restricted","final state must match the second serialized PATCH");
+    const classificationEvents=await pool.query(
+      "select metadata,created_at from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' and metadata ? 'confidentiality_change' order by created_at asc",
+      [concurrentClassId]
+    );
+    assert.equal(classificationEvents.rowCount,2,"both committed classification changes must have exactly one audit event each");
+    assert.deepEqual(classificationEvents.rows.map(row=>row.metadata.confidentiality_change),[
+      {from:"normal",to:"confidential"},
+      {from:"confidential",to:"restricted"}
+    ],"concurrent audit events must form the actual serialized from→to chain");
+    assert.ok(new Date(classificationEvents.rows[0].created_at)<new Date(classificationEvents.rows[1].created_at),
+      "audit timestamps must follow the serialized classification order, not transaction start time");
+    console.log("PASS: concurrent confidentiality PATCHes serialize and preserve audit transition/timestamp order");
+  } finally {
+    await classificationBlocker.query("rollback").catch(()=>{});
+    classificationBlocker.release();
+    if(firstClassPatch) await firstClassPatch.catch(()=>{});
+    if(secondClassPatch) await secondClassPatch.catch(()=>{});
+  }
+
   for(const role of ["lawyer","assistant","viewer"]){
     const account=roleAccounts.find(a=>a.role===role);
     const result=await request(`/api/case-documents/${idsByLevel.normal}`,{token:account.token,csrf:account.csrf,method:"DELETE",portToUse:rolePort});

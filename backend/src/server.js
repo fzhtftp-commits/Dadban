@@ -405,8 +405,8 @@ const writeAuditLog = async (client, auth, action, entityType, entityId, req, me
   await client.query(
     `
       insert into audit_logs
-        (office_id, user_id, action, entity_type, entity_id, metadata, ip_address, user_agent)
-      values ($1,$2,$3,$4,$5,$6,$7,$8)
+        (office_id, user_id, action, entity_type, entity_id, metadata, ip_address, user_agent, created_at)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp())
     `,
     [
       auth.officeId,
