@@ -62,6 +62,52 @@ DECLARE
   check_def text;
   required_check text;
 BEGIN
+  -- Column names alone are insufficient: enforce the expected SQL types and nullability too.
+  IF EXISTS (
+    SELECT 1
+    FROM (VALUES
+      ('id','uuid',true),
+      ('office_id','uuid',true),
+      ('case_id','uuid',true),
+      ('title','character varying(200)',true),
+      ('document_type','character varying(32)',true),
+      ('description','character varying(3000)',false),
+      ('original_filename','character varying(255)',false),
+      ('mime_type','character varying(127)',false),
+      ('size_bytes','bigint',false),
+      ('document_date','date',false),
+      ('reference_number','character varying(120)',false),
+      ('confidentiality','character varying(16)',true),
+      ('idempotency_key','character varying(128)',false),
+      ('request_fingerprint','character(64)',false),
+      ('storage_status','character varying(24)',true),
+      ('created_by','uuid',true),
+      ('updated_by','uuid',true),
+      ('created_at','timestamp with time zone',true),
+      ('updated_at','timestamp with time zone',true),
+      ('deleted_at','timestamp with time zone',false)
+    ) AS expected(name,sql_type,is_not_null)
+    LEFT JOIN pg_attribute a
+      ON a.attrelid='public.case_documents'::regclass AND a.attname=expected.name AND a.attnum>0 AND NOT a.attisdropped
+    WHERE a.attname IS NULL
+       OR format_type(a.atttypid,a.atttypmod) IS DISTINCT FROM expected.sql_type
+       OR a.attnotnull IS DISTINCT FROM expected.is_not_null
+  ) THEN
+    RAISE EXCEPTION 'case_documents column type/nullability catalog differs from contract';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE a.attrelid='public.case_documents'::regclass AND a.attname='id'
+      AND pg_get_expr(d.adbin,d.adrelid) LIKE '%gen_random_uuid%'
+  ) OR NOT EXISTS (
+    SELECT 1 FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE a.attrelid='public.case_documents'::regclass AND a.attname='storage_status'
+      AND pg_get_expr(d.adbin,d.adrelid) LIKE '%metadata_only%'
+  ) THEN
+    RAISE EXCEPTION 'Required id/storage_status column defaults are missing or changed';
+  END IF;
+
   SELECT count(*) INTO fk_count
   FROM pg_constraint c
   WHERE c.conrelid='public.case_documents'::regclass AND c.contype='f' AND c.convalidated;
