@@ -372,12 +372,13 @@ const beginDocumentMutationIdempotency = async (client, req, key, operation, ent
   );
   if (inserted.rowCount) return { kind: "new" };
   const existing = await client.query(
-    "select operation,entity_id,request_fingerprint,response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
+    "select operation,entity_id,request_fingerprint,response_status,purged_at from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
     [req.auth.officeId, req.auth.userId, key]
   );
   if (!existing.rowCount) throw new Error("Document mutation idempotency record disappeared");
   const row = existing.rows[0];
   if (row.operation !== operation || String(row.entity_id) !== String(entityId).toLowerCase() || row.request_fingerprint !== fingerprint) return { kind: "conflict" };
+  if (row.purged_at !== null) return { kind: "gone" };
   if (row.response_status === null) return { kind: "incomplete" };
   return { kind: "replay", status: row.response_status };
 };
@@ -1825,6 +1826,7 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
     const idem=await beginDocumentMutationIdempotency(c,req,key,"PATCH",id.data,fingerprint);
     if(idem.kind==="conflict"){await rollbackQuietly(c,"document PATCH idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
     if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document PATCH idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="gone"){await rollbackQuietly(c,"purged document PATCH idempotency replay");return res.status(410).json({error:"idempotency_result_purged"});}
     if(idem.kind==="replay"){
       if(idem.status!==200){await rollbackQuietly(c,"invalid document PATCH replay status");return res.status(500).json({error:"database_error"});}
       const replay=await c.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at from case_documents d join cases cs on cs.id=d.case_id and cs.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and cs.deleted_at is null for update of d",[id.data,req.auth.officeId]);
@@ -1857,6 +1859,7 @@ app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", 
     const idem=await beginDocumentMutationIdempotency(c,req,key,"DELETE",id.data,fingerprint);
     if(idem.kind==="conflict"){await rollbackQuietly(c,"document DELETE idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
     if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document DELETE idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="gone"){await rollbackQuietly(c,"purged document DELETE idempotency replay");return res.status(410).json({error:"idempotency_result_purged"});}
     if(idem.kind==="replay"){
       if(idem.status!==204){await rollbackQuietly(c,"invalid document DELETE replay status");return res.status(500).json({error:"database_error"});}
       await c.query("commit");return res.status(204).send();
