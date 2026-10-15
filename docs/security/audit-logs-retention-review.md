@@ -7,7 +7,8 @@ Status: review finding; no production database was accessed or changed.
 - The Supabase security migration enables row-level security on `public.audit_logs`.
 - The `anon` role receives no table privileges; `authenticated` receives `INSERT` only.
 - The `audit_logs_insert_same_office` policy constrains inserts to the authenticated user's office and user ID.
-- The backend writes audit rows for client, case, hearing, case-action, and case-document create/update/delete operations.
+- The backend writes audit rows for registration, login, logout, and client, case, hearing, case-action, and case-document create/update/delete operations (18 state-changing API routes in this branch).
+- The `last_seen_at` session heartbeat is operational telemetry, not a business mutation; it is scoped by session, user, office, and non-revoked state, and a missing/revoked session is rejected. It deliberately does not emit an audit row on every authenticated request.
 - The schema uses `ON DELETE SET NULL` for audit-log references to offices and users, so referenced business identities can be detached while the audit row remains.
 
 ## Findings and boundaries
@@ -29,8 +30,10 @@ Until those decisions are approved, preserve existing records and do not introdu
 
 ## Event coverage and metadata review (2026-10-15)
 
-- The reviewed resource mutation routes for clients, cases, hearings, case actions, and case-document metadata call `writeAuditLog` before committing their transaction. This keeps the business mutation and its audit row atomic: an audit insert failure rolls back the business change in these handlers.
-- Their current metadata is limited to identifiers, action context, changed field names, document storage status, and confidentiality transitions. The reviewed call sites do not pass the whole request body or credential/token values to the audit helper.
-- Registration, login, and logout do not currently write audit rows in the reviewed backend. Whether to audit successful/failed authentication, session creation/revocation, and registration should be explicitly decided; failed-login events in particular need careful rate/volume and privacy handling. This review does not silently expand that event scope.
-- A regression test now asserts that each of the 15 resource mutation routes writes an audit row before commit and that audit calls do not serialize request payloads or credential/token values. This is a source-contract test; it complements, but does not replace, integration tests against the database.
+- The reviewed 18 state-changing API routes (registration, login, logout, and create/update/delete for clients, cases, hearings, case actions, and case-document metadata) call `writeAuditLog` before committing their transaction. For the audited operations, an audit INSERT failure is intended to roll back the business change.
+- Authentication events now record registration, successful login, and logout. Failed authentication attempts are not recorded as audit events by these call sites; adding them would need a separate rate/volume and privacy decision.
+- Metadata is limited to event context and changed field names. Case creation no longer copies `case_number` into the audit metadata. The reviewed call sites do not pass full request payloads or credential/token values to the audit helper. The helper still records request IP and User-Agent; assess those fields under the approved privacy and retention policy.
+- The SQL security workflow checks effective table privileges for `anon` and `authenticated`, verifies RLS and the same-office INSERT policy, accepts a valid same-office INSERT, and rejects cross-office INSERT, UPDATE, and DELETE. This tests the Supabase `authenticated` role in disposable PostgreSQL, not the configured runtime role of the Node backend.
+- Regression tests check all 18 state-changing routes at source level, including audit-before-commit, rollback paths, metadata minimization, absence of an API audit-log read route, and the session heartbeat exception. Source-contract checks complement, but do not replace, database integration tests.
+- Runtime-role memberships/ownership and production RLS behavior remain unverified: no operational database was accessed. If the backend connects using a table owner, superuser, or a role with `BYPASSRLS`, the Supabase RLS policy is not a substitute for the backend's office-scoped SQL predicates.
 
