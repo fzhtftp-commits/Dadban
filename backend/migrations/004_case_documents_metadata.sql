@@ -3,29 +3,30 @@
 -- Existing case_documents objects are never silently accepted or upgraded.
 BEGIN;
 DO $preflight$
-DECLARE idx record; ok boolean;
+DECLARE tbl record; ok boolean;
 BEGIN
   IF to_regclass('case_documents') IS NOT NULL THEN
     RAISE EXCEPTION 'case_documents already exists; audit its full catalog definition before migration';
   END IF;
-  FOR idx IN
-    SELECT * FROM (VALUES
-      ('public.users'::regclass, 'users_id_office_unique'),
-      ('public.cases'::regclass, 'cases_id_office_unique')
-    ) AS expected(table_oid, index_name)
+  -- Accept any valid catalog-verified unique index on exactly (id, office_id);
+  -- do not assume that an object name proves its definition.
+  FOR tbl IN SELECT * FROM (VALUES ('public.users'::regclass), ('public.cases'::regclass)) AS t(table_oid)
   LOOP
-    SELECT i.indisunique AND i.indisvalid AND i.indisready AND i.indislive
-      AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indnkeyatts = 2
-      AND ARRAY(
-        SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
-        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum
-        WHERE k.ord <= i.indnkeyatts ORDER BY k.ord
-      ) = ARRAY['id','office_id']::text[]
-    INTO ok
-    FROM pg_index i JOIN pg_class ix ON ix.oid=i.indexrelid
-    WHERE i.indrelid=idx.table_oid AND ix.relname=idx.index_name;
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_index i
+      WHERE i.indrelid=tbl.table_oid
+        AND i.indisunique AND i.indisvalid AND i.indisready AND i.indislive
+        AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indnkeyatts=2
+        AND ARRAY(
+          SELECT a.attname::text
+          FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum
+          WHERE k.ord <= i.indnkeyatts ORDER BY k.ord
+        ) = ARRAY['id','office_id']::text[]
+    ) INTO ok;
     IF ok IS DISTINCT FROM true THEN
-      RAISE EXCEPTION 'Required valid unique index % on % (id, office_id) is missing or incompatible', idx.index_name, idx.table_oid::regclass;
+      RAISE EXCEPTION 'Required valid unique index on % (id, office_id) is missing or incompatible', tbl.table_oid::regclass;
     END IF;
   END LOOP;
 END
