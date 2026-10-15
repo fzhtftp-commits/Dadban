@@ -278,14 +278,14 @@ try {
 
   // A failure in the independent audit write must not change the public 401 result.
   await pool.query(`
-    create function reject_failed_login_audit() returns trigger language plpgsql as $
+    create function reject_failed_login_audit() returns trigger language plpgsql as $failed_login_audit$
     begin
       if new.action = 'login_failed' and new.entity_type = 'authentication' then
         raise exception 'forced failed-login audit INSERT failure in disposable integration test';
       end if;
       return new;
     end;
-    $;
+    $failed_login_audit$;
     create trigger reject_failed_login_audit_trigger
       before insert on audit_logs for each row execute function reject_failed_login_audit();
   `);
