@@ -31,6 +31,12 @@ test("case-document routes enforce the approved role matrix centrally", () => {
  assert.match(server, /app\.delete\("\/api\/case-documents\/:id", requireAuth, requireDocumentRole\("owner", "admin"\)/);
 });
 
+test("document write transactions revalidate and lock the live session and user", () => {
+ assert.match(server, /const lockLiveDocumentActor = async/);
+ assert.match(server, /for update of s, u/);
+ assert.equal((server.match(/lockLiveDocumentActor\(c, req,/g) || []).length, 3, "create, update, and delete must revalidate actor state inside their transactions");
+});
+
 test("confidentiality policy is enforced by API and audit", () => {
  assert.match(server, /const canReadCaseDocument = \(role, level\) =>/);
  assert.ok(server.includes("u.role='assistant' and d.confidentiality in ('normal','confidential')"));
