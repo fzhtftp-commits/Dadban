@@ -128,9 +128,10 @@ jobs:
           bash tests/audit-logs-security.sh
         working-directory: backend
 
-      - name: Verify two-office API isolation over HTTP
+      - name: Verify two-office API isolation and least-privilege runtime over HTTP
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
+          API_DATABASE_URL: postgres://dadban_document_runtime_ci:ci-only-runtime-password@localhost:5432/dadban_test
         run: node tests/case-documents-api.integration.js
         working-directory: backend
 
