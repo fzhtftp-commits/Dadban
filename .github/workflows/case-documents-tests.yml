@@ -128,11 +128,21 @@ jobs:
           bash tests/audit-logs-security.sh
         working-directory: backend
 
-      - name: Verify two-office API isolation and least-privilege runtime over HTTP
+      - name: Verify two-office API isolation over HTTP
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
-          API_DATABASE_URL: postgres://dadban_document_runtime_ci:ci-only-runtime-password@localhost:5432/dadban_test
         run: node tests/case-documents-api.integration.js
+        working-directory: backend
+
+      - name: Verify case document API least-privilege runtime role
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_runtime_role_test
+          API_DATABASE_URL: postgres://dadban_document_runtime_ci:ci-only-runtime-password@localhost:5432/dadban_runtime_role_test
+        run: |
+          createdb -h localhost -U postgres dadban_runtime_role_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_runtime_role_test' EXIT
+          node tests/case-documents-runtime-role.integration.js
         working-directory: backend
 
       - name: Verify lost PostgreSQL COMMIT responses and exact-once document audit
