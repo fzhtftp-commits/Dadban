@@ -351,7 +351,7 @@ try {
   );
   assert.equal(purged.rowCount, 1, "retention must mark the completed key as purged");
   const afterCleanupReplay = await request(`/api/case-documents/${patchId}`, {
-    method: "PATCH", key: patchKey, body: { title: "Re-executed after idempotency cleanup" }
+    method: "PATCH", key: patchKey, body: { title: "Committed despite lost COMMIT response" }
   });
   assert.equal(afterCleanupReplay.status, 410, "a tombstoned key must never be treated as a new operation");
   assert.deepEqual(afterCleanupReplay.body, { error: "idempotency_result_purged" });
