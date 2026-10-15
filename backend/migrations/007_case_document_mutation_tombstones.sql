@@ -30,4 +30,44 @@ CREATE TRIGGER case_document_mutation_idempotency_no_delete
 BEFORE DELETE ON public.case_document_mutation_idempotency
 FOR EACH ROW EXECUTE FUNCTION public.prevent_case_document_idempotency_delete();
 
+CREATE FUNCTION public.prevent_case_document_idempotency_reopen()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+  IF NEW.office_id IS DISTINCT FROM OLD.office_id
+     OR NEW.user_id IS DISTINCT FROM OLD.user_id
+     OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+     OR NEW.operation IS DISTINCT FROM OLD.operation
+     OR NEW.entity_id IS DISTINCT FROM OLD.entity_id
+     OR NEW.request_fingerprint IS DISTINCT FROM OLD.request_fingerprint
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION 'idempotency operation identity is immutable'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  IF OLD.response_status IS NOT NULL AND NEW.response_status IS DISTINCT FROM OLD.response_status THEN
+    RAISE EXCEPTION 'completed idempotency response status is immutable'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  IF OLD.purged_at IS NOT NULL AND NEW.purged_at IS DISTINCT FROM OLD.purged_at THEN
+    RAISE EXCEPTION 'idempotency tombstones are irreversible'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  IF OLD.response_status IS NULL AND NEW.purged_at IS NOT NULL THEN
+    RAISE EXCEPTION 'incomplete idempotency reservations cannot be tombstoned'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  RETURN NEW;
+END
+$function$;
+
+CREATE TRIGGER case_document_mutation_idempotency_identity_immutable
+BEFORE UPDATE ON public.case_document_mutation_idempotency
+FOR EACH ROW EXECUTE FUNCTION public.prevent_case_document_idempotency_reopen();
+
+
 COMMIT;
