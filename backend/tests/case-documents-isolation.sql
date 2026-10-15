@@ -1,5 +1,4 @@
 \set ON_ERROR_STOP on
-begin;
 create extension if not exists pgcrypto;
 create table offices (id uuid primary key);
 create table users (
@@ -10,6 +9,7 @@ create table cases (
  id uuid not null, office_id uuid not null references offices(id),
  primary key (id), unique (id, office_id)
 );
+create function set_updated_at() returns trigger language plpgsql as $ begin new.updated_at = now(); return new; end $;
 insert into offices(id) values
  ('11111111-1111-4111-8111-111111111111'),
  ('22222222-2222-4222-8222-222222222222');
@@ -46,4 +46,3 @@ begin
     raise notice 'PASS: oversized metadata rejected';
   end;
 end $$;
-rollback;

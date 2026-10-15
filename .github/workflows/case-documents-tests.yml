@@ -40,7 +40,10 @@ jobs:
       - name: Verify metadata migration and office isolation in disposable PostgreSQL
         env:
           PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-isolation.sql
+        run: |
+          createdb -h localhost -U postgres dadban_isolation_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_isolation_test' EXIT
+          psql -h localhost -U postgres -d dadban_isolation_test -v ON_ERROR_STOP=1 -f tests/case-documents-isolation.sql
         working-directory: backend
 
       - name: Verify full baseline migration upgrade and catalog assertions in disposable PostgreSQL
