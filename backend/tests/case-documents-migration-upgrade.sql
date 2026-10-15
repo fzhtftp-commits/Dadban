@@ -106,9 +106,15 @@ BEGIN
     FROM pg_class rel
     CROSS JOIN LATERAL aclexplode(coalesce(rel.relacl, acldefault('r', rel.relowner))) acl
     WHERE rel.oid='public.rate_limit_counters'::regclass
-      AND acl.grantee=0 AND acl.privilege_type='SELECT'
+      AND acl.grantee=0
   ) THEN
-    RAISE EXCEPTION 'PUBLIC must not receive counter table SELECT';
+    RAISE EXCEPTION 'PUBLIC must not receive any counter table privilege';
+  END IF;
+  -- This is a global IP-derived counter table, not tenant-owned business data.
+  -- RLS is intentionally not enabled: access must be controlled by explicit
+  -- table grants to the verified backend role, not a misleading tenant policy.
+  IF (SELECT relrowsecurity FROM pg_class WHERE oid='public.rate_limit_counters'::regclass) THEN
+    RAISE EXCEPTION 'Unexpected RLS policy mode for global rate-limit counters';
   END IF;
 END
 $rate_limit_catalog$;
