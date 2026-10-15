@@ -53,3 +53,9 @@ if [[ "$post" != "1|2|1" ]]; then
  echo "FAIL: restored schema protection changed after migration rerun failure: $post" >&2; exit 1
 fi
 echo "PASS: PostgreSQL backup/restore preserves idempotency and audit counts; migration 007 re-run after restore fails without losing tombstone protections"
+
+# Start a fresh API process against the restored database and replay the exact
+# key whose response data was purged before backup. The API must return 410 and
+# direct PostgreSQL counts must remain unchanged.
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/dadban_tombstone_restore_test node tests/case-documents-tombstone-restore-replay.integration.js
+
