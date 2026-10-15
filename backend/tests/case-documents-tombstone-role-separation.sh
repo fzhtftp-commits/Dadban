@@ -18,6 +18,7 @@ ALTER ROLE dadban_migrator_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHE
 ALTER ROLE dadban_maintenance_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 GRANT CREATE ON SCHEMA public TO dadban_schema_owner_ci, dadban_schema_owner_alt_ci;
 GRANT dadban_schema_owner_ci, dadban_schema_owner_alt_ci TO dadban_migrator_ci;
+GRANT dadban_schema_owner_alt_ci TO dadban_schema_owner_ci;
 ALTER TABLE public.case_document_mutation_idempotency OWNER TO dadban_schema_owner_ci;
 REVOKE ALL ON public.case_document_mutation_idempotency FROM dadban_maintenance_ci;
 GRANT SELECT ON public.case_document_mutation_idempotency TO dadban_maintenance_ci;
@@ -28,6 +29,7 @@ SQL
 psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 <<'SQL'
 BEGIN;
 SET LOCAL ROLE dadban_migrator_ci;
+SET LOCAL ROLE dadban_schema_owner_ci;
 ALTER TABLE public.case_document_mutation_idempotency DISABLE TRIGGER case_document_mutation_idempotency_identity_immutable;
 DO $assert$
 BEGIN
