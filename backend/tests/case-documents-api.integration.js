@@ -718,7 +718,16 @@ try {
     await deadlockBlocker.query("select id from users where email like 'deadlock-ballast-%@example.test' for update");
     await deadlockBlocker.query("select id from case_documents where id=$1 for update", [realDeadlockDocId]);
     deadlockRequest = request("/api/case-documents/" + realDeadlockDocId, { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "PATCH", idempotencyKey: realDeadlockKey, body: realDeadlockPayload, portToUse: retryPort });
-    await waitForBlockedPatchCount(1);
+    const waitForDeadlockApiLock = async () => {
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const waiting = await pool.query("select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select confidentiality from case_documents%'");
+        if (waiting.rows[0].count >= 1) return;
+        await delay(25);
+      }
+      throw new Error("Timed out waiting for API PATCH to block on the held document row");
+    };
+    await waitForDeadlockApiLock();
     let blockerDeadlockError = null;
     try {
       await deadlockBlocker.query("update users set role=role where id=$1", [retryPrincipal.id]);
