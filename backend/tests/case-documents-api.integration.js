@@ -1686,25 +1686,25 @@ try {
   console.log("PASS: logout clears cookies, revokes session, rejects subsequent requests and blocks idempotent replay");
 
 
-  // Kill a dedicated API process while the audit trigger is sleeping inside the
-  // mutation transaction. At that point the idempotency reservation and document
-  // UPDATE have run, but neither the audit INSERT nor COMMIT has completed.
+  // Kill a dedicated API process while a row trigger pauses the PATCH after its
+  // idempotency reservation but before the document UPDATE completes. This avoids
+  // depending on audit INSERT query text and proves uncommitted reservations vanish.
   const interruptedFixture = (await pool.query(
     "insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Before interrupted transaction','evidence',$3,$3) returning id",
     [ids.officeA, ids.caseA, ids.userA]
   )).rows[0].id;
   const interruptedKey = "process-interrupt-01";
   await pool.query(`
-    create or replace function pause_interrupted_document_audit() returns trigger language plpgsql as $fn$
+    create or replace function pause_interrupted_document_update() returns trigger language plpgsql as $fn$
     begin
-      if new.entity_type = 'case_document' and new.entity_id = '${interruptedFixture}'::uuid and new.action = 'update' then
+      if new.id = '${interruptedFixture}'::uuid and new.title = 'Must roll back after process termination' then
         perform pg_sleep(30);
       end if;
       return new;
     end;
     $fn$;
-    create trigger pause_interrupted_document_audit_trigger
-      before insert on audit_logs for each row execute function pause_interrupted_document_audit();
+    create trigger pause_interrupted_document_update_trigger
+      before update on case_documents for each row execute function pause_interrupted_document_update();
   `);
   const crashPort = port + 7;
   crashServer = spawn(process.execPath, ["src/server.js"], {
@@ -1719,20 +1719,21 @@ try {
     token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: interruptedKey,
     body: { title: "Must roll back after process termination" }, portToUse: crashPort
   }).catch(() => null);
-  const waitForAuditPause = async () => {
+  const waitForUpdatePause = async () => {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       const active = await pool.query(
-        "select pid from pg_stat_activity where datname=current_database() and wait_event='PgSleep' and query ilike '%insert into audit_logs%'"
+        "select pid from pg_stat_activity where datname=current_database() and wait_event='PgSleep' and query ilike '%update case_documents%'"
       );
       if (active.rowCount > 0) return active.rows[0].pid;
       await delay(25);
     }
-    throw new Error("Timed out waiting for transaction to reach the audit trigger after reservation and mutation");
+    throw new Error("Timed out waiting for transaction to reach the document trigger after idempotency reservation");
   };
-  const interruptedBackendPid = await waitForAuditPause();
+  const interruptedBackendPid = await waitForUpdatePause();
+  const crashExit = new Promise(resolve => crashServer.once("exit", resolve));
   crashServer.kill("SIGKILL");
-  await new Promise(resolve => crashServer.once("exit", resolve));
+  await crashExit;
   await interruptedRequest;
   const waitForBackendRollback = async () => {
     const deadline = Date.now() + 10000;
@@ -1750,8 +1751,8 @@ try {
     [ids.officeA, ids.userA, interruptedKey])).rows[0].count, 0, "process interruption must not leave an incomplete idempotency reservation");
   assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
     [ids.officeA, interruptedFixture])).rows[0].count, 0, "process interruption must not leave a partial audit event");
-  await pool.query("drop trigger pause_interrupted_document_audit_trigger on audit_logs");
-  await pool.query("drop function pause_interrupted_document_audit()");
+  await pool.query("drop trigger pause_interrupted_document_update_trigger on case_documents");
+  await pool.query("drop function pause_interrupted_document_update()");
   const interruptedRetry = await request("/api/case-documents/" + interruptedFixture, {
     token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: interruptedKey,
     body: { title: "Must roll back after process termination" }
@@ -1759,11 +1760,14 @@ try {
   assert.equal(interruptedRetry.status, 200, "same key must be reusable after PostgreSQL rolls back the killed connection");
   assert.equal((await pool.query("select title from case_documents where id=$1", [interruptedFixture])).rows[0].title,
     "Must roll back after process termination");
-  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
-    [ids.officeA, ids.userA, interruptedKey])).rows[0].count, 1, "retry after process interruption must persist exactly one completed idempotency row");
+  const interruptedIdempotency = await pool.query("select response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, interruptedKey]);
+  assert.equal(interruptedIdempotency.rowCount, 1, "retry after interruption must persist one idempotency record");
+  assert.equal(interruptedIdempotency.rows[0].response_status, 200, "idempotency record must be completed, not left NULL");
   assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action='update'",
     [ids.officeA, interruptedFixture])).rows[0].count, 1, "retry after process interruption must write exactly one audit event");
-  console.log("PASS: killing API process before COMMIT rolls back mutation, idempotency reservation and audit; same-key retry commits exactly once");
+  console.log("PASS: killing API process before COMMIT rolls back mutation and idempotency reservation; same-key retry commits one complete record and audit");
+
 
 
 } catch (error) {
