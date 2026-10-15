@@ -531,7 +531,7 @@ try {
   timeoutServer = null;
 
   const retriedIdempotentCreate = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: "retry-after-db-failure-01",
+    token: tokenA, csrf: csrfA, method: "POST", portToUse: auditPort, idempotencyKey: "retry-after-db-failure-01",
     body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
   });
   assert.equal(retriedIdempotentCreate.status, 201, "same idempotency key must be reusable after a rolled-back database failure");
