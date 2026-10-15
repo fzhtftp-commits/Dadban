@@ -66,6 +66,12 @@ jobs:
         run: bash tests/case-documents-tombstone-ddl-privileges.sh
         working-directory: backend
 
+      - name: Verify schema owner, migration, maintenance, and runtime separation
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-tombstone-role-separation.sh
+        working-directory: backend
+
       - name: Verify tombstone migration rerun fails atomically in disposable PostgreSQL
         env:
           PGPASSWORD: postgres
