@@ -16,6 +16,8 @@ const origin = "http://localhost:5500";
 const pool = new Pool({ connectionString: databaseUrl, ssl: false, max: 3 });
 let server;
 let serverOutput = "";
+let auditServer;
+let auditServerOutput = "";
 let outageServer;
 let outageServerOutput = "";
 let timeoutServer;
@@ -380,10 +382,19 @@ try {
     create trigger reject_document_mutation_audit_trigger
       before insert on audit_logs for each row execute function reject_document_mutation_audit();
   `);
+  const auditPort = port + 5;
+  auditServer = spawn(process.execPath, ["src/server.js"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, PORT: String(auditPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  auditServer.stdout.on("data", chunk => { auditServerOutput += chunk.toString(); });
+  auditServer.stderr.on("data", chunk => { auditServerOutput += chunk.toString(); });
+  await waitForServer(auditPort);
   const createAuditBeforeFailure = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and action='create'");
   const failedCreate = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST",
-    body: { case_id: ids.caseA, title: "Create must roll back with audit" }
+    body: { case_id: ids.caseA, title: "Create must roll back with audit" }, portToUse: auditPort
   });
   assert.equal(failedCreate.status, 500, "audit failure must reject document creation");
   assert.deepEqual(failedCreate.body, { error: "database_error" }, "create audit failure response must be sanitized");
@@ -394,7 +405,7 @@ try {
   const failedIdempotentCreate = await request("/api/case-documents", {
     // Use a separate office-A admin principal so this rollback assertion is not
     // masked by the owner principal's independent create-rate-limit budget.
-    token: roleAccounts[1].token, csrf: roleAccounts[1].csrf, method: "POST", idempotencyKey: "retry-after-db-failure-01",
+    token: roleAccounts[1].token, csrf: roleAccounts[1].csrf, method: "POST", idempotencyKey: "retry-after-db-failure-01", portToUse: auditPort,
     body: { case_id: ids.caseA, title: "Idempotent create database failure retry" }
   });
   assert.equal(failedIdempotentCreate.status, 500, "audit failure must fail idempotent creation");
@@ -633,6 +644,7 @@ try {
   console.log("PASS: concurrent update/delete requests remain consistent with exactly one delete audit");
   console.log("PASS: database statement timeout rolls back mutation and returns sanitized error");
   assert.equal(serverOutput.includes("forced audit failure"), false, "server logs must not include raw database exception messages");
+  assert.equal(auditServerOutput.includes("forced audit failure"), false, "audit rollback server logs must not expose raw database exceptions");
   assert.equal(serverOutput.includes("statement timeout"), false, "server logs must not include raw statement timeout details");
   assert.equal(timeoutServerOutput.includes("statement timeout"), false, "timeout-server logs must not disclose raw database errors");
   console.log("PASS: authentication and CSRF negatives are rejected with generic responses");
@@ -695,10 +707,12 @@ try {
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
+  if (auditServer) console.error(auditServerOutput);
   if (outageServer) console.error(outageServerOutput);
   process.exitCode = 1;
 } finally {
   if (server && server.exitCode === null) server.kill("SIGTERM");
+  if (auditServer && auditServer.exitCode === null) auditServer.kill("SIGTERM");
   if (outageServer && outageServer.exitCode === null) outageServer.kill("SIGTERM");
   if (timeoutServer && timeoutServer.exitCode === null) timeoutServer.kill("SIGTERM");
   if (rateLimitServer && rateLimitServer.exitCode === null) rateLimitServer.kill("SIGTERM");
