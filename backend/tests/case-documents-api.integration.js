@@ -1740,6 +1740,9 @@ try {
   crashServer.kill("SIGKILL");
   await crashExit;
   await interruptedRequest;
+  // PostgreSQL may finish an in-flight statement before noticing the dead client;
+  // terminate this known disposable test backend explicitly to force transaction abort.
+  await pool.query("select pg_terminate_backend($1)", [interruptedBackendPid]);
   const waitForBackendRollback = async () => {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
