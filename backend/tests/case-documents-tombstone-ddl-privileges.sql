@@ -24,23 +24,3 @@ BEGIN
   RAISE NOTICE 'PASS: table owner is %, distinct from runtime; runtime cannot DELETE, UPDATE table-wide, TRUNCATE, or manage triggers', table_owner;
 END
 $owner$;
-
--- Confirm the runtime role cannot alter table ownership or disable triggers:
-DO $runtime_ddl$
-DECLARE
-  denied boolean := false;
-BEGIN
-  BEGIN
-    EXECUTE 'SET LOCAL ROLE dadban_document_runtime_ci';
-    EXECUTE 'ALTER TABLE public.case_document_mutation_idempotency DISABLE TRIGGER ALL';
-    EXECUTE 'RESET ROLE';
-  EXCEPTION WHEN insufficient_privilege OR feature_not_supported THEN
-    denied := true;
-    EXECUTE 'RESET ROLE';
-  END;
-  IF NOT denied THEN
-    RAISE EXCEPTION 'runtime unexpectedly disabled tombstone triggers';
-  END IF;
-  RAISE NOTICE 'PASS: runtime ALTER TABLE DISABLE TRIGGER ALL is denied';
-END
-$runtime_ddl$;
