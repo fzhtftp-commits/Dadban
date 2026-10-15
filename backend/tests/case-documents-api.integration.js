@@ -26,6 +26,8 @@ let rateLimitServer;
 let rateLimitServerOutput = "";
 let roleServer;
 let roleServerOutput = "";
+let retryServer;
+let retryServerOutput = "";
 
 const ids = {
   officeA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -632,7 +634,12 @@ try {
   await pool.query("create trigger fail_transient_document_mutations_trigger before insert or update on case_documents for each row execute function fail_transient_document_mutations()");
   // This isolated integration case uses a fresh test-only rate-limit window after earlier API scenarios.
   await pool.query("delete from public.rate_limit_counters where bucket_name='document_create'");
-  const transientCreateFailed = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload, hostToUse: "127.0.0.2" });
+  const retryPort = port + 6;
+  retryServer = spawn(process.execPath, ["src/server.js"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PORT: String(retryPort), NODE_ENV: "test", RATE_LIMIT_MODE: "memory", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin }, stdio: ["ignore", "pipe", "pipe"] });
+  retryServer.stdout.on("data", chunk => { retryServerOutput += chunk.toString(); });
+  retryServer.stderr.on("data", chunk => { retryServerOutput += chunk.toString(); });
+  await waitForServer(retryPort);
+  const transientCreateFailed = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload, portToUse: retryPort });
   assert.equal(transientCreateFailed.status, 503, "deadlock with confirmed rollback should be explicitly retryable");
   assert.deepEqual(transientCreateFailed.body, { error: "database_retryable" });
   assert.equal((await pool.query("select count(*)::int as count from case_documents where title=$1", [retryCreatePayload.title])).rows[0].count, 0, "deadlocked create must roll back its document and idempotency key");
@@ -1359,5 +1366,6 @@ try {
   if (timeoutServer && timeoutServer.exitCode === null) timeoutServer.kill("SIGTERM");
   if (rateLimitServer && rateLimitServer.exitCode === null) rateLimitServer.kill("SIGTERM");
   if (roleServer && roleServer.exitCode === null) roleServer.kill("SIGTERM");
+  if (retryServer && retryServer.exitCode === null) retryServer.kill("SIGTERM");
   await pool.end();
 }
