@@ -898,10 +898,12 @@ try {
   // the document GET query runs. The GET query must authorize using the live DB role.
   const roleRaceLawyer = roleAccounts.find(a=>a.role==="lawyer");
   const lawyerTokenHash = hash(roleRaceLawyer.token);
+  const admin = roleAccounts.find(a=>a.role==="admin");
+  const adminTokenHash = hash(admin.token);
   await pool.query(`
     create or replace function delay_lawyer_session_heartbeat() returns trigger language plpgsql as $fn$
     begin
-      if old.token_hash = '${lawyerTokenHash}' then perform pg_sleep(0.6); end if;
+      if old.token_hash in ('${lawyerTokenHash}', '${adminTokenHash}') then perform pg_sleep(0.6); end if;
       return new;
     end;
     $fn$;
@@ -940,6 +942,43 @@ try {
         assert.deepEqual(response.body,{error:"document_not_found"});
       }
     }
+
+    // Write requests must reject state changes made after requireAuth read the actor.
+    await pool.query("update users set role='lawyer', is_active=true, deleted_at=null where id=$1", [roleRaceLawyer.id]);
+    const beforeRoleTitle = (await pool.query("select title from case_documents where id=$1", [idsByLevel.restricted])).rows[0].title;
+    const pendingPatch = request("/api/case-documents/" + idsByLevel.restricted, { token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "PATCH", portToUse: rolePort, body: { title: "must not update after role downgrade" } });
+    await waitForRoleHeartbeat();
+    await pool.query("update users set role='viewer' where id=$1", [roleRaceLawyer.id]);
+    const downgradedPatch = await pendingPatch;
+    assert.equal(downgradedPatch.status, 403, "PATCH must reject a role downgraded after authentication");
+    assert.equal((await pool.query("select title from case_documents where id=$1", [idsByLevel.restricted])).rows[0].title, beforeRoleTitle, "role downgrade race must not mutate metadata");
+
+    await pool.query("update users set role='lawyer', is_active=true where id=$1", [roleRaceLawyer.id]);
+    const beforeInactiveTitle = (await pool.query("select title from case_documents where id=$1", [idsByLevel.normal])).rows[0].title;
+    const pendingInactivePatch = request("/api/case-documents/" + idsByLevel.normal, { token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "PATCH", portToUse: rolePort, body: { title: "must not update after account deactivation" } });
+    await waitForRoleHeartbeat();
+    await pool.query("update users set is_active=false where id=$1", [roleRaceLawyer.id]);
+    const inactivePatch = await pendingInactivePatch;
+    assert.equal(inactivePatch.status, 401, "PATCH must reject account deactivation after authentication");
+    assert.equal((await pool.query("select title from case_documents where id=$1", [idsByLevel.normal])).rows[0].title, beforeInactiveTitle, "deactivation race must not mutate metadata");
+
+    await pool.query("update users set is_active=true, role='lawyer' where id=$1", [roleRaceLawyer.id]);
+    const pendingRevokedPatch = request("/api/case-documents/" + idsByLevel.normal, { token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "PATCH", portToUse: rolePort, body: { title: "must not update after session revocation" } });
+    await waitForRoleHeartbeat();
+    await pool.query("update auth_sessions set revoked_at=now() where token_hash=$1", [lawyerTokenHash]);
+    const revokedPatch = await pendingRevokedPatch;
+    assert.equal(revokedPatch.status, 401, "PATCH must reject session revocation after authentication");
+    assert.equal((await pool.query("select title from case_documents where id=$1", [idsByLevel.normal])).rows[0].title, beforeInactiveTitle, "revocation race must not mutate metadata");
+    await pool.query("update auth_sessions set revoked_at=null where token_hash=$1", [lawyerTokenHash]);
+
+    const adminDocument = await createFixture("Delete must reject downgraded admin", "normal");
+    const pendingDelete = request("/api/case-documents/" + adminDocument, { token: admin.token, csrf: admin.csrf, method: "DELETE", portToUse: rolePort });
+    await waitForRoleHeartbeat();
+    await pool.query("update users set role='assistant' where id=$1", [admin.id]);
+    const downgradedDelete = await pendingDelete;
+    assert.equal(downgradedDelete.status, 403, "DELETE must reject an admin downgraded after authentication");
+    assert.equal((await pool.query("select deleted_at from case_documents where id=$1", [adminDocument])).rows[0].deleted_at, null, "role downgrade race must not soft-delete metadata");
+    await pool.query("update users set role='admin' where id=$1", [admin.id]);
   } finally {
     await pool.query("drop trigger delay_lawyer_session_heartbeat_trigger on auth_sessions").catch(()=>{});
     await pool.query("drop function delay_lawyer_session_heartbeat()").catch(()=>{});
