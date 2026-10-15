@@ -20,10 +20,17 @@ state="$(psql -h localhost -U postgres -X -A -t -v ON_ERROR_STOP=1 -d dadban_tes
 SELECT
   (SELECT count(*) FROM pg_attribute WHERE attrelid='public.case_document_mutation_idempotency'::regclass AND attname='purged_at' AND NOT attisdropped),
   (SELECT count(*) FROM pg_constraint WHERE conrelid='public.case_document_mutation_idempotency'::regclass AND conname='case_document_mutation_idempotency_purged_completed_check'),
-  (SELECT count(*) FROM pg_trigger WHERE tgrelid='public.case_document_mutation_idempotency'::regclass AND tgname='case_document_mutation_idempotency_no_delete' AND NOT tgisinternal),
+  (SELECT count(*) FROM pg_trigger WHERE tgrelid='public.case_document_mutation_idempotency'::regclass AND tgname IN ('case_document_mutation_idempotency_no_delete','case_document_mutation_idempotency_identity_immutable') AND NOT tgisinternal),
   (SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='case_document_mutation_idempotency' AND indexname='case_document_mutation_idempotency_purged_at_idx');
 ")"
-if [[ "$state" != $'1|1|1|1' ]]; then
+if [[ "$state" != 
+  echo "FAIL: migration rerun left unexpected catalog state: $state" >&2
+  cat /tmp/dadban-tombstone-rerun.log >&2
+  exit 1
+fi
+
+echo "PASS: migration 007 second application fails atomically; existing tombstone column, constraint, trigger, and index remain intact"
+1|1|2|1' ]]; then
   echo "FAIL: migration rerun left unexpected catalog state: $state" >&2
   cat /tmp/dadban-tombstone-rerun.log >&2
   exit 1
