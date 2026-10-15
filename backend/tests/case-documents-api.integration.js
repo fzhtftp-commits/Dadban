@@ -678,6 +678,115 @@ try {
   assert.equal(deleteKeyConflict.status,409,"DELETE key must not be reused for a different target");
   assert.equal((await pool.query("select deleted_at from case_documents where id=$1",[otherDeleteFixture])).rows[0].deleted_at,null,"conflicting DELETE must not mutate a different document");
   assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'",[otherDeleteFixture])).rows[0].count,0,"conflicting DELETE must not add an audit event");
+
+  // A pre-COMMIT PostgreSQL trigger failure must roll back the document mutation,
+  // the durable idempotency reservation, and the audit row as one transaction.
+  const preCommitFixture = (await pool.query(
+    "insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Before precommit failure','evidence',$3,$3) returning id",
+    [ids.officeA, ids.caseA, ids.userA]
+  )).rows[0].id;
+  const preCommitKey = "precommit-failure-key-01";
+  await pool.query(`
+    create or replace function fail_case_document_before_commit() returns trigger
+    language plpgsql as $fn$
+    begin
+      if new.id = '${"00000000-0000-0000-0000-000000000000"}'::uuid then
+        raise exception 'unreachable guard';
+      end if;
+      if new.title = 'Force precommit failure' then
+        raise exception 'simulated failure before COMMIT' using errcode = 'P0001';
+      end if;
+      return new;
+    end;
+    $fn$
+  `);
+  await pool.query("create trigger fail_case_document_before_commit_trigger before update on case_documents for each row execute function fail_case_document_before_commit()");
+  const preCommitFailed = await request("/api/case-documents/" + preCommitFixture, {
+    token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: preCommitKey,
+    body: { title: "Force precommit failure" }
+  });
+  assert.equal(preCommitFailed.status, 500, "trigger failure before COMMIT must return a server error");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [preCommitFixture])).rows[0].title,
+    "Before precommit failure", "pre-COMMIT failure must roll back the business mutation");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, preCommitKey])).rows[0].count, 0, "pre-COMMIT failure must roll back the idempotency reservation");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action='update'",
+    [ids.officeA, preCommitFixture])).rows[0].count, 0, "pre-COMMIT failure must leave no audit row");
+  await pool.query("drop trigger fail_case_document_before_commit_trigger on case_documents");
+  await pool.query("drop function fail_case_document_before_commit()");
+  const preCommitRetry = await request("/api/case-documents/" + preCommitFixture, {
+    token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: preCommitKey,
+    body: { title: "Force precommit failure" }
+  });
+  assert.equal(preCommitRetry.status, 200, "same key must be reusable after PostgreSQL confirmed rollback");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [preCommitFixture])).rows[0].title,
+    "Force precommit failure");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, preCommitKey])).rows[0].count, 1, "successful retry must commit one durable idempotency record");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action='update'",
+    [ids.officeA, preCommitFixture])).rows[0].count, 1, "successful retry must commit exactly one audit row");
+
+  // Concurrent same-key PATCH requests must have one durable reservation, one mutation,
+  // and one audit event (not merely two successful HTTP responses).
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, concurrentPatchKey])).rows[0].count, 1, "concurrent PATCH retries must commit one idempotency row");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [concurrentPatchFixture])).rows[0].title,
+    "Concurrent keyed PATCH", "concurrent same-key PATCH must apply the mutation exactly once");
+
+  // A replay must re-evaluate current classification and authenticated office scope.
+  const assistant = roleAccounts.find(account => account.role === "assistant");
+  const scopeReplayFixture = (await pool.query(
+    "insert into case_documents(office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,'Confidential replay scope fixture','evidence','confidential',$3,$3) returning id",
+    [ids.officeA, ids.caseA, ids.userA]
+  )).rows[0].id;
+  const scopeReplayKey = "assistant-patch-replay-01";
+  const scopeReplayPayload = { description: "assistant's original permitted update" };
+  const assistantPatch = await request("/api/case-documents/" + scopeReplayFixture, {
+    token: assistant.token, csrf: assistant.csrf, method: "PATCH",
+    idempotencyKey: scopeReplayKey, body: scopeReplayPayload
+  });
+  assert.equal(assistantPatch.status, 200, "assistant may initially edit a confidential document");
+  const ownerRestrict = await request("/api/case-documents/" + scopeReplayFixture, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "restricted" }
+  });
+  assert.equal(ownerRestrict.status, 200, "owner can raise the document classification");
+  const auditBeforeDeniedReplay = (await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, scopeReplayFixture]
+  )).rows[0].count;
+  const deniedRestrictedReplay = await request("/api/case-documents/" + scopeReplayFixture, {
+    token: assistant.token, csrf: assistant.csrf, method: "PATCH",
+    idempotencyKey: scopeReplayKey, body: scopeReplayPayload
+  });
+  assert.equal(deniedRestrictedReplay.status, 404, "replay must not bypass current restricted-document read policy");
+  assert.equal((await pool.query("select description,confidentiality from case_documents where id=$1", [scopeReplayFixture])).rows[0].description,
+    "assistant's original permitted update", "denied replay must not mutate the restricted document");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, scopeReplayFixture]
+  )).rows[0].count, auditBeforeDeniedReplay, "denied replay must not append an audit event");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, assistant.id, scopeReplayKey]
+  )).rows[0].count, 1, "denied replay must preserve the original actor-scoped idempotency row");
+
+  const crossOfficeReplay = await request("/api/case-documents/" + scopeReplayFixture, {
+    token: tokenB, csrf: csrfB, method: "PATCH",
+    idempotencyKey: scopeReplayKey, body: scopeReplayPayload
+  });
+  assert.equal(crossOfficeReplay.status, 404, "same key from another office must not replay or disclose the foreign document");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeB, ids.userB, scopeReplayKey]
+  )).rows[0].count, 0, "cross-office denied attempt must roll back its reservation");
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1", [scopeReplayFixture])).rows[0].confidentiality,
+    "restricted", "cross-office replay must not change the document classification");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, scopeReplayFixture]
+  )).rows[0].count, auditBeforeDeniedReplay, "cross-office replay must not create an audit event");
+  console.log("PASS: pre-COMMIT rollback, concurrent PATCH exact-once counts, replay authorization and office-scope isolation");
+
   console.log("PASS: keyed PATCH/classification/DELETE retries, payload conflicts and exact-once audit");
 
   // Transient PostgreSQL errors are retryable only after the write transaction is confirmed rolled back.
