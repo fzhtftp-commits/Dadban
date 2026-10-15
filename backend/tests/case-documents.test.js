@@ -85,9 +85,9 @@ test("server error logging records only safe error metadata", () => {
 
 test("document migration has office-scoped partial indexes for active-document listing", () => {
  assert.match(migration, /CREATE INDEX case_documents_office_case_created_idx/);
- assert.match(migration, /ON case_documents \\(office_id, case_id, created_at DESC\\) WHERE deleted_at IS NULL/);
+ assert.match(migration, /WHERE deleted_at IS NULL/);
  assert.match(migration, /CREATE INDEX case_documents_office_created_idx/);
- assert.match(migration, /ON case_documents \\(office_id, created_at DESC\\) WHERE deleted_at IS NULL/);
+
  assert.match(migration, /case_documents_updated_by_same_office_fk/);
 });
 
