@@ -96,7 +96,7 @@ export const createPostgresRateLimiter = (
                clock.window_start + interval '${WINDOW_SECONDS} seconds'
         FROM clock
         ON CONFLICT (bucket_name, key_digest, window_start)
-        DO UPDATE SET request_count = public.rate_limit_counters.request_count + 1
+        DO UPDATE SET request_count = rate_limit_counters.request_count + 1
         RETURNING request_count, window_start, expires_at,
           GREATEST(1, CEIL(EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))))::integer AS retry_after_seconds
       `, [bucket, digest]);
