@@ -126,6 +126,9 @@ try {
       public.case_documents, public.case_document_mutation_idempotency
       FROM dadban_document_runtime_ci;
     GRANT SELECT ON public.users, public.cases, public.auth_sessions TO dadban_document_runtime_ci;
+    -- PostgreSQL requires UPDATE on at least one column of a FOR UPDATE target.
+    -- Keep the permission column-scoped; do not grant table-wide UPDATE on users.
+    GRANT UPDATE (full_name) ON public.users TO dadban_document_runtime_ci;
     GRANT UPDATE (last_seen_at, revoked_at) ON public.auth_sessions TO dadban_document_runtime_ci;
     GRANT SELECT ON public.case_documents TO dadban_document_runtime_ci;
     GRANT INSERT (office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by)
@@ -153,6 +156,10 @@ try {
       (SELECT r2.rolname FROM pg_class c JOIN pg_roles r2 ON r2.oid=c.relowner
         WHERE c.oid='public.case_document_mutation_idempotency'::regclass) AS idem_owner,
       has_table_privilege('dadban_document_runtime_ci','public.users','UPDATE') AS can_update_users,
+      has_column_privilege('dadban_document_runtime_ci','public.users','full_name','UPDATE') AS can_update_full_name,
+      has_column_privilege('dadban_document_runtime_ci','public.users','role','UPDATE') AS can_update_user_role,
+      has_column_privilege('dadban_document_runtime_ci','public.users','is_active','UPDATE') AS can_update_user_active,
+      has_column_privilege('dadban_document_runtime_ci','public.users','deleted_at','UPDATE') AS can_update_user_deleted,
       has_table_privilege('dadban_document_runtime_ci','public.audit_logs','SELECT') AS can_read_audit,
       has_table_privilege('dadban_document_runtime_ci','public.audit_logs','UPDATE') AS can_update_audit,
       has_table_privilege('dadban_document_runtime_ci','public.audit_logs','DELETE') AS can_delete_audit,
@@ -162,13 +169,14 @@ try {
     FROM pg_roles r WHERE r.rolname='dadban_document_runtime_ci'
   `);
   const role = roleState.rows[0];
-  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at"]) {
+  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_update_user_role","can_update_user_active","can_update_user_deleted","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at"]) {
     assert.equal(role[attr], false, `runtime role must not have ${attr}`);
   }
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
   assert.deepEqual(runtimeIdentity.rows[0], { role:"dadban_document_runtime_ci", rolsuper:false, rolcreatedb:false, rolcreaterole:false });
-  console.log("PASS: API DB login is the non-owner/non-admin runtime role with column-scoped writes, no user updates, and append-only audit access");
+  assert.equal(role.can_update_full_name, true, "only the non-security-sensitive full_name column is granted UPDATE for PostgreSQL row locking");
+  console.log("PASS: API DB login is non-owner/non-admin; UPDATE is column-scoped, user role/active state is protected, and audit access is append-only");
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
