@@ -1587,6 +1587,11 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
 
 const documentTypeSchema = z.enum(["petition","pleading","contract","evidence","court_order","correspondence","identity","receipt","other"]);
 const documentConfidentialitySchema = z.enum(["normal","confidential","restricted"]);
+const canReadCaseDocument = (role, level) => ["owner","admin","lawyer"].includes(role) || (role==="assistant" && ["normal","confidential"].includes(level)) || (role==="viewer" && level==="normal");
+const canCreateCaseDocument = (role, level) => ["owner","admin","lawyer"].includes(role) || (role==="assistant" && ["normal","confidential"].includes(level));
+const canEditCaseDocument = (role, level) => ["owner","admin","lawyer"].includes(role) || (role==="assistant" && ["normal","confidential"].includes(level));
+const canChangeDocumentConfidentiality = role => ["owner","admin"].includes(role);
+const documentAccessDenied = res => res.status(404).json({error:"document_not_found"});
 const documentDateSchema = z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/)
   .refine((value) => { const date = new Date(value + "T00:00:00.000Z"); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; });
 const originalFilenameSchema = z.string().trim().min(1).max(255)
@@ -1621,7 +1626,9 @@ app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin"
   const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
   if (cid && !cid.success) return res.status(400).json({error:"invalid_case_id"});
   const values=[req.auth.officeId], where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null"];
-  if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
+  if(req.auth.role==="assistant") where.push("d.confidentiality in ('normal','confidential')");
+  else if(req.auth.role==="viewer") where.push("d.confidentiality = 'normal'");
+  if(cid){values.push(cid.data);where.push(`d.case_id = ${values.length}`);}
   try {
     const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
@@ -1631,11 +1638,13 @@ app.get("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "ad
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});
   try {
     const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null",[id.data,req.auth.officeId]);
-    if(!q.rowCount)return res.status(404).json({error:"document_not_found"});return res.json({data:q.rows[0]});
+    if(!q.rowCount || !canReadCaseDocument(req.auth.role,q.rows[0].confidentiality)) return documentAccessDenied(res);
+    return res.json({data:q.rows[0]});
   }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
 app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, createDocumentRateLimit, async(req,res)=>{
    const p=caseDocumentCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:"invalid_case_document"});const d=p.data;
+   if(!canCreateCaseDocument(req.auth.role,d.confidentiality)) return res.status(403).json({error:"document_confidentiality_forbidden"});
    const idempotencyKey=req.get("idempotency-key");
    if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
    const fingerprint=hashToken(JSON.stringify(d));let c;
@@ -1654,14 +1663,21 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
      const doc=q.rows[0];await writeAuditLog(c,req.auth,"create","case_document",doc.id,req,{case_id:doc.case_id,storage_status:doc.storage_status});await c.query("commit");return res.status(201).json({data:doc});
    }catch(error){await rollbackQuietly(c,"create case document");logSafeError("Create case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
  });
-app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
+app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
+  if(Object.hasOwn(p.data,"confidentiality")&&!canChangeDocumentConfidentiality(req.auth.role)) return res.status(403).json({error:"document_confidentiality_forbidden"});
   const fields=["title","document_type","confidentiality","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
-  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
-  v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);let c;
-  try{c=await acquireClient(pool);await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at`,v);
-    if(!q.rowCount){await rollbackQuietly(c,"update missing document");return res.status(404).json({error:"document_not_found"});}
-    await writeAuditLog(c,req.auth,"update","case_document",id.data,req,{fields:Object.keys(p.data)});await c.query("commit");return res.json({data:q.rows[0]});
+  for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=${v.length}`);}
+  v.push(req.auth.userId);sets.push(`updated_by=${v.length}`);v.push(id.data,req.auth.officeId);let c;
+  try{
+    c=await acquireClient(pool);await c.query("begin");
+    const current=await c.query("select confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
+    if(!current.rowCount||!canEditCaseDocument(req.auth.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
+    const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=${v.length-1} and office_id=${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at`,v);
+    if(!q.rowCount){await rollbackQuietly(c,"update missing document");return documentAccessDenied(res);}
+    const auditMetadata={fields:Object.keys(p.data)};
+    if(Object.hasOwn(p.data,"confidentiality")&&current.rows[0].confidentiality!==q.rows[0].confidentiality) auditMetadata.confidentiality_change={from:current.rows[0].confidentiality,to:q.rows[0].confidentiality};
+    await writeAuditLog(c,req.auth,"update","case_document",id.data,req,auditMetadata);await c.query("commit");return res.json({data:q.rows[0]});
   }catch(error){await rollbackQuietly(c,"update case document");logSafeError("Update case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
 });
 app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin"), requireTrustedOrigin, requireCsrf, async(req,res)=>{

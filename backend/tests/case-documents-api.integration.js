@@ -567,70 +567,69 @@ try {
   await waitForServer(rolePort);
 
 
-  const roleAccessFixture = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST", portToUse: rolePort,
-    body: { case_id: ids.caseA, title: "Role matrix access fixture", document_type: "evidence" }
-  });
-  assert.equal(roleAccessFixture.status, 201, "owner should create the active role matrix fixture");
-  const roleAccessDocumentId = roleAccessFixture.body.data.id;
-
-  // Role authorization matrix: every role can list/read within its office.
+  const createFixture = async (title, confidentiality) => {
+    const result = await request("/api/case-documents", { token: tokenA, csrf: csrfA, method: "POST", portToUse: rolePort, body: { case_id: ids.caseA, title, document_type: "evidence", confidentiality } });
+    assert.equal(result.status, 201);
+    return result.body.data.id;
+  };
+  const idsByLevel = {
+    normal: await createFixture("Policy normal fixture", "normal"),
+    confidential: await createFixture("Policy confidential fixture", "confidential"),
+    restricted: await createFixture("Policy restricted fixture", "restricted")
+  };
+  const readable = {owner:["normal","confidential","restricted"],admin:["normal","confidential","restricted"],lawyer:["normal","confidential","restricted"],assistant:["normal","confidential"],viewer:["normal"]};
   for (const account of roleAccounts) {
-    const roleList = await request("/api/case-documents", { token: account.token, csrf: account.csrf, portToUse: rolePort });
-    assert.equal(roleList.status, 200, `${account.role} should be allowed to list document metadata`);
-    assert.ok(roleList.body.data.some(item => item.id === roleAccessDocumentId), `${account.role} list should include the in-office document`);
-    const roleRead = await request(`/api/case-documents/${roleAccessDocumentId}`, { token: account.token, csrf: account.csrf, portToUse: rolePort });
-    assert.equal(roleRead.status, 200, `${account.role} should be allowed to read document metadata`);
-  }
-
-  // Owner/admin/lawyer/assistant may create; viewer may not.
-  const roleCreatedDocuments = new Map();
-  for (const account of roleAccounts) {
-    const result = await request("/api/case-documents", {
-      token: account.token, csrf: account.csrf, method: "POST", portToUse: rolePort,
-      body: { case_id: ids.caseA, title: `Role policy create ${account.role}`, document_type: "other" }
-    });
-    if (["owner", "admin", "lawyer", "assistant"].includes(account.role)) {
-      assert.equal(result.status, 201, `${account.role} should be allowed to create metadata`);
-      roleCreatedDocuments.set(account.role, result.body.data.id);
-    } else {
-      assert.equal(result.status, 403, "viewer must be denied document creation");
-      assert.deepEqual(result.body, { error: "document_role_forbidden" });
+    const list=await request("/api/case-documents",{token:account.token,csrf:account.csrf,portToUse:rolePort});
+    assert.equal(list.status,200);
+    for(const level of ["normal","confidential","restricted"]){
+      const expected=readable[account.role].includes(level);
+      assert.equal(list.body.data.some(d=>d.id===idsByLevel[level]),expected,`${account.role} list policy for ${level}`);
+      const detail=await request(`/api/case-documents/${idsByLevel[level]}`,{token:account.token,csrf:account.csrf,portToUse:rolePort});
+      assert.equal(detail.status,expected?200:404,`${account.role} detail policy for ${level}`);
+      if(!expected)assert.deepEqual(detail.body,{error:"document_not_found"});
     }
   }
-
-  // Owner/admin/lawyer may update; assistant/viewer must be denied.
-  for (const account of roleAccounts) {
-    const result = await request(`/api/case-documents/${roleAccessDocumentId}`, {
-      token: account.token, csrf: account.csrf, method: "PATCH", portToUse: rolePort,
-      body: { description: `updated by ${account.role}` }
-    });
-    if (["owner", "admin", "lawyer"].includes(account.role)) {
-      assert.equal(result.status, 200, `${account.role} should be allowed to update metadata`);
-    } else {
-      assert.equal(result.status, 403, `${account.role} must be denied metadata updates`);
-      assert.deepEqual(result.body, { error: "document_role_forbidden" });
-    }
+  const roleCreatedDocuments=new Map();
+  for(const account of roleAccounts){
+    const result=await request("/api/case-documents",{token:account.token,csrf:account.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:`Role policy create ${account.role}`,confidentiality:"normal"}});
+    if(["owner","admin","lawyer","assistant"].includes(account.role)){assert.equal(result.status,201);roleCreatedDocuments.set(account.role,result.body.data.id);}
+    else {assert.equal(result.status,403);assert.deepEqual(result.body,{error:"document_role_forbidden"});}
   }
-
-  // Only owner/admin may soft-delete; denied roles must not mutate the record.
-  for (const role of ["lawyer", "assistant", "viewer"]) {
-    const account = roleAccounts.find(item => item.role === role);
-    const result = await request(`/api/case-documents/${roleAccessDocumentId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort
-    });
-    assert.equal(result.status, 403, `${role} must be denied document deletion`);
-    assert.deepEqual(result.body, { error: "document_role_forbidden" });
+  const assistant=roleAccounts.find(a=>a.role==="assistant");
+  const deniedCreate=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:"Denied restricted assistant create",confidentiality:"restricted"}});
+  assert.equal(deniedCreate.status,403);assert.deepEqual(deniedCreate.body,{error:"document_confidentiality_forbidden"});
+  assert.equal((await pool.query("select count(*)::int as count from case_documents where title='Denied restricted assistant create'")).rows[0].count,0);
+  for(const account of roleAccounts){
+    const result=await request(`/api/case-documents/${idsByLevel.normal}`,{token:account.token,csrf:account.csrf,method:"PATCH",portToUse:rolePort,body:{description:`updated by ${account.role}`}});
+    if(["owner","admin","lawyer","assistant"].includes(account.role))assert.equal(result.status,200,`${account.role} may edit normal`);
+    else {assert.equal(result.status,403);assert.deepEqual(result.body,{error:"document_role_forbidden"});}
   }
-  for (const role of ["owner", "admin"]) {
-    const account = roleAccounts.find(item => item.role === role);
-    const targetId = roleCreatedDocuments.get(role);
-    const result = await request(`/api/case-documents/${targetId}`, {
-      token: account.token, csrf: account.csrf, method: "DELETE", portToUse: rolePort
-    });
-    assert.equal(result.status, 204, `${role} should be allowed to soft-delete metadata`);
+  for(const role of ["lawyer","assistant"]){
+    const account=roleAccounts.find(a=>a.role===role);
+    const result=await request(`/api/case-documents/${idsByLevel.normal}`,{token:account.token,csrf:account.csrf,method:"PATCH",portToUse:rolePort,body:{confidentiality:"restricted"}});
+    assert.equal(result.status,403);assert.deepEqual(result.body,{error:"document_confidentiality_forbidden"});
   }
-  console.log("PASS: role matrix verified for list/read/create/update/delete across owner/admin/lawyer/assistant/viewer");
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1",[idsByLevel.normal])).rows[0].confidentiality,"normal");
+  const ownerChange=await request(`/api/case-documents/${idsByLevel.normal}`,{token:tokenA,csrf:csrfA,method:"PATCH",portToUse:rolePort,body:{confidentiality:"confidential"}});
+  assert.equal(ownerChange.status,200);
+  let audit=(await pool.query("select metadata from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' order by created_at desc limit 1",[idsByLevel.normal])).rows[0].metadata;
+  assert.deepEqual(audit.confidentiality_change,{from:"normal",to:"confidential"});
+  const admin=roleAccounts.find(a=>a.role==="admin");
+  const adminChange=await request(`/api/case-documents/${idsByLevel.normal}`,{token:admin.token,csrf:admin.csrf,method:"PATCH",portToUse:rolePort,body:{confidentiality:"restricted"}});
+  assert.equal(adminChange.status,200);
+  audit=(await pool.query("select metadata from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' order by created_at desc limit 1",[idsByLevel.normal])).rows[0].metadata;
+  assert.deepEqual(audit.confidentiality_change,{from:"confidential",to:"restricted"});
+  for(const role of ["lawyer","assistant","viewer"]){
+    const account=roleAccounts.find(a=>a.role===role);
+    const result=await request(`/api/case-documents/${idsByLevel.normal}`,{token:account.token,csrf:account.csrf,method:"DELETE",portToUse:rolePort});
+    assert.equal(result.status,403);assert.deepEqual(result.body,{error:"document_role_forbidden"});
+  }
+  for(const role of ["owner","admin"]){
+    const account=roleAccounts.find(a=>a.role===role);
+    const result=await request(`/api/case-documents/${roleCreatedDocuments.get(role)}`,{token:account.token,csrf:account.csrf,method:"DELETE",portToUse:rolePort});
+    assert.equal(result.status,204);
+  }
+  console.log("PASS: confidentiality policy, role matrix, non-disclosure, rejected mutations and classification audit");
 
   console.log("PASS: office A can read its own document");
   console.log("PASS: office B list does not disclose office A document");

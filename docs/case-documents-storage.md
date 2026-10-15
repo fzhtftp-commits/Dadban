@@ -20,3 +20,14 @@ This feature manages metadata for documents attached to a case. It does not acce
 
 ## Migration
 004_case_documents_metadata.sql is separate and must be reviewed and manually applied only to a disposable/development database. This PR does not alter production data or Render.
+
+
+## Confidentiality access policy (PR #9)
+The API, not the UI, enforces this policy:
+- **Owner / Admin:** read, create, edit, and soft-delete all levels.
+- **Lawyer:** read, create, and edit all levels; cannot delete or change a document's confidentiality level.
+- **Assistant:** read, create, and edit `normal` and `confidential`; no access to `restricted`; cannot delete or change confidentiality.
+- **Viewer:** read `normal` only; cannot create, edit, or delete.
+- List queries filter unauthorized levels in SQL. Detail/update requests for inaccessible records return a non-disclosing not-found response. All access remains office-scoped.
+- Owner/Admin classification changes are recorded in update audit metadata with both the previous and new level.
+- No schema change is needed; existing disposable PostgreSQL migration, catalog, office-isolation and forced-rollback checks remain required.
