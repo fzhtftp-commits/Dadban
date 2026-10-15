@@ -661,7 +661,7 @@ try {
   }
   await pool.query("drop trigger fail_transient_document_mutations_trigger on case_documents");
   await pool.query("drop function fail_transient_document_mutations()");
-  const transientCreateRetried = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload, hostToUse: "127.0.0.2" });
+  const transientCreateRetried = await request("/api/case-documents", { token: retryCreatePrincipal.token, csrf: retryCreatePrincipal.csrf, method: "POST", idempotencyKey: retryCreateKey, body: retryCreatePayload, portToUse: retryPort });
   assert.equal(transientCreateRetried.status, 201, "same idempotency key must succeed after deadlock rollback");
   assert.equal((await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='create'", [transientCreateRetried.body.data.id])).rows[0].count, 1, "retried create must have exactly one audit event");
   const transientUpdateRetried = await request("/api/case-documents/" + retryUpdateId, { token: retryPrincipal.token, csrf: retryPrincipal.csrf, method: "PATCH", body: transientUpdateBody });
