@@ -1712,20 +1712,20 @@ const caseDocumentPatchSchema = z.object({
 app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
   const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
   if (cid && !cid.success) return res.status(400).json({error:"invalid_case_id"});
-  const values=[req.auth.officeId], where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null"];
-  if(req.auth.role==="assistant") where.push("d.confidentiality in ('normal','confidential')");
-  else if(req.auth.role==="viewer") where.push("d.confidentiality = 'normal'");
-  if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
+  const values=[req.auth.officeId,req.auth.userId];
+  const where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null",
+    "((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))"];
+  if(cid){values.push(cid.data);where.push(`d.case_id = ${values.length}`);}
   try {
-    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
+    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$2 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
   } catch(error){logSafeError("List case documents failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
 app.get("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});
   try {
-    const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null",[id.data,req.auth.officeId]);
-    if(!q.rowCount || !canReadCaseDocument(req.auth.role,q.rows[0].confidentiality)) return documentAccessDenied(res);
+    const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$3 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null and ((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))",[id.data,req.auth.officeId,req.auth.userId]);
+    if(!q.rowCount) return documentAccessDenied(res);
     return res.json({data:q.rows[0]});
   }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
