@@ -113,6 +113,24 @@ BEGIN
   END;
 END
 $assert_denied$;
+DO $assert_mutations_denied$
+BEGIN
+  BEGIN
+    UPDATE public.audit_logs SET action='tampered'
+    WHERE entity_type='audit_policy_test';
+    RAISE EXCEPTION 'authenticated unexpectedly updated an audit row';
+  EXCEPTION WHEN insufficient_privilege THEN
+    NULL;
+  END;
+  BEGIN
+    DELETE FROM public.audit_logs WHERE entity_type='audit_policy_test';
+    RAISE EXCEPTION 'authenticated unexpectedly deleted an audit row';
+  EXCEPTION WHEN insufficient_privilege THEN
+    NULL;
+  END;
+END
+$assert_mutations_denied$;
+
 RESET ROLE;
 
 DO $assert_rows$
