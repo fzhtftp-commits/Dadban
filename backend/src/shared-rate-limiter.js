@@ -67,12 +67,32 @@ export const createPostgresRateLimiter = (
       // PostgreSQL's inet parser canonicalizes IPv6 spellings. The address is
       // used only transiently and is never written to the counter table.
       const canonicalResult = await pool.query(
-        "SELECT host($1::inet) AS canonical_ip",
+        `SELECT host($1::inet) AS canonical_ip,
+                family($1::inet) AS address_family,
+                (($1::inet) <<= '::ffff:0:0/96'::inet) AS is_ipv4_mapped`,
         [address]
       );
-      const canonicalIp = canonicalResult.rows?.[0]?.canonical_ip;
+      let canonicalIp = canonicalResult.rows?.[0]?.canonical_ip;
+      const isIpv4Mapped = canonicalResult.rows?.[0]?.is_ipv4_mapped === true;
       if (typeof canonicalIp !== "string" || !canonicalIp) {
         return res.status(503).json({ error: "rate_limit_unavailable" });
+      }
+
+      // IPv4-mapped IPv6 is another representation of the same IPv4 client.
+      // PostgreSQL canonicalizes the IPv6 spelling; collapse the mapped prefix
+      // so ::ffff:192.0.2.1 and 192.0.2.1 produce the same HMAC input.
+      if (isIpv4Mapped) {
+        const mappedSuffix = canonicalIp.toLowerCase().replace(/^::ffff:/, "");
+        if (net.isIP(mappedSuffix) === 4) {
+          canonicalIp = mappedSuffix;
+        } else {
+          const groups = mappedSuffix.split(":");
+          if (groups.length !== 2 || groups.some(group => !/^[0-9a-f]{1,4}$/.test(group))) {
+            return res.status(503).json({ error: "rate_limit_unavailable" });
+          }
+          const value = (Number.parseInt(groups[0], 16) * 0x10000) + Number.parseInt(groups[1], 16);
+          canonicalIp = [24, 16, 8, 0].map(shift => (value >>> shift) & 255).join(".");
+        }
       }
 
       const digest = crypto.createHmac("sha256", key)
