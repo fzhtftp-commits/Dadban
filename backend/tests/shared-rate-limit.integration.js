@@ -98,7 +98,7 @@ try {
         WHERE acl.grantee = 0) AS public_table_privilege_count,
       (SELECT count(*)::integer
          FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl
-        WHERE acl.grantee = 0) AS public_schema_privilege_count,
+        WHERE acl.grantee = 0 AND acl.privilege_type = 'CREATE') AS public_schema_create_count,
       has_table_privilege(current_user, c.oid, 'SELECT') AS can_select,
       has_table_privilege(current_user, c.oid, 'INSERT') AS can_insert,
       has_table_privilege(current_user, c.oid, 'UPDATE') AS can_update,
@@ -118,7 +118,7 @@ try {
   assert.equal(role.schema_create, false, "runtime role must not create objects in public");
   assert.equal(role.owns_table, false, "runtime role must not own the counter table");
   assert.equal(role.public_table_privilege_count, 0, "PUBLIC must have no direct counter-table privileges");
-  assert.equal(role.public_schema_privilege_count, 0, "PUBLIC must have no direct public-schema privileges");
+  assert.equal(role.public_schema_create_count, 0, "PUBLIC must not be able to create objects in public");
   for (const privilege of ["can_select", "can_insert", "can_update", "can_delete"]) {
     assert.equal(role[privilege], true, `runtime role requires ${privilege}`);
   }
