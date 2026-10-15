@@ -116,7 +116,6 @@ try {
   assert.equal(role.rolsuper, false, "rate-limit integration must not run as a superuser");
   assert.equal(role.schema_usage, true);
   assert.equal(role.schema_create, false, "runtime role must not create objects in public");
-  assert.notEqual(role.table_owner, currentUserName(), "runtime role must not own the counter table");
   assert.equal(role.owns_table, false, "runtime role must not own the counter table");
   assert.equal(role.public_table_privilege_count, 0, "PUBLIC must have no direct counter-table privileges");
   assert.equal(role.public_schema_privilege_count, 0, "PUBLIC must have no direct public-schema privileges");
