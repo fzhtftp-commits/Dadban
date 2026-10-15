@@ -46,6 +46,8 @@ test("PATCH and DELETE idempotency keys are persisted without duplicating docume
 test("document write transactions revalidate and lock the live session and user", () => {
  assert.match(server, /const lockLiveDocumentActor = async/);
  assert.match(server, /for update of s, u/);
+ assert.match(server, /s\.expires_at > clock_timestamp\(\) and u\.is_active = true and u\.deleted_at is null/);
+ assert.match(server, /Lock identity rows first, then check expiry with the wall clock after any lock wait/);
  assert.equal((server.match(/lockLiveDocumentActor\(c, req,/g) || []).length, 3, "create, update, and delete must revalidate actor state inside their transactions");
  assert.match(server, /rollbackSucceeded && \["40001", "40P01", "55P03", "57014"\]\.includes\(error\?\.code\)/);
  assert.match(server, /dbError\(error,rollbackSucceeded\)/);
