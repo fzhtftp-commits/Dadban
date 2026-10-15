@@ -276,6 +276,36 @@ try {
     console.log(`PASS: ${label} is audited without account identifiers or credentials`);
   }
 
+
+
+  // A failure in the independent audit write must not change the public 401 result.
+  await pool.query(`
+    create function reject_failed_login_audit() returns trigger language plpgsql as $failed_login_audit$
+    begin
+      if new.action = 'login_failed' and new.entity_type = 'authentication' then
+        raise exception 'forced failed-login audit INSERT failure in disposable integration test';
+      end if;
+      return new;
+    end;
+    $failed_login_audit$;
+    create trigger reject_failed_login_audit_trigger
+      before insert on audit_logs for each row execute function reject_failed_login_audit();
+  `);
+  const failedAttemptsBeforeAuditOutage = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
+  )).rows[0].count);
+  const auditUnavailableLogin = await request("/api/auth/login", "POST", {
+    email: "audit-mutation-owner@example.test",
+    password: "WrongPassword!234"
+  });
+  assert.equal(auditUnavailableLogin.status, 401, "failed-login audit outage must not turn invalid credentials into 500");
+  assert.deepEqual(auditUnavailableLogin.body, { error: "invalid_credentials" });
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
+  )).rows[0].count), failedAttemptsBeforeAuditOutage, "failed audit insert must not leave a partial event");
+  await pool.query("drop trigger reject_failed_login_audit_trigger on audit_logs; drop function reject_failed_login_audit()");
+  console.log("PASS: failed-login audit write failure preserves generic 401 response");
+
   // Audit request metadata is bounded before storage.
   const longUserAgent = "UA".repeat(400);
   const longUaResponse = await request("/api/auth/login", "POST", {
@@ -306,34 +336,6 @@ try {
   assert.equal(rateLimitedResponse.body.error, "rate_limit_exceeded");
   assert.ok(Number(rateLimitedResponse.headers["retry-after"] ?? 0) >= 1, "rate-limited response must include a positive Retry-After header");
   console.log("PASS: login rate limit rejects attempts beyond 10 per 15 minutes for one process/IP");
-
-  // A failure in the independent audit write must not change the public 401 result.
-  await pool.query(`
-    create function reject_failed_login_audit() returns trigger language plpgsql as $failed_login_audit$
-    begin
-      if new.action = 'login_failed' and new.entity_type = 'authentication' then
-        raise exception 'forced failed-login audit INSERT failure in disposable integration test';
-      end if;
-      return new;
-    end;
-    $failed_login_audit$;
-    create trigger reject_failed_login_audit_trigger
-      before insert on audit_logs for each row execute function reject_failed_login_audit();
-  `);
-  const failedAttemptsBeforeAuditOutage = Number((await pool.query(
-    "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
-  )).rows[0].count);
-  const auditUnavailableLogin = await request("/api/auth/login", "POST", {
-    email: "audit-mutation-owner@example.test",
-    password: "WrongPassword!234"
-  });
-  assert.equal(auditUnavailableLogin.status, 401, "failed-login audit outage must not turn invalid credentials into 500");
-  assert.deepEqual(auditUnavailableLogin.body, { error: "invalid_credentials" });
-  assert.equal(Number((await pool.query(
-    "select count(*)::int as count from audit_logs where action='login_failed' and entity_type='authentication'"
-  )).rows[0].count), failedAttemptsBeforeAuditOutage, "failed audit insert must not leave a partial event");
-  await pool.query("drop trigger reject_failed_login_audit_trigger on audit_logs; drop function reject_failed_login_audit()");
-  console.log("PASS: failed-login audit write failure preserves generic 401 response");
 
   const logoutAuditBefore = await countAudit("auth_session", "logout");
   const failedLogout = await request("/api/auth/logout", "POST");
