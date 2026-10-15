@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { acquireClient, rollbackQuietly, releaseClient } from "./document-transaction.js";
+import { createPostgresRateLimiter } from "./shared-rate-limiter.js";
 
 const { Pool } = pg;
 const scrypt = promisify(crypto.scrypt);
@@ -378,9 +379,31 @@ const createRateLimiter = ({ windowMs, maxRequests }) => {
   };
 };
 
-const registerRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 5 });
-const loginRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 10 });
-const createDocumentRateLimit = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 20 });
+const rateLimitMode = process.env.RATE_LIMIT_MODE || "memory";
+if (!["memory", "postgres"].includes(rateLimitMode)) {
+  throw new Error("RATE_LIMIT_MODE must be either memory or postgres");
+}
+if (rateLimitMode === "postgres" && !pool) {
+  throw new Error("RATE_LIMIT_MODE=postgres requires DATABASE_URL");
+}
+if (rateLimitMode === "postgres" &&
+    (typeof process.env.RATE_LIMIT_HMAC_KEY !== "string" ||
+     Buffer.byteLength(process.env.RATE_LIMIT_HMAC_KEY, "utf8") < 32)) {
+  throw new Error("RATE_LIMIT_MODE=postgres requires RATE_LIMIT_HMAC_KEY of at least 32 bytes");
+}
+
+const createConfiguredRateLimiter = ({ bucket, maxRequests }) =>
+  rateLimitMode === "postgres"
+    ? createPostgresRateLimiter(pool, {
+        secret: process.env.RATE_LIMIT_HMAC_KEY,
+        bucket,
+        maxRequests
+      })
+    : createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests });
+
+const registerRateLimit = createConfiguredRateLimiter({ bucket: "register", maxRequests: 5 });
+const loginRateLimit = createConfiguredRateLimiter({ bucket: "login", maxRequests: 10 });
+const createDocumentRateLimit = createConfiguredRateLimiter({ bucket: "document_create", maxRequests: 20 });
 
 const syncCaseNextHearing = async (client, officeId, caseId) => {
   await client.query(
