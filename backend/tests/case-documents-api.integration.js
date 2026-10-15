@@ -1851,6 +1851,8 @@ try {
   process.exitCode = 1;
 } finally {
   await pool.query("drop trigger if exists fail_transient_document_mutations_trigger on case_documents").catch(()=>{});
+  await pool.query("drop trigger if exists pause_session_revoke_race_trigger on case_documents").catch(()=>{});
+  await pool.query("drop function if exists pause_session_revoke_race()").catch(()=>{});
   await pool.query("drop function if exists fail_transient_document_mutations()").catch(()=>{});
   if (server && server.exitCode === null) server.kill("SIGTERM");
   if (auditServer && auditServer.exitCode === null) auditServer.kill("SIGTERM");
