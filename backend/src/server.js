@@ -339,6 +339,13 @@ const requireDocumentRole = (...allowedRoles) => (req, res, next) => {
   next();
 };
 
+const lockLiveDocumentActor = async (client, req, allowedRoles) => {
+  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 and s.revoked_at is null and s.expires_at > now() and u.is_active = true and u.deleted_at is null for update of s, u", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
+  if (!result.rowCount) return { ok: false, status: 401, error: "authentication_required" };
+  if (!allowedRoles.includes(result.rows[0].role)) return { ok: false, status: 403, error: "document_role_forbidden" };
+  return { ok: true, role: result.rows[0].role };
+};
+
 const requireCsrf = (req, res, next) => {
   const cookies = parseCookies(req.headers.cookie);
   const header = req.get("x-csrf-token");
@@ -1736,7 +1743,7 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
    if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
    const fingerprint=hashToken(JSON.stringify(d));let c;
    try{c=await acquireClient(pool);
-     await c.query("begin");const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
+     await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);if (!actor.ok) { await rollbackQuietly(c, "create actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }if (!canCreateCaseDocument(actor.role, d.confidentiality)) { await rollbackQuietly(c, "create confidentiality forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
      if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
      const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,d.confidentiality,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
      if(!q.rowCount && idempotencyKey){
@@ -1763,8 +1770,11 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
   v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);let c;
   try{
     c=await acquireClient(pool);await c.query("begin");
+    const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);
+    if (!actor.ok) { await rollbackQuietly(c, "update actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }
+    if (Object.hasOwn(p.data, "confidentiality") && !canChangeDocumentConfidentiality(actor.role)) { await rollbackQuietly(c, "classification change forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }
     const current=await c.query("select confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
-    if(!current.rowCount||!canEditCaseDocument(req.auth.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
+    if(!current.rowCount||!canEditCaseDocument(actor.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
     const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at`,v);
     if(!q.rowCount){await rollbackQuietly(c,"update missing document");return documentAccessDenied(res);}
     const auditMetadata={fields:Object.keys(p.data)};
@@ -1774,7 +1784,7 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
 });
 app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});let c;
-  try{c=await acquireClient(pool);await c.query("begin");const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
+  try{c=await acquireClient(pool);await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin"]);if (!actor.ok) { await rollbackQuietly(c, "delete actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);await c.query("commit");return res.status(204).send();
   }catch(error){await rollbackQuietly(c,"delete case document");logSafeError("Delete case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}finally{releaseClient(c);}
