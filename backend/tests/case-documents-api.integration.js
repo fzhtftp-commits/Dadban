@@ -287,9 +287,10 @@ try {
   assert.deepEqual(oversizedBody.body, { error: "request_too_large" }, "oversized request response must not disclose parser internals");
   const created = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST",
-    body: { case_id: ids.caseA, title: "Confidential Office A document", document_type: "evidence" }
+    body: { case_id: ids.caseA, title: "Confidential Office A document", document_type: "evidence", confidentiality: "restricted" }
   });
   assert.equal(created.status, 201, `office A create failed: ${JSON.stringify(created.body)}`);
+  assert.equal(created.body.data.confidentiality, "restricted", "API must persist and return requested confidentiality");
   const documentId = created.body.data.id;
 
   const filteredOwn = await request("/api/case-documents?case_id=" + ids.caseA, { token: tokenA, csrf: csrfA });
@@ -413,6 +414,11 @@ try {
   });
   assert.equal(ownUpdate.status, 200, "office A can update its own document");
   assert.equal(ownUpdate.body.data.document_type, "evidence", "title-only patch must not silently reset document type to the create default");
+  const confidentialityUpdate = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "normal" } });
+  assert.equal(confidentialityUpdate.status, 200);
+  assert.equal(confidentialityUpdate.body.data.confidentiality, "normal");
+  const invalidConfidentiality = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "public" } });
+  assert.equal(invalidConfidentiality.status, 400);
   const updateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
   assert.equal(updateAudit.rows[0].count, 1, "successful update must be audited once");
   await pool.query(`

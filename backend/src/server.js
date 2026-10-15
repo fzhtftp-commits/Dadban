@@ -1586,6 +1586,7 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
 
 
 const documentTypeSchema = z.enum(["petition","pleading","contract","evidence","court_order","correspondence","identity","receipt","other"]);
+const documentConfidentialitySchema = z.enum(["normal","confidential","restricted"]);
 const documentDateSchema = z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/)
   .refine((value) => { const date = new Date(value + "T00:00:00.000Z"); return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value; });
 const originalFilenameSchema = z.string().trim().min(1).max(255)
@@ -1596,6 +1597,7 @@ const caseDocumentCreateSchema = z.object({
   case_id: z.string().uuid(),
   title: z.string().trim().min(2).max(200),
   document_type: documentTypeSchema.default("other"),
+  confidentiality: documentConfidentialitySchema.default("confidential"),
   description: z.string().trim().max(3000).optional().nullable(),
   original_filename: originalFilenameSchema.optional().nullable(),
   mime_type: z.string().trim().max(127).optional().nullable(),
@@ -1606,6 +1608,7 @@ const caseDocumentCreateSchema = z.object({
 const caseDocumentPatchSchema = z.object({
   title: z.string().trim().min(2).max(200).optional(),
   document_type: documentTypeSchema.optional(),
+  confidentiality: documentConfidentialitySchema.optional(),
   description: z.string().trim().max(3000).optional().nullable(),
   original_filename: originalFilenameSchema.optional().nullable(),
   mime_type: z.string().trim().max(127).optional().nullable(),
@@ -1620,7 +1623,7 @@ app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin"
   const values=[req.auth.officeId], where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null"];
   if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
   try {
-    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
+    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
   } catch(error){logSafeError("List case documents failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
@@ -1639,11 +1642,11 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
    try{c=await acquireClient(pool);
      await c.query("begin");const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
      if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
-     const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
+     const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,d.confidentiality,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
      if(!q.rowCount && idempotencyKey){
        const existing=await c.query("select id,request_fingerprint,deleted_at from case_documents where office_id=$1 and created_by=$2 and idempotency_key=$3",[req.auth.officeId,req.auth.userId,idempotencyKey]);
        if(existing.rowCount && existing.rows[0].request_fingerprint===fingerprint && !existing.rows[0].deleted_at){
-         const replay=await c.query("select id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at from case_documents where id=$1",[existing.rows[0].id]);
+         const replay=await c.query("select id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at from case_documents where id=$1",[existing.rows[0].id]);
          await c.query("commit");return res.status(200).json({data:replay.rows[0],idempotent_replay:true});
        }
        await rollbackQuietly(c,"idempotency key conflict");return res.status(409).json({error:"idempotency_key_reused"});
@@ -1653,7 +1656,7 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
  });
 app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer"), requireTrustedOrigin, requireCsrf, async(req,res)=>{
   const id=parseUuid.safeParse(req.params.id),p=caseDocumentPatchSchema.safeParse(req.body);if(!id.success)return res.status(400).json({error:"invalid_document_id"});if(!p.success)return res.status(400).json({error:"invalid_case_document_update"});
-  const fields=["title","document_type","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
+  const fields=["title","document_type","confidentiality","description","original_filename","mime_type","size_bytes","document_date","reference_number"],v=[],sets=[];
   for(const f of fields)if(Object.hasOwn(p.data,f)){v.push(p.data[f]??null);sets.push(`${f}=$${v.length}`);}
   v.push(req.auth.userId);sets.push(`updated_by=$${v.length}`);v.push(id.data,req.auth.officeId);let c;
   try{c=await acquireClient(pool);await c.query("begin");const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,storage_status,created_at,updated_at`,v);

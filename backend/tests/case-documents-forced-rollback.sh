@@ -7,7 +7,7 @@ PSQL=(psql -h "$HOST" -U postgres -d "$DB" -v ON_ERROR_STOP=1)
 dropdb -h "$HOST" -U postgres --if-exists "$DB"
 createdb -h "$HOST" -U postgres "$DB"
 trap 'dropdb -h "$HOST" -U postgres --if-exists "$DB"' EXIT
-psql -h "$HOST" -U postgres -d "$DB" -v ON_ERROR_STOP=1 -f ../../database/schema.sql
+psql -h "$HOST" -U postgres -d "$DB" -v ON_ERROR_STOP=1 -f ../database/schema.sql
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"; dropdb -h "$HOST" -U postgres --if-exists "$DB"' EXIT
 awk '/^COMMIT;[[:space:]]*$/ { print "SELECT 1 / 0;"; } { print; }' migrations/004_case_documents_metadata.sql > "$tmp"

@@ -152,3 +152,20 @@ test("migration fails closed instead of silently accepting same-named pre-existi
  assert.match(migration, /create index case_documents_office_created_idx/i);
  assert.doesNotMatch(migration, /create (?:unique )?index if not exists case_documents_/i);
 });
+
+
+test("confidentiality contract is consistent across migration, API schema, and UI", async () => {
+ const ui = await readFile(new URL("../../documents.html", import.meta.url), "utf8");
+ const script = await readFile(new URL("../../documents.js", import.meta.url), "utf8");
+ assert.match(migration, /confidentiality varchar\(16\) NOT NULL DEFAULT 'confidential'/);
+ assert.match(migration, /confidentiality IN \('normal','confidential','restricted'\)/);
+ assert.match(server, /const documentConfidentialitySchema = z\.enum\(\["normal","confidential","restricted"\]\)/);
+ assert.match(server, /confidentiality: documentConfidentialitySchema\.default\("confidential"\)/);
+ assert.match(server, /confidentiality: documentConfidentialitySchema\.optional\(\)/);
+ assert.match(server, /reference_number,d\.confidentiality,d\.storage_status/);
+ assert.match(server, /reference_number,confidentiality,idempotency_key,request_fingerprint/);
+ assert.match(server, /\["title","document_type","confidentiality","description"/);
+ assert.match(ui, /id="confidentiality"/);
+ assert.match(script, /confidentialityLabels/);
+ assert.match(script, /confidentiality:\$\("confidentiality"\)\.value/);
+});
