@@ -898,8 +898,8 @@ try {
   // the document GET query runs. The GET query must authorize using the live DB role.
   const roleRaceLawyer = roleAccounts.find(a=>a.role==="lawyer");
   const lawyerTokenHash = hash(roleRaceLawyer.token);
-  const admin = roleAccounts.find(a=>a.role==="admin");
-  const adminTokenHash = hash(admin.token);
+  const roleRaceAdmin = roleAccounts.find(a=>a.role==="admin");
+  const adminTokenHash = hash(roleRaceAdmin.token);
   await pool.query(`
     create or replace function delay_lawyer_session_heartbeat() returns trigger language plpgsql as $fn$
     begin
@@ -972,13 +972,13 @@ try {
     await pool.query("update auth_sessions set revoked_at=null where token_hash=$1", [lawyerTokenHash]);
 
     const adminDocument = await createFixture("Delete must reject downgraded admin", "normal");
-    const pendingDelete = request("/api/case-documents/" + adminDocument, { token: admin.token, csrf: admin.csrf, method: "DELETE", portToUse: rolePort });
+    const pendingDelete = request("/api/case-documents/" + adminDocument, { token: roleRaceAdmin.token, csrf: roleRaceAdmin.csrf, method: "DELETE", portToUse: rolePort });
     await waitForRoleHeartbeat();
-    await pool.query("update users set role='assistant' where id=$1", [admin.id]);
+    await pool.query("update users set role='assistant' where id=$1", [roleRaceAdmin.id]);
     const downgradedDelete = await pendingDelete;
     assert.equal(downgradedDelete.status, 403, "DELETE must reject an admin downgraded after authentication");
     assert.equal((await pool.query("select deleted_at from case_documents where id=$1", [adminDocument])).rows[0].deleted_at, null, "role downgrade race must not soft-delete metadata");
-    await pool.query("update users set role='admin' where id=$1", [admin.id]);
+    await pool.query("update users set role='admin' where id=$1", [roleRaceAdmin.id]);
   } finally {
     await pool.query("drop trigger delay_lawyer_session_heartbeat_trigger on auth_sessions").catch(()=>{});
     await pool.query("drop function delay_lawyer_session_heartbeat()").catch(()=>{});
