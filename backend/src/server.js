@@ -345,10 +345,8 @@ const requireDocumentRole = (...allowedRoles) => (req, res, next) => {
 };
 
 const lockLiveDocumentActor = async (client, req, allowedRoles) => {
-  // Lock the session row to serialize against logout/revocation without granting
-  // the runtime role UPDATE on users merely to obtain a row lock. The current role
-  // and active/deleted state are re-read inside this transaction before mutation.
-  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 for update of s", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
+  // Lock identity rows first, then check expiry with the wall clock after any lock wait.
+  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 for update of s, u", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
   if (!result.rowCount) return { ok: false, status: 401, error: "authentication_required" };
   const live = await client.query("select (s.revoked_at is null and s.expires_at > clock_timestamp() and u.is_active = true and u.deleted_at is null) as valid from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
   if (!live.rowCount || !live.rows[0].valid) return { ok: false, status: 401, error: "authentication_required" };
