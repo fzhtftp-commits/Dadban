@@ -380,6 +380,68 @@ try {
   assert.equal(persisted.rows[0].title, "Confidential Office A document", "cross-office update must not mutate the document");
   assert.equal(persisted.rows[0].deleted_at, null, "cross-office delete must not soft-delete the document");
 
+  // Cross-office HTTP isolation for the other resource families. Existing document isolation
+  // assertions above remain the dedicated case-document coverage; this fills the missing routes.
+  const clientsA = await request("/api/clients", { token: tokenA, csrf: csrfA });
+  const clientsB = await request("/api/clients", { token: tokenB, csrf: csrfB });
+  assert.equal(clientsA.status, 200);
+  assert.ok(clientsA.body.data.some(row => row.id === clientA), "office A client list must include its own client");
+  assert.equal(clientsA.body.data.some(row => row.id === clientB), false, "office A client list must hide office B clients");
+  assert.equal(clientsB.status, 200);
+  assert.ok(clientsB.body.data.some(row => row.id === clientB), "office B client list must include its own client");
+  assert.equal(clientsB.body.data.some(row => row.id === clientA), false, "office B client list must hide office A clients");
+  assert.equal((await request("/api/clients/" + clientA, { token: tokenA, csrf: csrfA })).status, 200);
+  assert.equal((await request("/api/clients/" + clientA, { token: tokenB, csrf: csrfB })).status, 404,
+    "cross-office client detail must be indistinguishable from a missing client");
+  assert.equal((await request("/api/clients/lookup?national_id=1234567890", { token: tokenB, csrf: csrfB })).status, 404,
+    "client lookup must not reveal another office's national ID");
+
+  const casesA = await request("/api/cases", { token: tokenA, csrf: csrfA });
+  const casesB = await request("/api/cases", { token: tokenB, csrf: csrfB });
+  assert.equal(casesA.status, 200);
+  assert.ok(casesA.body.data.some(row => row.id === ids.caseA), "office A case list must include its own case");
+  assert.equal(casesA.body.data.some(row => row.id === ids.caseB), false, "office A case list must hide office B cases");
+  assert.equal(casesB.status, 200);
+  assert.ok(casesB.body.data.some(row => row.id === ids.caseB), "office B case list must include its own case");
+  assert.equal(casesB.body.data.some(row => row.id === ids.caseA), false, "office B case list must hide office A cases");
+  assert.equal((await request("/api/cases/" + ids.caseA, { token: tokenA, csrf: csrfA })).status, 200);
+  assert.equal((await request("/api/cases/" + ids.caseA, { token: tokenB, csrf: csrfB })).status, 404,
+    "cross-office case detail must return not found");
+
+  const hearingsA = await request("/api/hearings", { token: tokenA, csrf: csrfA });
+  const hearingsB = await request("/api/hearings", { token: tokenB, csrf: csrfB });
+  assert.equal(hearingsA.status, 200);
+  assert.ok(hearingsA.body.data.some(row => row.id === hearingA), "office A hearing list must include its own hearing");
+  assert.equal(hearingsA.body.data.some(row => row.id === hearingB), false, "office A hearing list must hide office B hearings");
+  assert.equal(hearingsB.status, 200);
+  assert.ok(hearingsB.body.data.some(row => row.id === hearingB), "office B hearing list must include its own hearing");
+  assert.equal(hearingsB.body.data.some(row => row.id === hearingA), false, "office B hearing list must hide office A hearings");
+  assert.equal((await request("/api/hearings/" + hearingA, { token: tokenA, csrf: csrfA })).status, 200);
+  assert.equal((await request("/api/hearings/" + hearingA, { token: tokenB, csrf: csrfB })).status, 404,
+    "cross-office hearing detail must return not found");
+
+  const actionsA = await request("/api/actions", { token: tokenA, csrf: csrfA });
+  const actionsB = await request("/api/actions", { token: tokenB, csrf: csrfB });
+  assert.equal(actionsA.status, 200);
+  assert.ok(actionsA.body.data.some(row => row.id === actionA), "office A action list must include its own action");
+  assert.equal(actionsA.body.data.some(row => row.id === actionB), false, "office A action list must hide office B actions");
+  assert.equal(actionsB.status, 200);
+  assert.ok(actionsB.body.data.some(row => row.id === actionB), "office B action list must include its own action");
+  assert.equal(actionsB.body.data.some(row => row.id === actionA), false, "office B action list must hide office A actions");
+  assert.equal((await request("/api/actions/" + actionA, { token: tokenA, csrf: csrfA })).status, 200);
+  assert.equal((await request("/api/actions/" + actionA, { token: tokenB, csrf: csrfB })).status, 404,
+    "cross-office action detail must return not found");
+
+  const assigneesA = await request("/api/actions/assignees", { token: tokenA, csrf: csrfA });
+  const assigneesB = await request("/api/actions/assignees", { token: tokenB, csrf: csrfB });
+  assert.equal(assigneesA.status, 200);
+  assert.ok(assigneesA.body.data.some(row => row.id === ids.userA), "office A assignee list must include its own user");
+  assert.equal(assigneesA.body.data.some(row => row.id === ids.userB), false, "office A assignee list must hide office B users");
+  assert.equal(assigneesB.status, 200);
+  assert.ok(assigneesB.body.data.some(row => row.id === ids.userB), "office B assignee list must include its own user");
+  assert.equal(assigneesB.body.data.some(row => row.id === ids.userA), false, "office B assignee list must hide office A users");
+  console.log("PASS: cross-office HTTP isolation for clients, cases, hearings, actions and assignees");
+
   const createAudit = await pool.query("select action, entity_id from audit_logs where entity_type='case_document' and entity_id=$1", [documentId]);
   assert.equal(createAudit.rows.filter(row => row.action === "create").length, 1, "successful create must be audited once");
 
