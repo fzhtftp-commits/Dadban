@@ -599,6 +599,15 @@ try {
   const deniedCreate=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:"Denied restricted assistant create",confidentiality:"restricted"}});
   assert.equal(deniedCreate.status,403);assert.deepEqual(deniedCreate.body,{error:"document_confidentiality_forbidden"});
   assert.equal((await pool.query("select count(*)::int as count from case_documents where title='Denied restricted assistant create'")).rows[0].count,0);
+  const assistantConfidentialCreate=await request("/api/case-documents",{token:assistant.token,csrf:assistant.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:"Assistant confidential create allowed",confidentiality:"confidential"}});
+  assert.equal(assistantConfidentialCreate.status,201,"assistant may create confidential documents");
+  const lawyer=roleAccounts.find(a=>a.role==="lawyer");
+  const lawyerRestrictedCreate=await request("/api/case-documents",{token:lawyer.token,csrf:lawyer.csrf,method:"POST",portToUse:rolePort,body:{case_id:ids.caseA,title:"Lawyer restricted create allowed",confidentiality:"restricted"}});
+  assert.equal(lawyerRestrictedCreate.status,201,"lawyer may create restricted documents");
+  const assistantConfidentialEdit=await request(`/api/case-documents/${idsByLevel.confidential}`,{token:assistant.token,csrf:assistant.csrf,method:"PATCH",portToUse:rolePort,body:{description:"assistant may edit confidential metadata"}});
+  assert.equal(assistantConfidentialEdit.status,200,"assistant may edit confidential metadata");
+  const assistantRestrictedEdit=await request(`/api/case-documents/${idsByLevel.restricted}`,{token:assistant.token,csrf:assistant.csrf,method:"PATCH",portToUse:rolePort,body:{description:"must not edit restricted metadata"}});
+  assert.equal(assistantRestrictedEdit.status,404,"assistant must not edit restricted metadata");
   for(const account of roleAccounts){
     const result=await request(`/api/case-documents/${idsByLevel.normal}`,{token:account.token,csrf:account.csrf,method:"PATCH",portToUse:rolePort,body:{description:`updated by ${account.role}`}});
     if(["owner","admin","lawyer","assistant"].includes(account.role))assert.equal(result.status,200,`${account.role} may edit normal`);
@@ -610,6 +619,11 @@ try {
     assert.equal(result.status,403);assert.deepEqual(result.body,{error:"document_confidentiality_forbidden"});
   }
   assert.equal((await pool.query("select confidentiality from case_documents where id=$1",[idsByLevel.normal])).rows[0].confidentiality,"normal");
+  const noCsrfClassificationChange=await request(`/api/case-documents/${idsByLevel.normal}`,{token:tokenA,csrf:csrfA,method:"PATCH",csrfHeader:false,portToUse:rolePort,body:{confidentiality:"confidential"}});
+  assert.equal(noCsrfClassificationChange.status,403,"classification change without CSRF must be rejected");
+  assert.deepEqual(noCsrfClassificationChange.body,{error:"csrf_token_required"});
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1",[idsByLevel.normal])).rows[0].confidentiality,"normal",
+    "missing-CSRF classification change must not mutate stored level");
   const ownerChange=await request(`/api/case-documents/${idsByLevel.normal}`,{token:tokenA,csrf:csrfA,method:"PATCH",portToUse:rolePort,body:{confidentiality:"confidential"}});
   assert.equal(ownerChange.status,200);
   let audit=(await pool.query("select metadata from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' order by created_at desc limit 1",[idsByLevel.normal])).rows[0].metadata;
