@@ -690,9 +690,6 @@ try {
     create or replace function fail_case_document_before_commit() returns trigger
     language plpgsql as $fn$
     begin
-      if new.id = '${"00000000-0000-0000-0000-000000000000"}'::uuid then
-        raise exception 'unreachable guard';
-      end if;
       if new.title = 'Force precommit failure' then
         raise exception 'simulated failure before COMMIT' using errcode = 'P0001';
       end if;
