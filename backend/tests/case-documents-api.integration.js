@@ -447,6 +447,34 @@ try {
   assert.equal(invalidConfidentiality.status, 400);
   const updateAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [documentId]);
   assert.equal(updateAudit.rows[0].count, 2, "each of two successful updates must be audited exactly once");
+
+  const lifecycleAuditRows = await pool.query(
+    "select office_id, user_id, action, entity_type, entity_id, metadata from audit_logs where entity_type='case_document' and entity_id=$1 order by created_at asc",
+    [documentId]
+  );
+  assert.equal(lifecycleAuditRows.rowCount, 3, "create and both successful updates must have one audit row each");
+  assert.deepEqual(lifecycleAuditRows.rows.map(row => row.action), ["create", "update", "update"]);
+  for (const row of lifecycleAuditRows.rows) {
+    assert.equal(row.office_id, ids.officeA, "lifecycle audit metadata must remain scoped to the actor's office");
+    assert.equal(row.user_id, ids.userA, "lifecycle audit event must identify the authenticated actor");
+    assert.equal(row.entity_type, "case_document");
+    assert.equal(row.entity_id, documentId);
+  }
+  assert.deepEqual(lifecycleAuditRows.rows[0].metadata, {
+    case_id: ids.caseA,
+    storage_status: "metadata_only"
+  }, "create audit must retain only the intended non-content metadata");
+  assert.deepEqual(lifecycleAuditRows.rows[1].metadata, { fields: ["title"] },
+    "ordinary update audit must record changed field names, not submitted field values");
+  assert.deepEqual(lifecycleAuditRows.rows[2].metadata, {
+    fields: ["confidentiality"],
+    confidentiality_change: { from: "restricted", to: "normal" }
+  }, "classification audit must capture the exact persisted from→to transition and no document contents");
+  const serializedLifecycleMetadata = JSON.stringify(lifecycleAuditRows.rows.map(row => row.metadata));
+  for (const sensitiveValue of ["Confidential Office A document", "Updated by Office A", "session", "csrf", "authorization"]) {
+    assert.equal(serializedLifecycleMetadata.includes(sensitiveValue), false,
+      `audit metadata must not contain document content or authentication material: ${sensitiveValue}`);
+  }
   await pool.query(`
     create trigger reject_document_mutation_audit_trigger
       before insert on audit_logs for each row execute function reject_document_mutation_audit();
