@@ -1082,12 +1082,13 @@ try {
   });
   assert.equal(lifecycleCase.status, 201, "case lifecycle fixture should be created");
   const lifecycleCaseId = lifecycleCase.body.data.id;
-  const lifecycleDoc = await request("/api/case-documents", {
-    token: tokenA, csrf: csrfA, method: "POST",
-    body: { case_id: lifecycleCaseId, title: "Hidden when parent case is deleted" }
-  });
-  assert.equal(lifecycleDoc.status, 201, "document for case lifecycle fixture should be created");
-  const lifecycleDocId = lifecycleDoc.body.data.id;
+  // Seed the child row directly so this lifecycle-only assertion does not consume
+  // the independent HTTP create-rate-limit budget used by later API regression tests.
+  const lifecycleDocInsert = await pool.query(
+    "insert into case_documents(office_id,case_id,title,created_by,updated_by) values($1,$2,$3,$4,$4) returning id",
+    [ids.officeA, lifecycleCaseId, "Hidden when parent case is deleted", ids.userA]
+  );
+  const lifecycleDocId = lifecycleDocInsert.rows[0].id;
   const deleteParentCase = await request(`/api/cases/${lifecycleCaseId}`, {
     token: tokenA, csrf: csrfA, method: "DELETE"
   });
@@ -1107,7 +1108,7 @@ try {
   assert.equal((await pool.query(
     "select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1",
     [lifecycleDocId]
-  )).rows[0].count, 1, "parent case deletion must not fabricate a document audit event");
+  )).rows[0].count, 0, "parent case deletion must not fabricate a document audit event");
   assert.equal((await pool.query(
     "select count(*)::int as count from audit_logs where entity_type='case' and entity_id=$1 and action='delete'",
     [lifecycleCaseId]
