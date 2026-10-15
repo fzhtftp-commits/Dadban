@@ -1628,7 +1628,7 @@ app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin"
   const values=[req.auth.officeId], where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null"];
   if(req.auth.role==="assistant") where.push("d.confidentiality in ('normal','confidential')");
   else if(req.auth.role==="viewer") where.push("d.confidentiality = 'normal'");
-  if(cid){values.push(cid.data);where.push(`d.case_id = ${values.length}`);}
+  if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
   try {
     const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
@@ -1673,7 +1673,7 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
     c=await acquireClient(pool);await c.query("begin");
     const current=await c.query("select confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
     if(!current.rowCount||!canEditCaseDocument(req.auth.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
-    const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=${v.length-1} and office_id=${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at`,v);
+    const q=await c.query(`update case_documents set ${sets.join(",")},updated_at=now() where id=$${v.length-1} and office_id=$${v.length} and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at`,v);
     if(!q.rowCount){await rollbackQuietly(c,"update missing document");return documentAccessDenied(res);}
     const auditMetadata={fields:Object.keys(p.data)};
     if(Object.hasOwn(p.data,"confidentiality")&&current.rows[0].confidentiality!==q.rows[0].confidentiality) auditMetadata.confidentiality_change={from:current.rows[0].confidentiality,to:q.rows[0].confidentiality};
