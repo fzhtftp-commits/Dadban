@@ -28,6 +28,8 @@ let roleServer;
 let roleServerOutput = "";
 let retryServer;
 let retryServerOutput = "";
+let crashServer;
+let crashServerOutput = "";
 
 const ids = {
   officeA: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -782,6 +784,49 @@ try {
     "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
     [ids.officeA, scopeReplayFixture]
   )).rows[0].count, auditBeforeDeniedReplay, "cross-office replay must not create an audit event");
+
+  // Race a replay against an owner's confidentiality escalation. Either the replay
+  // linearizes first (200) or it observes the new restriction (404); neither ordering
+  // may duplicate the mutation/audit, and the final persisted classification must win.
+  const accessRaceFixture = (await pool.query(
+    "insert into case_documents(office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,'Access change race','evidence','confidential',$3,$3) returning id",
+    [ids.officeA, ids.caseA, ids.userA]
+  )).rows[0].id;
+  const accessRaceAssistant = roleAccounts.find(account => account.role === "assistant");
+  const accessRaceKey = "access-race-replay-01";
+  const accessRacePayload = { description: "first permitted write" };
+  const accessRaceFirst = await request("/api/case-documents/" + accessRaceFixture, {
+    token: accessRaceAssistant.token, csrf: accessRaceAssistant.csrf, method: "PATCH",
+    idempotencyKey: accessRaceKey, body: accessRacePayload
+  });
+  assert.equal(accessRaceFirst.status, 200);
+  const accessRaceAuditBefore = (await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, accessRaceFixture]
+  )).rows[0].count;
+  const accessRaceResults = await Promise.all([
+    request("/api/case-documents/" + accessRaceFixture, {
+      token: tokenA, csrf: csrfA, method: "PATCH", body: { confidentiality: "restricted" }
+    }),
+    request("/api/case-documents/" + accessRaceFixture, {
+      token: accessRaceAssistant.token, csrf: accessRaceAssistant.csrf, method: "PATCH",
+      idempotencyKey: accessRaceKey, body: accessRacePayload
+    })
+  ]);
+  assert.equal(accessRaceResults[0].status, 200, "owner classification escalation must commit");
+  assert.ok([200,404].includes(accessRaceResults[1].status), "concurrent replay must either linearize before or be denied after escalation");
+  assert.equal((await pool.query("select confidentiality from case_documents where id=$1", [accessRaceFixture])).rows[0].confidentiality,
+    "restricted", "concurrent replay must not undo the committed access-level escalation");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, accessRaceAssistant.id, accessRaceKey]
+  )).rows[0].count, 1, "access race must preserve exactly one actor-scoped idempotency row");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, accessRaceFixture]
+  )).rows[0].count, accessRaceAuditBefore + 1, "only the owner escalation may add an audit event during replay race");
+  console.log("PASS: concurrent access-level escalation and replay preserve current authorization and exact-once audit");
+
   console.log("PASS: pre-COMMIT rollback, concurrent PATCH exact-once counts, replay authorization and office-scope isolation");
 
   console.log("PASS: keyed PATCH/classification/DELETE retries, payload conflicts and exact-once audit");
@@ -1601,6 +1646,24 @@ try {
   const logoutToken = "test-session-logout-".padEnd(48, "e");
   const logoutCsrf = "test-csrf-logout-".padEnd(48, "f");
   await pool.query("insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values ($1,$2,$3,$4,now()+interval '1 hour')", [ids.userA, ids.officeA, hash(logoutToken), hash(logoutCsrf)]);
+  const revokedReplayFixture = (await pool.query(
+    "insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Session revocation replay','evidence',$3,$3) returning id",
+    [ids.officeA, ids.caseA, ids.userA]
+  )).rows[0].id;
+  const revokedReplayKey = "revoked-session-replay-01";
+  const revokedReplayPayload = { title: "Committed before logout" };
+  const beforeLogoutWrite = await request("/api/case-documents/" + revokedReplayFixture, {
+    token: logoutToken, csrf: logoutCsrf, method: "PATCH", idempotencyKey: revokedReplayKey, body: revokedReplayPayload
+  });
+  assert.equal(beforeLogoutWrite.status, 200, "live session must be able to commit the keyed mutation before logout");
+  const beforeLogoutAuditCount = (await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, revokedReplayFixture]
+  )).rows[0].count;
+  const beforeLogoutKeyCount = (await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, revokedReplayKey]
+  )).rows[0].count;
   const logout = await request("/api/auth/logout", { token: logoutToken, csrf: logoutCsrf, method: "POST" });
   assert.equal(logout.status, 200, "valid logout must succeed");
   assert.deepEqual(logout.body, { ok: true });
@@ -1610,7 +1673,98 @@ try {
   const afterLogout = await request("/api/case-documents", { token: logoutToken, csrf: logoutCsrf });
   assert.equal(afterLogout.status, 401, "revoked session must not authorize subsequent requests");
   assert.deepEqual(afterLogout.body, { error: "authentication_required" });
-  console.log("PASS: logout clears cookies, revokes session, and rejects subsequent requests");
+  const revokedReplay = await request("/api/case-documents/" + revokedReplayFixture, {
+    token: logoutToken, csrf: logoutCsrf, method: "PATCH", idempotencyKey: revokedReplayKey, body: revokedReplayPayload
+  });
+  assert.equal(revokedReplay.status, 401, "revoked session must not replay a previously committed idempotent mutation");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, revokedReplayKey])).rows[0].count, beforeLogoutKeyCount, "revoked replay must not change the durable idempotency row");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, revokedReplayFixture])).rows[0].count, beforeLogoutAuditCount, "revoked replay must not add audit rows");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [revokedReplayFixture])).rows[0].title,
+    "Committed before logout", "revoked replay must not repeat or alter the committed mutation");
+  console.log("PASS: logout clears cookies, revokes session, rejects subsequent requests and blocks idempotent replay");
+
+
+  // Kill a dedicated API process while the audit trigger is sleeping inside the
+  // mutation transaction. At that point the idempotency reservation and document
+  // UPDATE have run, but neither the audit INSERT nor COMMIT has completed.
+  const interruptedFixture = (await pool.query(
+    "insert into case_documents(office_id,case_id,title,document_type,created_by,updated_by) values($1,$2,'Before interrupted transaction','evidence',$3,$3) returning id",
+    [ids.officeA, ids.caseA, ids.userA]
+  )).rows[0].id;
+  const interruptedKey = "process-interrupt-01";
+  await pool.query(`
+    create or replace function pause_interrupted_document_audit() returns trigger language plpgsql as $fn$
+    begin
+      if new.entity_type = 'case_document' and new.entity_id = '${interruptedFixture}'::uuid and new.action = 'update' then
+        perform pg_sleep(30);
+      end if;
+      return new;
+    end;
+    $fn$;
+    create trigger pause_interrupted_document_audit_trigger
+      before insert on audit_logs for each row execute function pause_interrupted_document_audit();
+  `);
+  const crashPort = port + 7;
+  crashServer = spawn(process.execPath, ["src/server.js"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { ...process.env, PORT: String(crashPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, RATE_LIMIT_MODE: "memory" },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  crashServer.stdout.on("data", chunk => { crashServerOutput += chunk.toString(); });
+  crashServer.stderr.on("data", chunk => { crashServerOutput += chunk.toString(); });
+  await waitForServer(crashPort);
+  const interruptedRequest = request("/api/case-documents/" + interruptedFixture, {
+    token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: interruptedKey,
+    body: { title: "Must roll back after process termination" }, portToUse: crashPort
+  }).catch(() => null);
+  const waitForAuditPause = async () => {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const active = await pool.query(
+        "select pid from pg_stat_activity where datname=current_database() and wait_event='PgSleep' and query ilike '%insert into audit_logs%'"
+      );
+      if (active.rowCount > 0) return active.rows[0].pid;
+      await delay(25);
+    }
+    throw new Error("Timed out waiting for transaction to reach the audit trigger after reservation and mutation");
+  };
+  const interruptedBackendPid = await waitForAuditPause();
+  crashServer.kill("SIGKILL");
+  await new Promise(resolve => crashServer.once("exit", resolve));
+  await interruptedRequest;
+  const waitForBackendRollback = async () => {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const active = await pool.query("select count(*)::int as count from pg_stat_activity where pid=$1", [interruptedBackendPid]);
+      if (active.rows[0].count === 0) return;
+      await delay(25);
+    }
+    throw new Error("PostgreSQL backend did not exit after API process termination");
+  };
+  await waitForBackendRollback();
+  assert.equal((await pool.query("select title from case_documents where id=$1", [interruptedFixture])).rows[0].title,
+    "Before interrupted transaction", "process termination before COMMIT must roll back the document mutation");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, interruptedKey])).rows[0].count, 0, "process interruption must not leave an incomplete idempotency reservation");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, interruptedFixture])).rows[0].count, 0, "process interruption must not leave a partial audit event");
+  await pool.query("drop trigger pause_interrupted_document_audit_trigger on audit_logs");
+  await pool.query("drop function pause_interrupted_document_audit()");
+  const interruptedRetry = await request("/api/case-documents/" + interruptedFixture, {
+    token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: interruptedKey,
+    body: { title: "Must roll back after process termination" }
+  });
+  assert.equal(interruptedRetry.status, 200, "same key must be reusable after PostgreSQL rolls back the killed connection");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [interruptedFixture])).rows[0].title,
+    "Must roll back after process termination");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, interruptedKey])).rows[0].count, 1, "retry after process interruption must persist exactly one completed idempotency row");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action='update'",
+    [ids.officeA, interruptedFixture])).rows[0].count, 1, "retry after process interruption must write exactly one audit event");
+  console.log("PASS: killing API process before COMMIT rolls back mutation, idempotency reservation and audit; same-key retry commits exactly once");
+
 
 } catch (error) {
   console.error(error);
@@ -1628,5 +1782,6 @@ try {
   if (rateLimitServer && rateLimitServer.exitCode === null) rateLimitServer.kill("SIGTERM");
   if (roleServer && roleServer.exitCode === null) roleServer.kill("SIGTERM");
   if (retryServer && retryServer.exitCode === null) retryServer.kill("SIGTERM");
+  if (crashServer && crashServer.exitCode === null) crashServer.kill("SIGKILL");
   await pool.end();
 }
