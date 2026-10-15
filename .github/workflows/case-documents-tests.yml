@@ -91,3 +91,13 @@ jobs:
         run: node tests/case-documents-api.integration.js
         working-directory: backend
 
+      - name: Verify audit INSERT failure rolls back client, case, hearing, and action mutations
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_audit_mutations_test
+        run: |
+          createdb -h localhost -U postgres dadban_audit_mutations_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_audit_mutations_test' EXIT
+          node tests/audit-mutation-rollback.integration.js
+        working-directory: backend
+
