@@ -41,7 +41,7 @@ async function waitForServer() {
 }
 
 async function request(path, method, body, options = {}) {
-  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+  const response = await fetch(`http://${options.host ?? "127.0.0.1"}:${port}${path}`, {
     method,
     headers: {
       origin,
@@ -321,7 +321,7 @@ try {
   console.log("PASS: audit User-Agent is capped at 512 characters");
 
   // Login rate limiting is per process and source IP; verify the existing 10/15-minute policy.
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 10; i++) {
     const limitedWindowResponse = await request("/api/auth/login", "POST", {
       email: `unknown-rate-test-${i}@example.test`,
       password: "WrongPassword!234"
@@ -331,7 +331,7 @@ try {
   const rateLimitedResponse = await request("/api/auth/login", "POST", {
     email: "unknown-rate-test-over-limit@example.test",
     password: "WrongPassword!234"
-  });
+  }, { host: "127.0.0.2" });
   assert.equal(rateLimitedResponse.status, 429, "the eleventh login attempt in the same process/IP window must be rate limited");
   assert.equal(rateLimitedResponse.body.error, "rate_limit_exceeded");
   assert.ok(Number(rateLimitedResponse.headers["retry-after"] ?? 0) >= 1, "rate-limited response must include a positive Retry-After header");
