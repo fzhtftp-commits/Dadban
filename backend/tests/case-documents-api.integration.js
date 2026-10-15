@@ -945,13 +945,13 @@ try {
 
     // Write requests must reject state changes made after requireAuth read the actor.
     await pool.query("update users set role='lawyer', is_active=true, deleted_at=null where id=$1", [roleRaceLawyer.id]);
-    const beforeRoleTitle = (await pool.query("select title from case_documents where id=$1", [idsByLevel.restricted])).rows[0].title;
-    const pendingPatch = request("/api/case-documents/" + idsByLevel.restricted, { token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "PATCH", portToUse: rolePort, body: { title: "must not update after role downgrade" } });
+    const beforeRoleConfidentiality = (await pool.query("select confidentiality from case_documents where id=$1", [idsByLevel.normal])).rows[0].confidentiality;
+    const pendingPatch = request("/api/case-documents/" + idsByLevel.normal, { token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "PATCH", portToUse: rolePort, body: { confidentiality: "restricted" } });
     await waitForRoleHeartbeat();
     await pool.query("update users set role='viewer' where id=$1", [roleRaceLawyer.id]);
     const downgradedPatch = await pendingPatch;
-    assert.equal(downgradedPatch.status, 403, "PATCH must reject a role downgraded after authentication");
-    assert.equal((await pool.query("select title from case_documents where id=$1", [idsByLevel.restricted])).rows[0].title, beforeRoleTitle, "role downgrade race must not mutate metadata");
+    assert.equal(downgradedPatch.status, 403, "confidentiality PATCH must reject a role downgraded after authentication");
+    assert.equal((await pool.query("select confidentiality from case_documents where id=$1", [idsByLevel.normal])).rows[0].confidentiality, beforeRoleConfidentiality, "role downgrade race must not change document confidentiality");
 
     await pool.query("update users set role='lawyer', is_active=true where id=$1", [roleRaceLawyer.id]);
     const beforeInactiveTitle = (await pool.query("select title from case_documents where id=$1", [idsByLevel.normal])).rows[0].title;
