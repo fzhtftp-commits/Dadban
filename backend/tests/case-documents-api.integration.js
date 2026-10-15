@@ -86,6 +86,8 @@ try {
     drop table if exists audit_logs cascade;
     drop table if exists auth_sessions cascade;
     drop table if exists auth_credentials cascade;
+    drop table if exists hearings cascade;
+    drop table if exists case_actions cascade;
     drop table if exists cases cascade;
     drop table if exists clients cascade;
     drop table if exists users cascade;
