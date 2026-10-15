@@ -342,31 +342,115 @@ try {
   assert.equal(await countAudit(patchId, "update"), 1, "aged replay must not duplicate audit");
   console.log("PASS: 400-day-old idempotency key remains reserved; no TTL expiry is implemented");
 
-  // Security probe for a future cleanup/migration: deleting the idempotency row
-  // removes the only durable key reservation. Reusing the same key then executes
-  // the PATCH again and appends another audit row. This is a documented FINDING,
-  // not an approved cleanup policy; do not add a cleanup job until a durable
-  // tombstone/operation-identity design preserves duplicate protection.
-  const removedKey = await pool.query(
-    "delete from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 returning idempotency_key",
+  // Safe retention: purge replay data by setting a tombstone marker, never DELETE
+  // the unique operation identity. Replay after the marker must be rejected and
+  // must not execute a second mutation or append another audit event.
+  const purged = await pool.query(
+    "update case_document_mutation_idempotency set purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is not null returning purged_at",
     [ids.office, ids.user, patchKey]
   );
-  assert.equal(removedKey.rowCount, 1, "cleanup simulation must remove only the selected test key");
+  assert.equal(purged.rowCount, 1, "retention must mark the completed key as purged");
   const afterCleanupReplay = await request(`/api/case-documents/${patchId}`, {
     method: "PATCH", key: patchKey, body: { title: "Re-executed after idempotency cleanup" }
   });
-  assert.equal(afterCleanupReplay.status, 200, "after deletion, the current implementation treats the old key as new");
+  assert.equal(afterCleanupReplay.status, 410, "a tombstoned key must never be treated as a new operation");
+  assert.deepEqual(afterCleanupReplay.body, { error: "idempotency_result_purged" });
   assert.equal((await pool.query("select title from case_documents where id=$1", [patchId])).rows[0].title,
-    "Re-executed after idempotency cleanup", "cleanup probe must directly confirm the second mutation");
+    "Committed despite lost COMMIT response", "tombstone replay must not mutate the document again");
   const cleanupKeyRows = await pool.query(
-    "select response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    "select response_status, purged_at from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
     [ids.office, ids.user, patchKey]
   );
-  assert.equal(cleanupKeyRows.rowCount, 1);
+  assert.equal(cleanupKeyRows.rowCount, 1, "operation identity must survive response-data purge");
   assert.equal(cleanupKeyRows.rows[0].response_status, 200);
-  assert.equal(await countAudit(patchId, "update"), 2,
-    "deleting the idempotency row permits a second mutation and a second audit event");
-  console.log("FINDING: deleting an idempotency row reopens the key and permits a second mutation/audit; cleanup requires durable tombstones or equivalent protection");
+  assert.ok(cleanupKeyRows.rows[0].purged_at instanceof Date);
+  assert.equal(await countAudit(patchId, "update"), 1,
+    "tombstone replay must not duplicate the audit event");
+  const forbiddenDelete = await pool.query(
+    "delete from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  ).then(() => null, error => error);
+  assert.ok(forbiddenDelete, "database trigger must reject physical deletion of an idempotency tombstone");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  )).rows[0].count, 1, "failed physical delete must preserve the tombstone");
+  console.log("PASS: PATCH retention tombstone rejects replay, preserves one idempotency identity/audit row, and database trigger blocks physical deletion");
+
+  // Repeat the tombstone contract for DELETE. The business record is soft-deleted,
+  // but the key must remain reserved even after replay response data is purged.
+  const tombstoneDeleteId = await makeDocument("Before tombstoned DELETE");
+  const tombstoneDeleteKey = "tombstone-delete-01";
+  const firstTombstoneDelete = await request(`/api/case-documents/${tombstoneDeleteId}`, {
+    method: "DELETE", key: tombstoneDeleteKey
+  });
+  assert.equal(firstTombstoneDelete.status, 204);
+  const deleteKeyBeforePurge = await pool.query(
+    "select response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, tombstoneDeleteKey]
+  );
+  assert.equal(deleteKeyBeforePurge.rowCount, 1);
+  assert.equal(deleteKeyBeforePurge.rows[0].response_status, 204);
+  assert.equal(await countAudit(tombstoneDeleteId, "delete"), 1);
+  await pool.query(
+    "update case_document_mutation_idempotency set purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=204",
+    [ids.office, ids.user, tombstoneDeleteKey]
+  );
+  const deleteReplayAfterPurge = await request(`/api/case-documents/${tombstoneDeleteId}`, {
+    method: "DELETE", key: tombstoneDeleteKey
+  });
+  assert.equal(deleteReplayAfterPurge.status, 410, "purged DELETE response must not run DELETE again");
+  const deleteKeyAfterPurge = await pool.query(
+    "select response_status, purged_at from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, tombstoneDeleteKey]
+  );
+  assert.equal(deleteKeyAfterPurge.rowCount, 1);
+  assert.equal(deleteKeyAfterPurge.rows[0].response_status, 204);
+  assert.ok(deleteKeyAfterPurge.rows[0].purged_at instanceof Date);
+  assert.ok((await pool.query("select deleted_at from case_documents where id=$1", [tombstoneDeleteId])).rows[0].deleted_at);
+  assert.equal(await countAudit(tombstoneDeleteId, "delete"), 1, "purged DELETE replay must not duplicate audit");
+  console.log("PASS: DELETE tombstone preserves one completed key and one audit event; replay after purge returns 410");
+
+  // Race a replay against retention. SELECT ... FOR UPDATE in the request and
+  // UPDATE purged_at in cleanup serialize on the same row. Either the replay
+  // wins and returns the original response, or cleanup wins and replay returns
+  // 410; neither ordering may execute the mutation or append a second audit.
+  const raceId = await makeDocument("Before replay-retention race");
+  const raceKey = "tombstone-race-01";
+  const raceInitial = await request(`/api/case-documents/${raceId}`, {
+    method: "PATCH", key: raceKey, body: { title: "Committed before retention race" }
+  });
+  assert.equal(raceInitial.status, 200);
+  const raceCleanupAndReplay = await Promise.all([
+    pool.query(
+      "update case_document_mutation_idempotency set purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=200 returning idempotency_key",
+      [ids.office, ids.user, raceKey]
+    ),
+    request(`/api/case-documents/${raceId}`, {
+      method: "PATCH", key: raceKey, body: { title: "Committed before retention race" }
+    })
+  ]);
+  assert.equal(raceCleanupAndReplay[0].rowCount, 1, "race cleanup must mark exactly one key");
+  assert.ok([200, 410].includes(raceCleanupAndReplay[1].status),
+    "serialized replay/cleanup may return original response or 410, never execute as new");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [raceId])).rows[0].title,
+    "Committed before retention race", "replay/cleanup race must not apply a second mutation");
+  const raceKeyState = await pool.query(
+    "select count(*)::int as count, min(purged_at) as purged_at from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, raceKey]
+  );
+  assert.equal(raceKeyState.rows[0].count, 1);
+  assert.ok(raceKeyState.rows[0].purged_at instanceof Date);
+  assert.equal(await countAudit(raceId, "update"), 1, "replay/cleanup race must preserve exactly one audit row");
+  console.log("PASS: replay racing retention serializes on the idempotency row; one mutation/key/audit remains");
+
+  const totals = await pool.query(
+    "select (select count(*)::int from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key in ($3,$4,$5)) as idempotency_rows, (select count(*)::int from audit_logs where office_id=$1 and entity_type='case_document' and entity_id in ($6,$7,$8) and action in ('update','delete')) as audit_rows",
+    [ids.office, ids.user, patchKey, tombstoneDeleteKey, raceKey, patchId, tombstoneDeleteId, raceId]
+  );
+  assert.equal(totals.rows[0].idempotency_rows, 3, "direct PostgreSQL count must show one durable identity per PATCH/DELETE/race case");
+  assert.equal(totals.rows[0].audit_rows, 3, "direct PostgreSQL count must show one audit event per business mutation");
+  console.log(`DB ASSERTIONS: tombstone_cases=3 idempotency_rows=${totals.rows[0].idempotency_rows} audit_rows=${totals.rows[0].audit_rows}`);
 
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for PATCH, confidentiality change, and DELETE");
 } catch (error) {
