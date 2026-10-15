@@ -325,7 +325,7 @@ try {
     const limitedWindowResponse = await request("/api/auth/login", "POST", {
       email: `unknown-rate-test-${i}@example.test`,
       password: "WrongPassword!234"
-    });
+    }, { host: "127.0.0.2" });
     assert.equal(limitedWindowResponse.status, 401, "attempts within the configured limit should remain generic 401");
   }
   const rateLimitedResponse = await request("/api/auth/login", "POST", {
