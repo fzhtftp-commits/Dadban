@@ -2566,6 +2566,143 @@ try {
   assert.equal(await auditCount("case_action", "create"), actionCreateAuditBeforeClientRace, "rejected action create must not emit audit");
   console.log("PASS: client soft-delete serializes hearing/action creation; queued creates are rejected with no child rows or audit events");
 
+  // Child-first inverse ordering: pause a hearing/action INSERT only after the API has
+  // acquired the live case/client parent locks. Queue client soft-delete behind that
+  // transaction, then release it. This proves the child may commit first and that the
+  // queued parent deletion follows without losing the hearing summary or audit event.
+  const childFirstPrefix = "CHILD-FIRST-PARENT-RACE-" + crypto.randomBytes(5).toString("hex");
+  for (const childKind of ["hearing", "action"]) {
+    const clientId = crypto.randomUUID();
+    const caseId = crypto.randomUUID();
+    const caseNumber = childFirstPrefix + "-" + childKind;
+    const hearingAt = new Date(Date.now() + 6 * 86400000);
+    await pool.query(
+      "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual',$3,$4,$5,$5)",
+      [clientId, ids.officeA, "Child-first " + childKind + " race client", "9" + String(Math.floor(Math.random() * 1000000000)).padStart(9, "0"), ids.userA]
+    );
+    await pool.query(
+      "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,$5,null,$6,$6)",
+      [caseId, ids.officeA, clientId, caseNumber, "Child-first " + childKind + " race case", ids.userA]
+    );
+    const auditBefore = {
+      clientDelete: await auditCount("client", "delete"),
+      childCreate: await auditCount(childKind === "hearing" ? "hearing" : "case_action", "create")
+    };
+    const blocker = await pool.connect();
+    let blockerHeld = false;
+    let triggerName = childKind === "hearing" ? "pause_child_first_hearing_insert" : "pause_child_first_action_insert";
+    let functionName = childKind === "hearing" ? "pause_child_first_hearing_insert_fn" : "pause_child_first_action_insert_fn";
+    const triggerTable = childKind === "hearing" ? "hearings" : "case_actions";
+    try {
+      await blocker.query("select pg_advisory_lock($1,$2)", [880001, 123]);
+      blockerHeld = true;
+      await pool.query(
+        "create or replace function " + functionName + "() returns trigger language plpgsql as $fn$ begin perform pg_advisory_xact_lock(880001,123); return new; end $fn$"
+      );
+      await pool.query("create trigger " + triggerName + " before insert on " + triggerTable + " for each row execute function " + functionName + "()");
+      const childPromise = childKind === "hearing"
+        ? request("/api/hearings", {
+            token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
+            body: { case_id: caseId, hearing_at: hearingAt.toISOString(), hearing_type: "trial", notes: "child-first-parent-race-" + childKind }
+          })
+        : request("/api/actions", {
+            token: raceActors["action-create"].token, csrf: raceActors["action-create"].csrf, method: "POST",
+            body: { case_id: caseId, title: "child-first-parent-race-" + childKind }
+          });
+      await waitForLockWait("%insert into " + triggerTable + "%", 1, childKind + " INSERT paused after acquiring parent locks");
+      const deletePromise = request("/api/clients/" + clientId, {
+        token: raceActors["client-delete"].token, csrf: raceActors["client-delete"].csrf, method: "DELETE"
+      });
+      await waitForLockWait("%update clients%deleted_at = now()%", 1, "client DELETE queued behind child-first " + childKind + " create");
+      const unlocked = await blocker.query("select pg_advisory_unlock($1,$2) as unlocked", [880001, 123]);
+      assert.equal(unlocked.rows[0].unlocked, true, "must release the deterministic INSERT barrier");
+      blockerHeld = false;
+      const [childResponse, deleteResponse] = await Promise.all([childPromise, deletePromise]);
+      assert.equal(childResponse.status, 201, childKind + " create that acquired parent locks first should commit");
+      assert.equal(deleteResponse.status, 204, "queued client soft-delete should commit after child create");
+      assert.ok((await pool.query("select deleted_at from clients where id=$1", [clientId])).rows[0].deleted_at,
+        "client soft-delete must persist after the child-first transaction");
+      assert.equal(await auditCount("client", "delete"), auditBefore.clientDelete + 1,
+        "successful queued parent delete must emit exactly one audit row");
+      assert.equal(await auditCount(childKind === "hearing" ? "hearing" : "case_action", "create"), auditBefore.childCreate + 1,
+        "successful child create must emit exactly one audit row");
+      if (childKind === "hearing") {
+        const savedHearing = await pool.query("select id,hearing_at from hearings where office_id=$1 and case_id=$2 and notes=$3", [ids.officeA, caseId, "child-first-parent-race-hearing"]);
+        assert.equal(savedHearing.rows.length, 1, "hearing row must persist exactly once");
+        assert.equal(savedHearing.rows[0].hearing_at.getTime(), hearingAt.getTime(), "persisted hearing time must match request");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [caseId])).rows[0].next_hearing_at.getTime(), hearingAt.getTime(),
+          "next_hearing_at must be refreshed atomically with the child-first hearing insert");
+      } else {
+        assert.equal((await pool.query("select count(*)::int as count from case_actions where office_id=$1 and case_id=$2 and title=$3", [ids.officeA, caseId, "child-first-parent-race-action"])).rows[0].count, 1,
+          "action row must persist exactly once");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [caseId])).rows[0].next_hearing_at, null,
+          "action creation must not mutate next_hearing_at");
+      }
+    } finally {
+      if (blockerHeld) await blocker.query("select pg_advisory_unlock($1,$2)", [880001, 123]).catch(() => {});
+      blocker.release();
+      await pool.query("drop trigger if exists " + triggerName + " on " + triggerTable).catch(() => {});
+      await pool.query("drop function if exists " + functionName + "()").catch(() => {});
+    }
+  }
+  console.log("PASS: child-first hearing/action creates hold live-parent locks through commit; queued client soft-delete follows with exact audit counts and consistent next_hearing_at");
+
+  // Explicitly inject audit INSERT failure for hearing/action creates. The business
+  // row and its summary must roll back with the audit row, rather than leaving a
+  // partially committed child or next_hearing_at change.
+  const auditRollbackClient = crypto.randomUUID();
+  const auditRollbackHearingCase = crypto.randomUUID();
+  const auditRollbackActionCase = crypto.randomUUID();
+  const auditRollbackPrefix = "CHILD-AUDIT-ROLLBACK-" + crypto.randomBytes(5).toString("hex");
+  const auditRollbackHearingAt = new Date(Date.now() + 7 * 86400000);
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Audit rollback client',$3,$4,$4)",
+    [auditRollbackClient, ids.officeA, "8" + String(Math.floor(Math.random() * 1000000000)).padStart(9, "0"), ids.userA]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Audit rollback hearing case',null,$5,$5),($6,$2,$3,$7,'Audit rollback action case',null,$5,$5)",
+    [auditRollbackHearingCase, ids.officeA, auditRollbackClient, auditRollbackPrefix + "-H", ids.userA,
+     auditRollbackActionCase, auditRollbackPrefix + "-A"]
+  );
+  const hearingAuditBeforeRollback = await auditCount("hearing", "create");
+  const actionAuditBeforeRollback = await auditCount("case_action", "create");
+  await pool.query(`
+    create or replace function reject_hearing_action_create_audit() returns trigger language plpgsql as $fn$
+    begin
+      if new.entity_type in ('hearing','case_action') and new.action='create' then
+        raise exception 'forced hearing/action audit failure for atomic rollback';
+      end if;
+      return new;
+    end;
+    $fn$;
+    create trigger reject_hearing_action_create_audit_trigger before insert on audit_logs
+      for each row execute function reject_hearing_action_create_audit();
+  `);
+  try {
+    const failedHearingCreate = await request("/api/hearings", {
+      token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
+      body: { case_id: auditRollbackHearingCase, hearing_at: auditRollbackHearingAt.toISOString(), hearing_type: "trial", notes: "must-rollback-with-audit" }
+    });
+    const failedActionCreate = await request("/api/actions", {
+      token: raceActors["action-create"].token, csrf: raceActors["action-create"].csrf, method: "POST",
+      body: { case_id: auditRollbackActionCase, title: "must-rollback-with-audit" }
+    });
+    assert.equal(failedHearingCreate.status, 500, "hearing create must fail when its audit INSERT fails");
+    assert.equal(failedActionCreate.status, 500, "action create must fail when its audit INSERT fails");
+    assert.equal((await pool.query("select count(*)::int as count from hearings where office_id=$1 and case_id=$2 and notes='must-rollback-with-audit'", [ids.officeA, auditRollbackHearingCase])).rows[0].count, 0,
+      "failed hearing create must leave no business row");
+    assert.equal((await pool.query("select count(*)::int as count from case_actions where office_id=$1 and case_id=$2 and title='must-rollback-with-audit'", [ids.officeA, auditRollbackActionCase])).rows[0].count, 0,
+      "failed action create must leave no business row");
+    assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [auditRollbackHearingCase])).rows[0].next_hearing_at, null,
+      "failed hearing create must roll back next_hearing_at");
+    assert.equal(await auditCount("hearing", "create"), hearingAuditBeforeRollback, "failed hearing create must leave no audit row");
+    assert.equal(await auditCount("case_action", "create"), actionAuditBeforeRollback, "failed action create must leave no audit row");
+  } finally {
+    await pool.query("drop trigger if exists reject_hearing_action_create_audit_trigger on audit_logs").catch(() => {});
+    await pool.query("drop function if exists reject_hearing_action_create_audit()").catch(() => {});
+  }
+  console.log("PASS: hearing/action audit INSERT failures roll back child rows and next_hearing_at atomically");
+
   // Client soft-delete vs PATCH on hearings/actions while their source cases
   // remain live. Exercise both lock queue orders: delete first must reject child
   // writes; child writes first may commit, after which the queued delete commits.
