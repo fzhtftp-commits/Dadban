@@ -578,7 +578,7 @@ try {
   assert.equal((await pool.query("select count(*)::int as count from clients where full_name='Viewer Forbidden Client'")).rows[0].count, 0,
     "denied viewer write must not persist a client");
 
-  const waitForActorLockWait = async () => {
+  const waitForGeneralActorLockWait = async () => {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       const waiting = await pool.query(
@@ -601,7 +601,7 @@ try {
       token: roleRaceAccount.token, csrf: roleRaceAccount.csrf, method: "POST",
       body: { client_type: "individual", full_name: "Role-Race Forbidden Client", national_id: "6677889900" }
     });
-    await waitForActorLockWait();
+    await waitForGeneralActorLockWait();
     await roleGate.query("commit");
     roleGateOpen = false;
     const roleRaceResult = await pendingRoleWrite;
@@ -625,7 +625,7 @@ try {
       token: deactivationAccount.token, csrf: deactivationAccount.csrf, method: "PATCH",
       body: { title: "Must not commit after deactivation" }
     });
-    await waitForActorLockWait();
+    await waitForGeneralActorLockWait();
     await deactivateGate.query("commit");
     deactivateGateOpen = false;
     const deactivatedResult = await pendingDeactivatedWrite;
