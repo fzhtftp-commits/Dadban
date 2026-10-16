@@ -1395,7 +1395,7 @@ try {
   const timeoutPort = port + 2;
   timeoutServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(timeoutPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_STATEMENT_TIMEOUT_MS: "750" },
+    env: { ...process.env, PORT: String(timeoutPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_STATEMENT_TIMEOUT_MS: "750", DB_LOCK_TIMEOUT_MS: "200" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   timeoutServer.stdout.on("data", chunk => { timeoutServerOutput += chunk.toString(); });
@@ -1417,7 +1417,7 @@ try {
   await pool.query("drop trigger delay_target_document_update_trigger on case_documents");
   await pool.query("drop function delay_target_document_update()");
   // Real row-lock contention (not a synthetic SQLSTATE): auth succeeds, but the
-  // in-transaction actor revalidation waits on the user's row and hits statement_timeout.
+  // in-transaction actor revalidation waits on the user's row and hits lock_timeout.
   // This proves a timed-out authorization wait cannot mutate the document or leave idempotency/audit rows.
   const actorLockTimeoutKey = "actor-lock-timeout-2026-10-01";
   const actorLockGate = await pool.connect();
@@ -1452,7 +1452,7 @@ try {
       "the HTTP write must be observed waiting on the actual PostgreSQL actor-lock helper");
     const actorLockTimeoutResponse = await actorLockRequest;
     assert.equal(actorLockTimeoutResponse.status, 503,
-      "a real actor-row lock wait that reaches statement_timeout must be explicitly retryable after rollback");
+      "a real actor-row lock wait that reaches lock_timeout must be explicitly retryable after rollback");
     assert.deepEqual(actorLockTimeoutResponse.body, { error: "database_retryable" },
       "actor-lock timeout response must not expose database internals");
   } finally {
@@ -1486,7 +1486,7 @@ try {
     "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=200",
     [ids.officeA, ids.userA, actorLockTimeoutKey]
   )).rows[0].count, 1, "successful retry after lock timeout must leave one completed idempotency record");
-  console.log("PASS: real PostgreSQL actor-lock wait times out, rolls back without audit/idempotency residue, releases locks, and a fresh write succeeds");
+  console.log("PASS: real PostgreSQL actor-lock wait hits lock_timeout, rolls back without audit/idempotency residue, releases locks, and a fresh write succeeds");
 
   timeoutServer.kill("SIGTERM");
   timeoutServer = null;
