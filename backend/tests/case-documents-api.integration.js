@@ -2739,6 +2739,164 @@ try {
     "rejected document delete under a deleted case must roll back its idempotency reservation");
   console.log("PASS: soft-deleted case/client descendants cannot be deleted through child APIs; rejected child deletes leave state, idempotency, and audit unchanged");
 
+  // Exercise both serial orders for child DELETE versus parent soft-delete.
+  // In child-first cases, the child transaction already holds the live-parent
+  // locks when the parent DELETE starts; in parent-first cases, parent DELETE
+  // is queued on a held row lock before the child request attempts its lock.
+  const deleteRacePrefix = "CHILD-DELETE-RACE-" + crypto.randomBytes(4).toString("hex");
+  const deleteRaceTargets = {
+    hearing: { table: "hearings", path: "/api/hearings/", entity: "hearing", token: raceActors["hearing-patch"], insert: async (id, caseId) => pool.query(
+      "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,now()+interval '14 days','hearing','scheduled',$4,$4)",
+      [id, ids.officeA, caseId, ids.userA]) },
+    action: { table: "case_actions", path: "/api/actions/", entity: "case_action", token: raceActors["action-patch"], insert: async (id, caseId) => pool.query(
+      "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'Concurrent delete action','todo','normal',$4,$4)",
+      [id, ids.officeA, caseId, ids.userA]) },
+    document: { table: "case_documents", path: "/api/case-documents/", entity: "case_document", token: raceActors["document-patch"], insert: async (id, caseId) => pool.query(
+      "insert into case_documents(id,office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'Concurrent delete document','evidence','normal',$4,$4)",
+      [id, ids.officeA, caseId, ids.userA]) }
+  };
+  await pool.query(`
+    create or replace function pause_child_soft_delete_race() returns trigger language plpgsql as $fn$
+    begin
+      if old.deleted_at is null and new.deleted_at is not null
+         and new.title is distinct from 'never-match-title' then
+        perform pg_sleep(0.6);
+      end if;
+      return new;
+    end
+    $fn$;
+    create trigger pause_hearing_soft_delete_race before update on hearings
+      for each row execute function pause_child_soft_delete_race();
+    create trigger pause_action_soft_delete_race before update on case_actions
+      for each row execute function pause_child_soft_delete_race();
+    create trigger pause_document_soft_delete_race before update on case_documents
+      for each row execute function pause_child_soft_delete_race();
+  `);
+
+  try {
+    for (const parentKind of ["case", "client"]) {
+      for (const childKind of ["hearing", "action", "document"]) {
+        const spec = deleteRaceTargets[childKind];
+        for (const order of ["child-first", "parent-first"]) {
+          const clientId = crypto.randomUUID();
+          const caseId = crypto.randomUUID();
+          const childId = crypto.randomUUID();
+          const caseNumber = deleteRacePrefix + "-" + parentKind + "-" + childKind + "-" + order;
+          await pool.query(
+            "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Delete race client','7654301234',$3,$3)",
+            [clientId, ids.officeA, ids.userA]
+          );
+          await pool.query(
+            "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Delete race case',$5,$5)",
+            [caseId, ids.officeA, clientId, caseNumber, ids.userA]
+          );
+          await spec.insert(childId, caseId);
+
+          const parentPath = parentKind === "case" ? "/api/cases/" + caseId : "/api/clients/" + clientId;
+          const parentId = parentKind === "case" ? caseId : clientId;
+          const parentTable = parentKind === "case" ? "cases" : "clients";
+          const parentDeleteAuditBefore = Number((await pool.query(
+            "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action='delete'",
+            [ids.officeA, parentKind, parentId]
+          )).rows[0].count);
+          const childDeleteAuditBefore = Number((await pool.query(
+            "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action='delete'",
+            [ids.officeA, spec.entity, childId]
+          )).rows[0].count);
+          const idemKey = "parent-delete-race-" + parentKind + "-" + childKind + "-" + order;
+          let blocker;
+          let blockerOpen = false;
+          let parentPromise;
+          let childPromise;
+          try {
+            if (order === "child-first") {
+              childPromise = request(spec.path + childId, {
+                token: spec.token.token, csrf: spec.token.csrf, method: "DELETE",
+                ...(childKind === "document" ? { idempotencyKey: idemKey } : {})
+              });
+              const deadline = Date.now() + 5000;
+              let sleeping = false;
+              while (Date.now() < deadline) {
+                const active = await pool.query(
+                  "select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event='PgSleep' and query ilike $1",
+                  ["%update " + spec.table + " set deleted_at%"]
+                );
+                if (active.rows[0].count > 0) { sleeping = true; break; }
+                await delay(20);
+              }
+              assert.ok(sleeping, order + " " + parentKind + "/" + childKind + " child DELETE must reach the pause after parent locks are held");
+              parentPromise = request(parentPath, {
+                token: raceActors[parentKind === "case" ? "case-delete" : "client-delete"].token,
+                csrf: raceActors[parentKind === "case" ? "case-delete" : "client-delete"].csrf,
+                method: "DELETE"
+              });
+              await waitForLockWait("%update " + parentTable + "%deleted_at = now()%", 1,
+                order + " " + parentKind + "/" + childKind + " parent DELETE must wait behind child-held parent lock");
+            } else {
+              blocker = await pool.connect();
+              await blocker.query("begin");
+              await blocker.query("select id from " + parentTable + " where id=$1 for update", [parentId]);
+              blockerOpen = true;
+              parentPromise = request(parentPath, {
+                token: raceActors[parentKind === "case" ? "case-delete" : "client-delete"].token,
+                csrf: raceActors[parentKind === "case" ? "case-delete" : "client-delete"].csrf,
+                method: "DELETE"
+              });
+              await waitForLockWait("%update " + parentTable + "%deleted_at = now()%", 1,
+                order + " " + parentKind + "/" + childKind + " parent DELETE must queue first");
+              childPromise = request(spec.path + childId, {
+                token: spec.token.token, csrf: spec.token.csrf, method: "DELETE",
+                ...(childKind === "document" ? { idempotencyKey: idemKey } : {})
+              });
+              await waitForLockWait("%from public.lock_live_case_parents%", 1,
+                order + " " + parentKind + "/" + childKind + " child DELETE must wait for parent lock");
+            }
+          } finally {
+            if (blockerOpen) await blocker.query("rollback").catch(() => {});
+            if (blocker) blocker.release();
+          }
+          const [parentResponse, childResponse] = await Promise.all([parentPromise, childPromise]);
+          assert.equal(parentResponse.status, 204, order + " " + parentKind + "/" + childKind + " parent soft-delete should commit");
+          if (order === "child-first") {
+            assert.equal(childResponse.status, 204, "child-first " + parentKind + "/" + childKind + " DELETE may commit before parent");
+            assert.ok((await pool.query("select deleted_at from " + spec.table + " where id=$1", [childId])).rows[0].deleted_at,
+              "accepted child-first delete must persist its tombstone");
+            assert.equal(Number((await pool.query(
+              "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action='delete'",
+              [ids.officeA, spec.entity, childId]
+            )).rows[0].count), childDeleteAuditBefore + 1, "accepted child-first delete must have exactly one audit row");
+          } else {
+            assert.equal(childResponse.status, 404, "parent-first " + parentKind + "/" + childKind + " DELETE must reject after parent commits");
+            assert.equal((await pool.query("select deleted_at from " + spec.table + " where id=$1", [childId])).rows[0].deleted_at, null,
+              "rejected parent-first child DELETE must not change the child tombstone");
+            assert.equal(Number((await pool.query(
+              "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action='delete'",
+              [ids.officeA, spec.entity, childId]
+            )).rows[0].count), childDeleteAuditBefore, "rejected parent-first child DELETE must not add audit");
+            if (childKind === "document") {
+              assert.equal(Number((await pool.query(
+                "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+                [ids.officeA, spec.token.userId, idemKey]
+              )).rows[0].count), 0, "rejected parent-first document DELETE must roll back idempotency reservation");
+            }
+          }
+          assert.ok((await pool.query("select deleted_at from " + parentTable + " where id=$1", [parentId])).rows[0].deleted_at,
+            "parent tombstone must persist in both lock orderings");
+          assert.equal(Number((await pool.query(
+            "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action='delete'",
+            [ids.officeA, parentKind, parentId]
+          )).rows[0].count), parentDeleteAuditBefore + 1, "parent deletion must write exactly one audit row");
+        }
+      }
+    }
+  } finally {
+    await pool.query("drop trigger if exists pause_hearing_soft_delete_race on hearings").catch(() => {});
+    await pool.query("drop trigger if exists pause_action_soft_delete_race on case_actions").catch(() => {});
+    await pool.query("drop trigger if exists pause_document_soft_delete_race on case_documents").catch(() => {});
+    await pool.query("drop function if exists pause_child_soft_delete_race()").catch(() => {});
+  }
+  console.log("PASS: child DELETE vs case/client soft-delete races serialize in both lock orders; rejected deletes leave tombstones, audit, and document idempotency unchanged");
+
 
 
 
