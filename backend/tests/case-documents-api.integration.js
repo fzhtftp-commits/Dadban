@@ -1102,7 +1102,7 @@ try {
   // This isolated integration case uses a fresh test-only rate-limit window after earlier API scenarios.
   await pool.query("delete from public.rate_limit_counters where bucket_name='document_create'");
   const retryPort = port + 6;
-  retryServer = spawn(process.execPath, ["src/server.js"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PORT: String(retryPort), NODE_ENV: "test", RATE_LIMIT_MODE: "memory", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin }, stdio: ["ignore", "pipe", "pipe"] });
+  retryServer = spawn(process.execPath, ["src/server.js"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PORT: String(retryPort), NODE_ENV: "test", RATE_LIMIT_MODE: "memory", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_LOCK_TIMEOUT_MS: "20000" }, stdio: ["ignore", "pipe", "pipe"] });
   retryServer.stdout.on("data", chunk => { retryServerOutput += chunk.toString(); });
   retryServer.stderr.on("data", chunk => { retryServerOutput += chunk.toString(); });
   await waitForServer(retryPort);
