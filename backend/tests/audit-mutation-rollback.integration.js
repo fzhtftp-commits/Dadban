@@ -70,20 +70,31 @@ async function countAudit(entityType, action) {
   )).rows[0].count);
 }
 
-async function expectAuditFailure({ label, method, path, body, table, entityType, action, checkUnchanged }) {
+async function expectAuditFailure({ label, method, path, body, table, entityType, action, auditEntityId, checkUnchanged }) {
   const rowsBefore = await countRows(table);
   const auditBefore = await countAudit(entityType, action);
+  const entityAuditBefore = auditEntityId === undefined ? null : Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action=$4",
+    [ids.office, entityType, auditEntityId, action]
+  )).rows[0].count);
   const response = await request(path, method, body);
-  assert.equal(response.status, 500, `${label}: audit INSERT failure must return 500; got ${response.status}`);
-  assert.deepEqual(response.body, { error: "database_error" }, `${label}: response must be sanitized`);
-  assert.equal(await countAudit(entityType, action), auditBefore, `${label}: failed operation must not leave an audit row`);
+  assert.equal(response.status, 500, label + ": audit INSERT failure must return 500; got " + response.status);
+  assert.deepEqual(response.body, { error: "database_error" }, label + ": response must be sanitized");
+  assert.equal(await countAudit(entityType, action), auditBefore, label + ": failed operation must not leave an audit row");
+  if (auditEntityId !== undefined) {
+    const entityAuditAfter = Number((await pool.query(
+      "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action=$4",
+      [ids.office, entityType, auditEntityId, action]
+    )).rows[0].count);
+    assert.equal(entityAuditAfter, entityAuditBefore, label + ": exact entity audit row count must remain unchanged");
+  }
   if (method === "POST") {
-    assert.equal(await countRows(table), rowsBefore, `${label}: failed create must leave no business row`);
+    assert.equal(await countRows(table), rowsBefore, label + ": failed create must leave no business row");
   } else {
-    assert.equal(await countRows(table), rowsBefore, `${label}: failed mutation must not add or remove business rows`);
+    assert.equal(await countRows(table), rowsBefore, label + ": failed mutation must not add or remove business rows");
     await checkUnchanged();
   }
-  console.log(`PASS: ${label} rolls back when audit INSERT fails`);
+  console.log("PASS: " + label + " rolls back when audit INSERT fails");
 }
 
 try {
@@ -121,11 +132,11 @@ try {
     [ids.targetClient, ids.office, ids.user]
   );
   await pool.query(
-    "insert into cases(id,office_id,client_id,case_number,title,status,priority,created_by,updated_by) values ($1,$2,$3,'AUDIT-ROLLBACK-001','Original Audit Test Case','active','normal',$4,$4)",
+    "insert into cases(id,office_id,client_id,case_number,title,status,priority,next_hearing_at,created_by,updated_by) values ($1,$2,$3,'AUDIT-ROLLBACK-001','Original Audit Test Case','active','normal',now()+interval '10 days',$4,$4)",
     [ids.case, ids.office, ids.client, ids.user]
   );
   await pool.query(
-    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,reminder_minutes,notes,created_by,updated_by) values ($1,$2,$3,now()+interval '10 days','hearing','scheduled',1440,'Original hearing notes',$4,$4)",
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,reminder_minutes,notes,created_by,updated_by) values ($1,$2,$3,(select next_hearing_at from cases where id=$3),'hearing','scheduled',1440,'Original hearing notes',$4,$4)",
     [ids.hearing, ids.office, ids.case, ids.user]
   );
   await pool.query(
@@ -210,8 +221,14 @@ try {
     },
     {
       label: "hearing delete", method: "DELETE", path: `/api/hearings/${ids.hearing}`,
-      table: "hearings", entityType: "hearing", action: "delete",
-      checkUnchanged: async () => assert.equal((await pool.query("select deleted_at from hearings where id=$1", [ids.hearing])).rows[0].deleted_at, null)
+      table: "hearings", entityType: "hearing", action: "delete", auditEntityId: ids.hearing,
+      checkUnchanged: async () => {
+        const hearing = (await pool.query("select deleted_at,hearing_at from hearings where id=$1", [ids.hearing])).rows[0];
+        const parent = (await pool.query("select next_hearing_at from cases where id=$1", [ids.case])).rows[0];
+        assert.equal(hearing.deleted_at, null, "audit failure must roll back hearing deleted_at");
+        assert.equal(parent.next_hearing_at.getTime(), hearing.hearing_at.getTime(),
+          "audit failure must roll back next_hearing_at recalculation for hearing DELETE");
+      }
     },
     {
       label: "case action create", method: "POST", path: "/api/actions",
@@ -225,8 +242,15 @@ try {
     },
     {
       label: "case action delete", method: "DELETE", path: `/api/actions/${ids.action}`,
-      table: "case_actions", entityType: "case_action", action: "delete",
-      checkUnchanged: async () => assert.equal((await pool.query("select deleted_at from case_actions where id=$1", [ids.action])).rows[0].deleted_at, null)
+      table: "case_actions", entityType: "case_action", action: "delete", auditEntityId: ids.action,
+      checkUnchanged: async () => {
+        const action = (await pool.query("select deleted_at from case_actions where id=$1", [ids.action])).rows[0];
+        const parent = (await pool.query("select next_hearing_at from cases where id=$1", [ids.case])).rows[0];
+        const hearing = (await pool.query("select hearing_at from hearings where id=$1", [ids.hearing])).rows[0];
+        assert.equal(action.deleted_at, null, "audit failure must roll back case-action deleted_at");
+        assert.equal(parent.next_hearing_at.getTime(), hearing.hearing_at.getTime(),
+          "case-action DELETE audit failure must preserve unrelated next_hearing_at");
+      }
     }
   ];
 
