@@ -2354,6 +2354,113 @@ try {
     [ids.officeA, entityType, action]
   )).rows[0].count);
 
+  // Case reassignment vs soft-delete of its OLD client. The two fixtures deliberately
+  // invert UUID ordering so the helper must lock old/new clients in sorted order,
+  // not in request-specific old-then-new order.
+  const reassignmentDeleteFirstOld = "10000000-0000-4000-8000-000000000101";
+  const reassignmentDeleteFirstNew = "f0000000-0000-4000-8000-000000000102";
+  const reassignmentDeleteFirstCase = "20000000-0000-4000-8000-000000000103";
+  const reassignmentDeleteFirstNumber = "REASSIGN-DELETE-FIRST-" + crypto.randomBytes(5).toString("hex");
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Old client delete-first','8111111111',$3,$3),($4,$2,'individual','New client delete-first','8222222222',$3,$3)",
+    [reassignmentDeleteFirstOld, ids.officeA, ids.userA, reassignmentDeleteFirstNew]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Must not escape deleted old client',$5,$5)",
+    [reassignmentDeleteFirstCase, ids.officeA, reassignmentDeleteFirstOld, reassignmentDeleteFirstNumber, ids.userA]
+  );
+  const reassignmentDeleteFirstAudit = {
+    clientDelete: await auditCount("client", "delete"),
+    caseUpdate: await auditCount("case", "update")
+  };
+  const reassignmentDeleteFirstBlocker = await pool.connect();
+  let reassignmentDeleteFirstBlockerOpen = false;
+  let reassignmentDeleteFirstDeletePromise;
+  let reassignmentDeleteFirstPatchPromise;
+  try {
+    await reassignmentDeleteFirstBlocker.query("begin");
+    await reassignmentDeleteFirstBlocker.query("select id from clients where id=$1 for update", [reassignmentDeleteFirstOld]);
+    reassignmentDeleteFirstBlockerOpen = true;
+    reassignmentDeleteFirstDeletePromise = request("/api/clients/" + reassignmentDeleteFirstOld, {
+      token: raceActors["client-delete"].token, csrf: raceActors["client-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update clients%deleted_at = now()%", 1, "old-client delete queued before case reassignment");
+    reassignmentDeleteFirstPatchPromise = request("/api/cases/" + reassignmentDeleteFirstCase, {
+      token: raceActors["case-patch"].token, csrf: raceActors["case-patch"].csrf, method: "PATCH",
+      body: { client_id: reassignmentDeleteFirstNew }
+    });
+    await waitForLockWait("%from public.lock_live_case_reassignment%", 1, "case reassignment waits behind old-client delete");
+  } finally {
+    if (reassignmentDeleteFirstBlockerOpen) await reassignmentDeleteFirstBlocker.query("rollback").catch(() => {});
+    reassignmentDeleteFirstBlocker.release();
+  }
+  const [reassignmentDeleteFirstDelete, reassignmentDeleteFirstPatch] = await Promise.all([
+    reassignmentDeleteFirstDeletePromise, reassignmentDeleteFirstPatchPromise
+  ]);
+  assert.equal(reassignmentDeleteFirstDelete.status, 204);
+  assert.equal(reassignmentDeleteFirstPatch.status, 400, "a case must not be reassigned away after its old client was soft-deleted");
+  assert.deepEqual(reassignmentDeleteFirstPatch.body, { error: "invalid_related_client" });
+  assert.ok((await pool.query("select deleted_at from clients where id=$1", [reassignmentDeleteFirstOld])).rows[0].deleted_at);
+  assert.equal((await pool.query("select client_id from cases where id=$1", [reassignmentDeleteFirstCase])).rows[0].client_id,
+    reassignmentDeleteFirstOld, "rejected reassignment preserves the original client relationship");
+  assert.equal(await auditCount("client", "delete"), reassignmentDeleteFirstAudit.clientDelete + 1);
+  assert.equal(await auditCount("case", "update"), reassignmentDeleteFirstAudit.caseUpdate,
+    "rejected reassignment must not emit a case audit row");
+
+  // Reverse UUID order: target client sorts before the old client. PATCH queues
+  // for the old-client lock first in the sorted set; a subsequent delete queues
+  // behind PATCH. PATCH commits the relationship and audit atomically, then the
+  // old-client delete commits. This proves no old/new lock-order cycle is needed.
+  const reassignmentPatchFirstNew = "30000000-0000-4000-8000-000000000201";
+  const reassignmentPatchFirstOld = "d0000000-0000-4000-8000-000000000202";
+  const reassignmentPatchFirstCase = "40000000-0000-4000-8000-000000000203";
+  const reassignmentPatchFirstNumber = "REASSIGN-PATCH-FIRST-" + crypto.randomBytes(5).toString("hex");
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','New client patch-first','8333333333',$3,$3),($4,$2,'individual','Old client patch-first','8444444444',$3,$3)",
+    [reassignmentPatchFirstNew, ids.officeA, ids.userA, reassignmentPatchFirstOld]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Case reassignment patch-first',$5,$5)",
+    [reassignmentPatchFirstCase, ids.officeA, reassignmentPatchFirstOld, reassignmentPatchFirstNumber, ids.userA]
+  );
+  const reassignmentPatchFirstAudit = {
+    clientDelete: await auditCount("client", "delete"),
+    caseUpdate: await auditCount("case", "update")
+  };
+  const reassignmentPatchFirstBlocker = await pool.connect();
+  let reassignmentPatchFirstBlockerOpen = false;
+  let reassignmentPatchFirstDeletePromise;
+  let reassignmentPatchFirstPatchPromise;
+  try {
+    await reassignmentPatchFirstBlocker.query("begin");
+    await reassignmentPatchFirstBlocker.query("select id from clients where id=$1 for update", [reassignmentPatchFirstOld]);
+    reassignmentPatchFirstBlockerOpen = true;
+    reassignmentPatchFirstPatchPromise = request("/api/cases/" + reassignmentPatchFirstCase, {
+      token: raceActors["case-patch"].token, csrf: raceActors["case-patch"].csrf, method: "PATCH",
+      body: { client_id: reassignmentPatchFirstNew }
+    });
+    await waitForLockWait("%from public.lock_live_case_reassignment%", 1, "case reassignment holds target lock and waits for old client");
+    reassignmentPatchFirstDeletePromise = request("/api/clients/" + reassignmentPatchFirstOld, {
+      token: raceActors["client-delete"].token, csrf: raceActors["client-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update clients%deleted_at = now()%", 1, "old-client delete queues behind reassignment");
+  } finally {
+    if (reassignmentPatchFirstBlockerOpen) await reassignmentPatchFirstBlocker.query("rollback").catch(() => {});
+    reassignmentPatchFirstBlocker.release();
+  }
+  const [reassignmentPatchFirstPatch, reassignmentPatchFirstDelete] = await Promise.all([
+    reassignmentPatchFirstPatchPromise, reassignmentPatchFirstDeletePromise
+  ]);
+  assert.equal(reassignmentPatchFirstPatch.status, 200, "PATCH queued before old-client delete should commit");
+  assert.equal(reassignmentPatchFirstDelete.status, 204, "old-client delete should proceed after reassignment releases its locks");
+  assert.equal((await pool.query("select client_id from cases where id=$1", [reassignmentPatchFirstCase])).rows[0].client_id,
+    reassignmentPatchFirstNew, "successful reassignment must persist the new same-office client link");
+  assert.ok((await pool.query("select deleted_at from clients where id=$1", [reassignmentPatchFirstOld])).rows[0].deleted_at);
+  assert.equal(await auditCount("client", "delete"), reassignmentPatchFirstAudit.clientDelete + 1);
+  assert.equal(await auditCount("case", "update"), reassignmentPatchFirstAudit.caseUpdate + 1,
+    "successful reassignment must commit exactly one case audit row");
+  console.log("PASS: case PATCH locks old/new clients in stable UUID order; old-client soft-delete races preserve relationships and audit atomicity");
+
   // Client soft-delete vs case create and case reassignment to that client.
   const raceClient = crypto.randomUUID();
   const raceCase = crypto.randomUUID();
