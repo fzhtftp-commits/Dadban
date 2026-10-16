@@ -172,6 +172,8 @@ try {
   await pool.query(mutationTombstoneMigration);
   const actorLockMigration = await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8");
   await pool.query(actorLockMigration);
+  const caseReassignmentLockMigration = await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8");
+  await pool.query(caseReassignmentLockMigration);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
