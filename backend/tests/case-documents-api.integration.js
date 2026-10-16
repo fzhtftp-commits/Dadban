@@ -2364,6 +2364,26 @@ try {
     "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Case to reassign',$5,$5)",
     [raceCase, ids.officeA, clientA, raceClientCaseNumber + "-SOURCE", ids.userA]
   );
+  const hiddenCase = crypto.randomUUID();
+  const hiddenHearing = crypto.randomUUID();
+  const hiddenAction = crypto.randomUUID();
+  const hiddenDocument = crypto.randomUUID();
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Case hidden by deleted client',$5,$5)",
+    [hiddenCase, ids.officeA, raceClient, raceClientCaseNumber + "-DEPENDENT", ids.userA]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,now()+interval '12 days','hearing','scheduled',$4,$4)",
+    [hiddenHearing, ids.officeA, hiddenCase, ids.userA]
+  );
+  await pool.query(
+    "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'Action hidden by deleted client','todo','normal',$4,$4)",
+    [hiddenAction, ids.officeA, hiddenCase, ids.userA]
+  );
+  await pool.query(
+    "insert into case_documents(id,office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'Document hidden by deleted client','evidence','normal',$4,$4)",
+    [hiddenDocument, ids.officeA, hiddenCase, ids.userA]
+  );
   const clientDeleteAuditBefore = await auditCount("client", "delete");
   const caseCreateAuditBefore = await auditCount("case", "create");
   const caseUpdateAuditBefore = await auditCount("case", "update");
@@ -2410,6 +2430,64 @@ try {
     "successful parent soft-delete must commit exactly one audit row");
   assert.equal(await auditCount("case", "create"), caseCreateAuditBefore, "rejected case create must not emit audit");
   assert.equal(await auditCount("case", "update"), caseUpdateAuditBefore, "rejected case reassignment must not emit audit");
+
+  // A deleted client must hide its still-retained cases and every child read path.
+  assert.equal((await request("/api/clients/" + raceClient, { token: tokenA, csrf: csrfA })).status, 404);
+  assert.equal((await request("/api/clients/lookup?national_id=9876501234", { token: tokenA, csrf: csrfA })).status, 404);
+  assert.equal((await request("/api/cases/" + hiddenCase, { token: tokenA, csrf: csrfA })).status, 404);
+  assert.equal((await request("/api/cases?search=" + encodeURIComponent(raceClientCaseNumber + "-DEPENDENT"), { token: tokenA, csrf: csrfA })).body.data.some(row => row.id === hiddenCase), false);
+  assert.equal((await request("/api/hearings/" + hiddenHearing, { token: tokenA, csrf: csrfA })).status, 404);
+  assert.equal((await request("/api/hearings", { token: tokenA, csrf: csrfA })).body.data.some(row => row.id === hiddenHearing), false);
+  assert.equal((await request("/api/actions/" + hiddenAction, { token: tokenA, csrf: csrfA })).status, 404);
+  assert.equal((await request("/api/actions", { token: tokenA, csrf: csrfA })).body.data.some(row => row.id === hiddenAction), false);
+  assert.equal((await request("/api/case-documents/" + hiddenDocument, { token: tokenA, csrf: csrfA })).status, 404);
+  assert.equal((await request("/api/case-documents", { token: tokenA, csrf: csrfA })).body.data.some(row => row.id === hiddenDocument), false);
+
+  const hiddenWriteAuditBefore = await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
+    [ids.officeA, [hiddenCase, hiddenHearing, hiddenAction, hiddenDocument]]
+  );
+  const hiddenHearingPatch = await request("/api/hearings/" + hiddenHearing, {
+    token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "PATCH",
+    body: { hearing_type: "cannot update hidden parent" }
+  });
+  const hiddenActionPatch = await request("/api/actions/" + hiddenAction, {
+    token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf, method: "PATCH",
+    body: { title: "Cannot update hidden parent" }
+  });
+  const hiddenDocumentPatch = await request("/api/case-documents/" + hiddenDocument, {
+    token: raceActors["document-patch"].token, csrf: raceActors["document-patch"].csrf, method: "PATCH",
+    idempotencyKey: "hidden-client-document-patch-01",
+    body: { title: "Cannot update hidden parent" }
+  });
+  assert.equal(hiddenHearingPatch.status, 400, "hearing mutation must reject a case whose client is deleted");
+  assert.deepEqual(hiddenHearingPatch.body, { error: "invalid_related_case" });
+  assert.equal(hiddenActionPatch.status, 400, "action mutation must reject a case whose client is deleted");
+  assert.deepEqual(hiddenActionPatch.body, { error: "invalid_related_case" });
+  assert.equal(hiddenDocumentPatch.status, 404, "document mutation must hide a document whose client is deleted");
+  assert.deepEqual(hiddenDocumentPatch.body, { error: "document_not_found" });
+  assert.equal((await pool.query("select hearing_type from hearings where id=$1", [hiddenHearing])).rows[0].hearing_type, "hearing");
+  assert.equal((await pool.query("select title from case_actions where id=$1", [hiddenAction])).rows[0].title, "Action hidden by deleted client");
+  assert.equal((await pool.query("select title from case_documents where id=$1", [hiddenDocument])).rows[0].title, "Document hidden by deleted client");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, raceActors["document-patch"].userId, "hidden-client-document-patch-01"])).rows[0].count, 0,
+    "rejected document mutation must roll back its idempotency reservation");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
+    [ids.officeA, [hiddenCase, hiddenHearing, hiddenAction, hiddenDocument]]
+  )).rows[0].count), Number(hiddenWriteAuditBefore.rows[0].count),
+    "rejected mutations on hidden child records must not add audit rows");
+
+  // Physical parent deletion must be restricted while retained child rows exist.
+  await assert.rejects(pool.query("delete from clients where id=$1 and office_id=$2", [raceClient, ids.officeA]),
+    error => error.code === "23503", "physical client deletion must be blocked by the retained case FK");
+  await assert.rejects(pool.query("delete from cases where id=$1 and office_id=$2", [hiddenCase, ids.officeA]),
+    error => error.code === "23503", "physical case deletion must be blocked by retained hearing/action/document FKs");
+  assert.ok((await pool.query("select deleted_at from clients where id=$1", [raceClient])).rows[0].deleted_at,
+    "failed physical delete must preserve soft-delete tombstone");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='delete'",
+    [ids.officeA, raceClient])).rows[0].count, 1, "physical delete attempt must not alter the soft-delete audit history");
+  console.log("PASS: soft-deleted client hides dependent case/hearing/action/document reads, blocks child mutations, and physical parent deletes are FK-restricted");
 
   // Case soft-delete vs hearing/action/document create and reassignment/update.
   const raceCaseClient = crypto.randomUUID();
