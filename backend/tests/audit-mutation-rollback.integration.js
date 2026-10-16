@@ -206,8 +206,33 @@ try {
     },
     {
       label: "case delete", method: "DELETE", path: `/api/cases/${ids.case}`,
-      table: "cases", entityType: "case", action: "delete",
-      checkUnchanged: async () => assert.equal((await pool.query("select deleted_at from cases where id=$1", [ids.case])).rows[0].deleted_at, null)
+      table: "cases", entityType: "case", action: "delete", auditEntityId: ids.case,
+      checkUnchanged: async () => {
+        const currentCase = (await pool.query(
+          "select deleted_at,next_hearing_at from cases where id=$1", [ids.case]
+        )).rows[0];
+        const hearing = (await pool.query(
+          "select case_id,hearing_at,deleted_at from hearings where id=$1", [ids.hearing]
+        )).rows[0];
+        const action = (await pool.query(
+          "select case_id,title,deleted_at from case_actions where id=$1", [ids.action]
+        )).rows[0];
+        assert.equal(currentCase.deleted_at, null, "audit failure must roll back case deleted_at");
+        assert.equal(currentCase.next_hearing_at.getTime(), hearing.hearing_at.getTime(),
+          "audit failure must preserve next_hearing_at");
+        assert.equal(hearing.case_id, ids.case, "audit failure must preserve dependent hearing case_id");
+        assert.equal(hearing.deleted_at, null, "audit failure must preserve dependent hearing deleted_at");
+        assert.equal(action.case_id, ids.case, "audit failure must preserve dependent action case_id");
+        assert.equal(action.title, "Original action title", "audit failure must preserve dependent action data");
+        assert.equal(action.deleted_at, null, "audit failure must preserve dependent action deleted_at");
+        for (const [entityType, entityId] of [["hearing", ids.hearing], ["case_action", ids.action]]) {
+          const childAuditCount = Number((await pool.query(
+            "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3",
+            [ids.office, entityType, entityId]
+          )).rows[0].count);
+          assert.equal(childAuditCount, 0, "failed case delete must not emit dependent " + entityType + " audit rows");
+        }
+      }
     },
     {
       label: "hearing create", method: "POST", path: "/api/hearings",
