@@ -1379,6 +1379,12 @@ try {
   assert.equal(hiddenList.body.data.some(item => item.id === documentId), false, "soft-deleted document must be hidden from list API");
   const deleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
   assert.equal(deleteAudit.rows[0].count, 1, "successful soft delete must be audited once");
+  const documentAuditAfterRecoveredDelete = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, documentId]
+  )).rows[0].count);
+  assert.equal(documentAuditAfterRecoveredDelete, documentAuditBeforeFailedDelete + 1,
+    "successful retry must append exactly one audit row to the unchanged pre-failure document history");
   const repeatedDelete = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "DELETE" });
   assert.equal(repeatedDelete.status, 404, "repeated soft delete must return not found");
   const repeatDeleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
