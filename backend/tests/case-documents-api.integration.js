@@ -87,6 +87,9 @@ try {
   // This script is only permitted to reset its dedicated, disposable localhost test DB.
   await pool.query(`
     drop function if exists public.lock_live_document_actor(uuid,uuid,uuid) cascade;
+    drop function if exists public.lock_live_client_parent(uuid,uuid) cascade;
+    drop function if exists public.lock_live_case_client(uuid,uuid) cascade;
+    drop function if exists public.lock_live_case_parents(uuid,uuid[]) cascade;
     drop function if exists public.prevent_case_document_idempotency_delete() cascade;
     drop function if exists public.prevent_case_document_idempotency_reopen() cascade;
     drop table if exists case_document_mutation_idempotency cascade;
