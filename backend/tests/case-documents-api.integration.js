@@ -567,6 +567,78 @@ try {
   assert.equal(actionAfterWriteAttempts.rows[0].title, "Action A", "cross-office action update must not mutate data");
   assert.equal(actionAfterWriteAttempts.rows[0].assigned_to, ids.userA, "invalid assignee assignment must not change the assignee");
   assert.equal(actionAfterWriteAttempts.rows[0].deleted_at, null, "cross-office action delete must not soft-delete data");
+  // General business writes must reject viewers and re-check role/active state
+  // after waiting for the actor row locks, not rely on requireAuth's earlier snapshot.
+  const viewerAccount = roleAccounts.find(account => account.role === "viewer");
+  const viewerWrite = await request("/api/clients", {
+    token: viewerAccount.token, csrf: viewerAccount.csrf, method: "POST",
+    body: { client_type: "individual", full_name: "Viewer Forbidden Client", national_id: "5566778899" }
+  });
+  assert.equal(viewerWrite.status, 403, "viewer must not create clients even with a valid session");
+  assert.equal((await pool.query("select count(*)::int as count from clients where full_name='Viewer Forbidden Client'")).rows[0].count, 0,
+    "denied viewer write must not persist a client");
+
+  const waitForActorLockWait = async () => {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const waiting = await pool.query(
+        "select pid from pg_stat_activity where datname=current_database() and query ilike '%lock_live_document_actor%' and wait_event_type='Lock'"
+      );
+      if (waiting.rowCount > 0) return waiting.rows[0].pid;
+      await delay(25);
+    }
+    throw new Error("Timed out waiting for a business-write request to block on the live actor row lock");
+  };
+
+  const roleRaceAccount = roleAccounts.find(account => account.role === "lawyer");
+  const roleGate = await pool.connect();
+  let roleGateOpen = false;
+  try {
+    await roleGate.query("begin");
+    roleGateOpen = true;
+    await roleGate.query("update users set role='viewer' where id=$1", [roleRaceAccount.id]);
+    const pendingRoleWrite = request("/api/clients", {
+      token: roleRaceAccount.token, csrf: roleRaceAccount.csrf, method: "POST",
+      body: { client_type: "individual", full_name: "Role-Race Forbidden Client", national_id: "6677889900" }
+    });
+    await waitForActorLockWait();
+    await roleGate.query("commit");
+    roleGateOpen = false;
+    const roleRaceResult = await pendingRoleWrite;
+    assert.equal(roleRaceResult.status, 403, "a role downgrade committed while the request waited must be enforced in-transaction");
+    assert.equal((await pool.query("select count(*)::int as count from clients where full_name='Role-Race Forbidden Client'")).rows[0].count, 0,
+      "role downgrade race must not persist a client");
+  } finally {
+    if (roleGateOpen) await roleGate.query("rollback").catch(() => {});
+    roleGate.release();
+    await pool.query("update users set role='lawyer' where id=$1", [roleRaceAccount.id]);
+  }
+
+  const deactivationAccount = roleAccounts.find(account => account.role === "assistant");
+  const deactivateGate = await pool.connect();
+  let deactivateGateOpen = false;
+  try {
+    await deactivateGate.query("begin");
+    deactivateGateOpen = true;
+    await deactivateGate.query("update users set is_active=false where id=$1", [deactivationAccount.id]);
+    const pendingDeactivatedWrite = request("/api/cases/" + ids.caseA, {
+      token: deactivationAccount.token, csrf: deactivationAccount.csrf, method: "PATCH",
+      body: { title: "Must not commit after deactivation" }
+    });
+    await waitForActorLockWait();
+    await deactivateGate.query("commit");
+    deactivateGateOpen = false;
+    const deactivatedResult = await pendingDeactivatedWrite;
+    assert.equal(deactivatedResult.status, 401, "a deactivation committed while the request waited must invalidate the write");
+    assert.equal((await pool.query("select title from cases where id=$1", [ids.caseA])).rows[0].title, "Case A",
+      "deactivation race must not mutate the case");
+  } finally {
+    if (deactivateGateOpen) await deactivateGate.query("rollback").catch(() => {});
+    deactivateGate.release();
+    await pool.query("update users set is_active=true where id=$1", [deactivationAccount.id]);
+  }
+  console.log("PASS: client/case writes reject viewer role and re-check concurrent role downgrade and user deactivation under PostgreSQL actor locks");
+
   console.log("PASS: cross-office HTTP mutation isolation for clients, cases, hearings and actions");
 
   console.log("PASS: cross-office HTTP isolation for clients, cases, hearings, actions and assignees");
