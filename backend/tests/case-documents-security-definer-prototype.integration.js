@@ -190,6 +190,7 @@ try {
   );
   // Force a real privilege error inside SECURITY DEFINER, then prove the
   // caller can roll back the failed transaction and use the helper after repair.
+  await resetActor();
   await admin.query("REVOKE SELECT ON actor_lock_test.users FROM dadban_actor_lock_owner_ci");
   const failingClient = await runtime.connect();
   try {
