@@ -46,19 +46,30 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
-DECLARE locked_role text; is_live boolean;
+DECLARE locked_role text; is_live boolean; locked_session uuid;
 BEGIN
-  SELECT u.role INTO locked_role
+  -- Establish a deterministic lock order for every caller: session first, user second.
+  -- A joined FOR UPDATE OF s,u leaves lock acquisition dependent on the chosen join plan;
+  -- separate statements prevent callers from taking these two rows in opposite orders.
+  SELECT s.id INTO locked_session
   FROM public.auth_sessions AS s
-  JOIN public.users AS u ON u.id=s.user_id AND u.office_id=s.office_id
   WHERE s.id=p_session AND s.user_id=p_user AND s.office_id=p_office
-  FOR UPDATE OF s,u;
+  FOR UPDATE;
   IF NOT FOUND THEN
     RETURN QUERY SELECT false, NULL::text;
     RETURN;
   END IF;
 
-  -- Re-read after lock acquisition so expiry/revocation/disable changes committed
+  SELECT u.role INTO locked_role
+  FROM public.users AS u
+  WHERE u.id=p_user AND u.office_id=p_office
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT false, NULL::text;
+    RETURN;
+  END IF;
+
+  -- Re-read after both locks are held so expiry/revocation/disable changes committed
   -- while waiting are reflected in the authorization decision.
   SELECT (s.revoked_at IS NULL AND s.expires_at > clock_timestamp()
           AND u.is_active AND u.deleted_at IS NULL), u.role
