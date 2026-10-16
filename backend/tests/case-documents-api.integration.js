@@ -2478,6 +2478,40 @@ try {
   )).rows[0].count), Number(hiddenWriteAuditBefore.rows[0].count),
     "rejected mutations on hidden child records must not add audit rows");
 
+  const hiddenHearingCount = Number((await pool.query("select count(*)::int as count from hearings where office_id=$1", [ids.officeA])).rows[0].count);
+  const hiddenActionCount = Number((await pool.query("select count(*)::int as count from case_actions where office_id=$1", [ids.officeA])).rows[0].count);
+  const hiddenDocumentCount = Number((await pool.query("select count(*)::int as count from case_documents where office_id=$1", [ids.officeA])).rows[0].count);
+  const createHearingUnderHiddenClient = await request("/api/hearings", {
+    token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
+    body: { case_id: hiddenCase, hearing_at: new Date(Date.now()+86400000).toISOString(), hearing_type: "trial" }
+  });
+  const createActionUnderHiddenClient = await request("/api/actions", {
+    token: raceActors["action-create"].token, csrf: raceActors["action-create"].csrf, method: "POST",
+    body: { case_id: hiddenCase, title: "Cannot create under hidden client" }
+  });
+  const createDocumentUnderHiddenClient = await request("/api/case-documents", {
+    token: raceActors["document-create"].token, csrf: raceActors["document-create"].csrf, method: "POST",
+    idempotencyKey: "hidden-client-document-create-01",
+    body: { case_id: hiddenCase, title: "Cannot create under hidden client", document_type: "evidence", confidentiality: "normal" },
+    portToUse: retryPort
+  });
+  for (const [label, response] of [
+    ["hearing create", createHearingUnderHiddenClient],
+    ["action create", createActionUnderHiddenClient],
+    ["document create", createDocumentUnderHiddenClient]
+  ]) {
+    assert.equal(response.status, 400, label + " must reject a case whose client is soft-deleted");
+    assert.deepEqual(response.body, { error: "invalid_related_case" });
+  }
+  assert.equal((await pool.query("select count(*)::int as count from hearings where office_id=$1", [ids.officeA])).rows[0].count, hiddenHearingCount);
+  assert.equal((await pool.query("select count(*)::int as count from case_actions where office_id=$1", [ids.officeA])).rows[0].count, hiddenActionCount);
+  assert.equal((await pool.query("select count(*)::int as count from case_documents where office_id=$1", [ids.officeA])).rows[0].count, hiddenDocumentCount);
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
+    [ids.officeA, [hiddenCase, hiddenHearing, hiddenAction, hiddenDocument]]
+  )).rows[0].count), Number(hiddenWriteAuditBefore.rows[0].count),
+    "rejected child creates under a deleted client must not emit audit rows");
+
   // Physical parent deletion must be restricted while retained child rows exist.
   await assert.rejects(pool.query("delete from clients where id=$1 and office_id=$2", [raceClient, ids.officeA]),
     error => error.code === "23503", "physical client deletion must be blocked by the retained case FK");
