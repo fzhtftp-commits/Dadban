@@ -75,7 +75,7 @@ async function setup() {
     RETURNS TABLE(valid boolean, actor_role text)
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, actor_lock_test
+    SET search_path = pg_catalog, pg_temp
     AS $function$
     DECLARE locked_role text; is_live boolean;
     BEGIN
@@ -121,6 +121,7 @@ async function setup() {
   const row = proof.rows[0];
   assert(row && row.rolsuper === false && row.rolcanlogin === false, "Function owner must be NOLOGIN NOSUPERUSER");
   assert(row.function_owner === "dadban_actor_lock_owner_ci" && row.security_definer, "Function owner/security-definer catalog proof failed");
+  assert(JSON.stringify(row.proconfig) === JSON.stringify(["search_path=pg_catalog, pg_temp"]), "Function search_path must exclude writable application schemas");
   assert(row.runtime_update_users === false && row.runtime_update_full_name === false && row.runtime_select_users === false && row.runtime_execute === true,
     "Runtime role must have EXECUTE only, with no direct users table access");
   console.log("CATALOG ASSERTIONS:", JSON.stringify(row));
