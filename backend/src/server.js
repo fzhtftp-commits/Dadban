@@ -1560,6 +1560,22 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
       await client.query("rollback");
       return res.status(actor.status).json({ error: actor.error });
     }
+    const current = await client.query(
+      "select id, case_id from hearings where id = $1 and office_id = $2 and deleted_at is null for update",
+      [id.data, req.auth.officeId]
+    );
+    if (!current.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "hearing_not_found" });
+    }
+    const liveParent = await client.query(
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
+      [current.rows[0].case_id, req.auth.officeId]
+    );
+    if (!liveParent.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "hearing_not_found" });
+    }
     const result = await client.query(
       "update hearings set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id, case_id",
       [id.data, req.auth.officeId, req.auth.userId]
@@ -1805,6 +1821,22 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       await client.query("rollback");
       return res.status(actor.status).json({ error: actor.error });
     }
+    const current = await client.query(
+      "select id, case_id from case_actions where id = $1 and office_id = $2 and deleted_at is null for update",
+      [id.data, req.auth.officeId]
+    );
+    if (!current.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "action_not_found" });
+    }
+    const liveParent = await client.query(
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
+      [current.rows[0].case_id, req.auth.officeId]
+    );
+    if (!liveParent.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "action_not_found" });
+    }
     const result = await client.query(
       "update case_actions set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id",
       [id.data, req.auth.officeId, req.auth.userId]
@@ -1969,6 +2001,10 @@ app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", 
       if(idem.status!==204){await rollbackQuietly(c,"invalid document DELETE replay status");return res.status(500).json({error:"database_error"});}
       await c.query("commit");return res.status(204).send();
     }
+    const current=await c.query("select case_id from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
+    if(!current.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
+    const liveParent=await c.query("select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",[current.rows[0].case_id,req.auth.officeId]);
+    if(!liveParent.rowCount){await rollbackQuietly(c,"delete document whose parent case is deleted");return res.status(404).json({error:"document_not_found"});}
     const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);
