@@ -49,10 +49,13 @@ test("document write transactions revalidate and lock the live session and user 
  assert.match(server, /public\.lock_live_document_actor\(\$1,\$2,\$3\)/);
  assert.match(actorLockMigration, /SECURITY DEFINER/);
  assert.match(actorLockMigration, /FOR UPDATE OF s,u/);
- assert.match(actorLockMigration, /SET search_path = pg_catalog, public/);
+ assert.match(actorLockMigration, /SET search_path = pg_catalog, pg_temp/);
  assert.match(actorLockMigration, /NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT/);
  assert.match(actorLockMigration, /s\.expires_at > clock_timestamp\(\)[\s\S]*u\.is_active[\s\S]*u\.deleted_at IS NULL/);
  assert.match(actorLockMigration, /REVOKE ALL ON FUNCTION public\.lock_live_document_actor\(uuid,uuid,uuid\) FROM PUBLIC/);
+ assert.match(actorLockMigration, /must not participate in role memberships/);
+ assert.doesNotMatch(actorLockMigration, /TO postgres/);
+ assert.ok(actorLockMigration.includes("GRANT EXECUTE ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) TO dadban_document_runtime_ci"));
  assert.equal((server.match(/lockLiveDocumentActor\(c, req,/g) || []).length, 3, "create, update, and delete must revalidate actor state inside their transactions");
  assert.match(server, /rollbackSucceeded && \["40001", "40P01", "55P03", "57014"\]\.includes\(error\?\.code\)/);
  assert.match(server, /dbError\(error,rollbackSucceeded\)/);
