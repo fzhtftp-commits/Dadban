@@ -1324,14 +1324,38 @@ try {
     create trigger reject_document_mutation_audit_trigger
       before insert on audit_logs for each row execute function reject_document_mutation_audit();
   `);
+  const failedDeleteKey = "audit-delete-failure-rollback-01";
+  const documentAuditBeforeFailedDelete = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, documentId]
+  )).rows[0].count);
+  const failedDeleteKeyBefore = Number((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, failedDeleteKey]
+  )).rows[0].count);
+  assert.equal(failedDeleteKeyBefore, 0, "audit-failure idempotency key must start unused");
   const failedDelete = await request(`/api/case-documents/${documentId}`, {
-    token: tokenA, csrf: csrfA, method: "DELETE"
+    token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: failedDeleteKey
   });
   assert.equal(failedDelete.status, 500, "audit insert failure should prevent delete");
+  assert.deepEqual(failedDelete.body, { error: "database_error" },
+    "delete audit failure must return a sanitized database error");
   const afterFailedDelete = await pool.query("select deleted_at from case_documents where id=$1", [documentId]);
   assert.equal(afterFailedDelete.rows[0].deleted_at, null, "soft delete must roll back when audit insert fails");
   const failedDeleteAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='delete'", [documentId]);
   assert.equal(failedDeleteAudit.rows[0].count, 0, "failed delete must not leave an audit row");
+  const documentAuditAfterFailedDelete = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, documentId]
+  )).rows[0].count);
+  assert.equal(documentAuditAfterFailedDelete, documentAuditBeforeFailedDelete,
+    "failed soft-delete must preserve the exact complete audit-row count for the document");
+  const failedDeleteKeyAfter = Number((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, failedDeleteKey]
+  )).rows[0].count);
+  assert.equal(failedDeleteKeyAfter, 0,
+    "audit INSERT failure must roll back the DELETE idempotency record so the same key can be retried");
   await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
   await pool.query("drop function reject_document_mutation_audit()");
 
