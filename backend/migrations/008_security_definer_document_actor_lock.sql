@@ -34,11 +34,12 @@ END
 $preflight$;
 
 GRANT USAGE ON SCHEMA public TO dadban_actor_lock_owner;
-GRANT SELECT ON public.auth_sessions, public.users TO dadban_actor_lock_owner;
+GRANT SELECT ON public.auth_sessions, public.users, public.clients, public.cases TO dadban_actor_lock_owner;
 -- PostgreSQL requires UPDATE privilege on each FOR UPDATE target. Keep these
--- grants on the non-login function owner, never on the API runtime identity.
+-- narrow column grants on the non-login function owner, never on the API runtime.
 GRANT UPDATE (revoked_at) ON public.auth_sessions TO dadban_actor_lock_owner;
 GRANT UPDATE (full_name) ON public.users TO dadban_actor_lock_owner;
+GRANT UPDATE (deleted_at) ON public.clients, public.cases TO dadban_actor_lock_owner;
 
 CREATE FUNCTION public.lock_live_document_actor(p_session uuid, p_user uuid, p_office uuid)
 RETURNS TABLE(valid boolean, actor_role text)
@@ -85,6 +86,63 @@ $function$;
 ALTER FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) OWNER TO dadban_actor_lock_owner;
 REVOKE ALL ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) FROM PUBLIC;
 
+-- Parent-row locks serialize child writes against a concurrent soft-delete without
+-- granting the application UPDATE privileges on clients/cases. The NOLOGIN owner
+-- holds only UPDATE(deleted_at), required by PostgreSQL for SELECT ... FOR UPDATE.
+CREATE FUNCTION public.lock_live_client_parent(p_client uuid, p_office uuid)
+RETURNS TABLE(id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+  RETURN QUERY
+    SELECT cl.id
+    FROM public.clients AS cl
+    WHERE cl.id=p_client AND cl.office_id=p_office AND cl.deleted_at IS NULL
+    FOR UPDATE;
+END
+$function$;
+ALTER FUNCTION public.lock_live_client_parent(uuid,uuid) OWNER TO dadban_actor_lock_owner;
+REVOKE ALL ON FUNCTION public.lock_live_client_parent(uuid,uuid) FROM PUBLIC;
+
+CREATE FUNCTION public.lock_live_case_client(p_case uuid, p_office uuid)
+RETURNS TABLE(id uuid, client_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+  RETURN QUERY
+    SELECT c.id, c.client_id
+    FROM public.cases AS c
+    WHERE c.id=p_case AND c.office_id=p_office AND c.deleted_at IS NULL
+    FOR UPDATE;
+END
+$function$;
+ALTER FUNCTION public.lock_live_case_client(uuid,uuid) OWNER TO dadban_actor_lock_owner;
+REVOKE ALL ON FUNCTION public.lock_live_case_client(uuid,uuid) FROM PUBLIC;
+
+CREATE FUNCTION public.lock_live_case_parents(p_office uuid, p_case_ids uuid[])
+RETURNS TABLE(id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+  -- Stable UUID order avoids A→B/B→A lock cycles. READ COMMITTED rechecks the
+  -- deleted_at predicate after waiting for a concurrent soft-delete.
+  RETURN QUERY
+    SELECT c.id
+    FROM public.cases AS c
+    WHERE c.office_id=p_office AND c.id=ANY(p_case_ids) AND c.deleted_at IS NULL
+    ORDER BY c.id
+    FOR UPDATE;
+END
+$function$;
+ALTER FUNCTION public.lock_live_case_parents(uuid,uuid[]) OWNER TO dadban_actor_lock_owner;
+REVOKE ALL ON FUNCTION public.lock_live_case_parents(uuid,uuid[]) FROM PUBLIC;
+
 -- Grant to known application-role names only when present. Deployments using a
 -- different DB login must explicitly GRANT EXECUTE to that runtime role.
 DO $grants$
@@ -94,6 +152,14 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_ci') THEN
     GRANT EXECUTE ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) TO dadban_document_runtime_ci;
+    GRANT EXECUTE ON FUNCTION public.lock_live_client_parent(uuid,uuid) TO dadban_document_runtime_ci;
+    GRANT EXECUTE ON FUNCTION public.lock_live_case_client(uuid,uuid) TO dadban_document_runtime_ci;
+    GRANT EXECUTE ON FUNCTION public.lock_live_case_parents(uuid,uuid[]) TO dadban_document_runtime_ci;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime') THEN
+    GRANT EXECUTE ON FUNCTION public.lock_live_client_parent(uuid,uuid) TO dadban_document_runtime;
+    GRANT EXECUTE ON FUNCTION public.lock_live_case_client(uuid,uuid) TO dadban_document_runtime;
+    GRANT EXECUTE ON FUNCTION public.lock_live_case_parents(uuid,uuid[]) TO dadban_document_runtime;
   END IF;
 END
 $grants$;
