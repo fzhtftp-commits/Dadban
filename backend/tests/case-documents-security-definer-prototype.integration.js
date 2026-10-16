@@ -188,6 +188,30 @@ try {
     "UPDATE actor_lock_test.users SET is_active=false WHERE id=$2 AND $1::uuid IS NOT NULL",
     { valid: false, role: "owner" }
   );
+  // Force a real privilege error inside SECURITY DEFINER, then prove the
+  // caller can roll back the failed transaction and use the helper after repair.
+  await admin.query("REVOKE SELECT ON actor_lock_test.users FROM dadban_actor_lock_owner_ci");
+  const failingClient = await runtime.connect();
+  try {
+    await failingClient.query("BEGIN");
+    const failure = await failingClient.query(
+      "SELECT * FROM actor_lock_test.lock_live_actor($1,$2,$3)",
+      [sessionId,userId,officeId]
+    ).then(() => null, error => error);
+    assert(failure && failure.code === "42501", `Expected SQLSTATE 42501 from revoked owner privilege, got ${failure?.code || "no error"}`);
+    await failingClient.query("ROLLBACK");
+    console.log("PASS: SECURITY DEFINER privilege error returns SQLSTATE 42501 and transaction rollback succeeds");
+  } finally {
+    failingClient.release();
+    await admin.query("GRANT SELECT ON actor_lock_test.users TO dadban_actor_lock_owner_ci");
+  }
+  const recovered = await runtime.query(
+    "SELECT * FROM actor_lock_test.lock_live_actor($1,$2,$3)",
+    [sessionId,userId,officeId]
+  );
+  assert(recovered.rows[0]?.valid === true, "actor lock helper did not recover after rollback and privilege repair");
+  console.log("PASS: actor lock helper works after rollback and privilege repair");
+
   const totals = await admin.query(`
     SELECT (SELECT count(*)::int FROM actor_lock_test.users) AS users,
            (SELECT count(*)::int FROM actor_lock_test.auth_sessions) AS sessions,
