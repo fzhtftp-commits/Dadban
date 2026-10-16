@@ -3551,6 +3551,188 @@ try {
   }
   console.log("PASS: case soft-delete races with hearing-time PATCH and hearing reassignment in both lock orders; source/destination next_hearing_at and audit counts remain consistent");
 
+
+  // Audit INSERT failure during hearing reassignment must roll back the child
+  // relationship and both case-summary refreshes in one HTTP/PostgreSQL tx.
+  const moveAuditClient = crypto.randomUUID();
+  const moveAuditSourceCase = crypto.randomUUID();
+  const moveAuditTargetCase = crypto.randomUUID();
+  const moveAuditHearing = crypto.randomUUID();
+  const moveAuditPrefix = "HEARING-MOVE-AUDIT-ROLLBACK-" + crypto.randomBytes(5).toString("hex");
+  const moveAuditAt = new Date(Date.now() + 11 * 86400000);
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Hearing move audit rollback','6'||lpad(floor(random()*1000000000)::text,9,'0'),$3,$3)",
+    [moveAuditClient, ids.officeA, ids.userA]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Audit rollback source',$5,$6,$6),($7,$2,$3,$8,'Audit rollback destination',null,$6,$6)",
+    [moveAuditSourceCase, ids.officeA, moveAuditClient, moveAuditPrefix + "-SOURCE", moveAuditAt, ids.userA,
+      moveAuditTargetCase, moveAuditPrefix + "-TARGET"]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,$4,'trial','scheduled',$5,$5)",
+    [moveAuditHearing, ids.officeA, moveAuditSourceCase, moveAuditAt, ids.userA]
+  );
+  const moveAuditBefore = {
+    hearingUpdate: await auditCount("hearing", "update"),
+    caseDelete: await auditCount("case", "delete")
+  };
+  await pool.query(`
+    create or replace function reject_hearing_move_audit_insert() returns trigger language plpgsql as $fn$
+    begin
+      if new.entity_type='hearing' and new.action='update' then
+        raise exception 'forced hearing move audit INSERT failure';
+      end if;
+      return new;
+    end;
+    $fn$;
+    create trigger reject_hearing_move_audit_insert_trigger before insert on audit_logs
+      for each row execute function reject_hearing_move_audit_insert();
+  `);
+  try {
+    const failedMoveForAudit = await request("/api/hearings/" + moveAuditHearing, {
+      token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+      method: "PATCH", body: { case_id: moveAuditTargetCase }
+    });
+    assert.equal(failedMoveForAudit.status, 500, "hearing reassignment must fail when audit INSERT fails");
+    assert.deepEqual(failedMoveForAudit.body, { error: "database_error" },
+      "audit failure response must not disclose database exception details");
+    const persistedMove = (await pool.query("select case_id,hearing_at from hearings where id=$1", [moveAuditHearing])).rows[0];
+    assert.equal(persistedMove.case_id, moveAuditSourceCase, "failed reassignment must preserve hearing source case_id");
+    assert.equal(persistedMove.hearing_at.getTime(), moveAuditAt.getTime(), "failed reassignment must preserve hearing time");
+    assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [moveAuditSourceCase])).rows[0].next_hearing_at.getTime(),
+      moveAuditAt.getTime(), "failed reassignment must roll back source summary refresh");
+    assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [moveAuditTargetCase])).rows[0].next_hearing_at,
+      null, "failed reassignment must roll back destination summary refresh");
+    assert.equal(await auditCount("hearing", "update"), moveAuditBefore.hearingUpdate,
+      "failed reassignment must leave no hearing update audit row");
+    assert.equal(await auditCount("case", "delete"), moveAuditBefore.caseDelete,
+      "failed reassignment must not create unrelated case-delete audit rows");
+  } finally {
+    await pool.query("drop trigger if exists reject_hearing_move_audit_insert_trigger on audit_logs").catch(() => {});
+    await pool.query("drop function if exists reject_hearing_move_audit_insert()").catch(() => {});
+  }
+  console.log("PASS: hearing reassignment audit INSERT failure rolls back case_id, source/destination next_hearing_at, and audit atomically");
+
+  // Destination case soft-delete vs hearing reassignment in both deterministic
+  // queue orders. The move helper must lock both case UUIDs in sorted order and
+  // then client parents; audit rows and summary state are read directly from PG.
+  async function seedDestinationDeleteMove(label) {
+    const clientId = crypto.randomUUID();
+    const sourceCaseId = crypto.randomUUID();
+    const targetCaseId = crypto.randomUUID();
+    const hearingId = crypto.randomUUID();
+    const prefix = "DEST-DELETE-HEARING-MOVE-" + crypto.randomBytes(5).toString("hex") + "-" + label;
+    const hearingAt = new Date(Date.now() + 13 * 86400000);
+    await pool.query(
+      "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual',$3,'5'||lpad(floor(random()*1000000000)::text,9,'0'),$4,$4)",
+      [clientId, ids.officeA, "Destination delete race " + label, ids.userA]
+    );
+    await pool.query(
+      "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Move source',$5,$6,$6),($7,$2,$3,$8,'Move destination',null,$6,$6)",
+      [sourceCaseId, ids.officeA, clientId, prefix + "-SOURCE", hearingAt, ids.userA, targetCaseId, prefix + "-TARGET"]
+    );
+    await pool.query(
+      "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,$4,'trial','scheduled',$5,$5)",
+      [hearingId, ids.officeA, sourceCaseId, hearingAt, ids.userA]
+    );
+    return { sourceCaseId, targetCaseId, hearingId, hearingAt };
+  }
+
+  async function destinationDeleteVsMove(lockOrder) {
+    const fixture = await seedDestinationDeleteMove(lockOrder);
+    const auditBefore = {
+      caseDelete: await auditCount("case", "delete"),
+      hearingUpdate: await auditCount("hearing", "update")
+    };
+    const blocker = await pool.connect();
+    let blockerOpen = false;
+    let advisoryHeld = false;
+    const advisoryPair = [880004, lockOrder === "parent-first" ? 41 : 42];
+    const triggerName = "pause_destination_delete_move_" + lockOrder.replace("-", "_");
+    const functionName = triggerName + "_fn";
+    let deletePromise;
+    let movePromise;
+    try {
+      if (lockOrder === "parent-first") {
+        await blocker.query("begin");
+        await blocker.query("select id from cases where id=$1 for update", [fixture.targetCaseId]);
+        blockerOpen = true;
+        deletePromise = request("/api/cases/" + fixture.targetCaseId, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, "destination case DELETE queued first");
+        movePromise = request("/api/hearings/" + fixture.hearingId, {
+          token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+          method: "PATCH", body: { case_id: fixture.targetCaseId }
+        });
+        await waitForLockWait("%from public.lock_live_case_parents%", 1, "hearing move waits behind destination DELETE");
+        await blocker.query("rollback");
+        blockerOpen = false;
+      } else {
+        await blocker.query("select pg_advisory_lock($1,$2)", advisoryPair);
+        advisoryHeld = true;
+        await pool.query(
+          "create or replace function " + functionName + "() returns trigger language plpgsql as $fn$ begin perform pg_advisory_xact_lock(" +
+            advisoryPair[0] + "," + advisoryPair[1] + "); return new; end $fn$"
+        );
+        await pool.query(
+          "create trigger " + triggerName + " before update on hearings for each row when (old.id = '" +
+            fixture.hearingId + "'::uuid) execute function " + functionName + "()"
+        );
+        movePromise = request("/api/hearings/" + fixture.hearingId, {
+          token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+          method: "PATCH", body: { case_id: fixture.targetCaseId }
+        });
+        await waitForLockWait("%update hearings%", 1, "hearing move paused after ordered parent locks");
+        deletePromise = request("/api/cases/" + fixture.targetCaseId, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, "destination DELETE waits behind hearing move");
+        const unlocked = await blocker.query("select pg_advisory_unlock($1,$2) as unlocked", advisoryPair);
+        assert.equal(unlocked.rows[0].unlocked, true, "must release hearing move barrier");
+        advisoryHeld = false;
+      }
+      const [deleteResult, moveResult] = await Promise.all([deletePromise, movePromise]);
+      assert.equal(deleteResult.status, 204, "destination soft-delete should commit in either lock order");
+      if (lockOrder === "parent-first") {
+        assert.equal(moveResult.status, 400, "hearing move must reject destination deleted first");
+        assert.deepEqual(moveResult.body, { error: "invalid_related_case" });
+        const hearing = (await pool.query("select case_id from hearings where id=$1", [fixture.hearingId])).rows[0];
+        assert.equal(hearing.case_id, fixture.sourceCaseId, "rejected move must preserve source relationship");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.sourceCaseId])).rows[0].next_hearing_at.getTime(),
+          fixture.hearingAt.getTime(), "rejected move must preserve source summary");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.targetCaseId])).rows[0].next_hearing_at,
+          null, "rejected move must not update destination summary");
+        assert.equal(await auditCount("hearing", "update"), auditBefore.hearingUpdate,
+          "rejected move must not write hearing audit");
+      } else {
+        assert.equal(moveResult.status, 200, "hearing move that locks live parents first should commit");
+        const hearing = (await pool.query("select case_id from hearings where id=$1", [fixture.hearingId])).rows[0];
+        assert.equal(hearing.case_id, fixture.targetCaseId, "child-first move must persist destination case_id");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.sourceCaseId])).rows[0].next_hearing_at,
+          null, "successful move must clear source summary");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.targetCaseId])).rows[0].next_hearing_at.getTime(),
+          fixture.hearingAt.getTime(), "successful move must refresh destination summary");
+        assert.equal(await auditCount("hearing", "update"), auditBefore.hearingUpdate + 1,
+          "successful move must write exactly one hearing audit row");
+      }
+      assert.equal(await auditCount("case", "delete"), auditBefore.caseDelete + 1,
+        "successful destination DELETE must write exactly one case audit row");
+      assert.ok((await pool.query("select deleted_at from cases where id=$1", [fixture.targetCaseId])).rows[0].deleted_at,
+        "destination case tombstone must persist");
+    } finally {
+      if (blockerOpen) await blocker.query("rollback").catch(() => {});
+      if (advisoryHeld) await blocker.query("select pg_advisory_unlock($1,$2)", advisoryPair).catch(() => {});
+      blocker.release();
+      await pool.query("drop trigger if exists " + triggerName + " on hearings").catch(() => {});
+      await pool.query("drop function if exists " + functionName + "()").catch(() => {});
+    }
+  }
+  await destinationDeleteVsMove("parent-first");
+  await destinationDeleteVsMove("child-first");
+  console.log("PASS: destination case soft-delete vs hearing reassignment serializes in both lock orders; ordered parent locks, source/destination summaries, and audit counts stay consistent");
+
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
