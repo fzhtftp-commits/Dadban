@@ -2438,7 +2438,7 @@ try {
     token: tokenA, csrf: csrfA, method: "PATCH", body: { deleted_at: null }
   });
   assert.equal(clientRestoreViaPatch.status, 400, "client API must not permit restoring soft deletion through a writable field");
-  assert.deepEqual(clientRestoreViaPatch.body, { error: "no_changes" });
+  assert.deepEqual(clientRestoreViaPatch.body, { error: "invalid_client_update" });
   assert.equal((await request("/api/clients/" + raceClient + "/restore", {
     token: tokenA, csrf: csrfA, method: "POST", body: {}
   })).status, 404, "no client restore endpoint is exposed");
