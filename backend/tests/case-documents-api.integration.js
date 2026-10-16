@@ -2504,8 +2504,8 @@ try {
   let clientDeletePromise;
   let caseCreateRacePromise;
   let casePatchRacePromise;
-  let hearingCreateRacePromise;
-  let actionCreateRacePromise;
+  let clientDeleteHearingCreateRacePromise;
+  let clientDeleteActionCreateRacePromise;
   try {
     await clientBlocker.query("begin");
     await clientBlocker.query("select id from clients where id=$1 for update", [raceClient]);
@@ -2524,11 +2524,11 @@ try {
     });
     await waitForLockWait("%from public.lock_live_client_parent%", 1, "case create waiting for deleted target client");
     await waitForLockWait("%from public.lock_live_case_reassignment%", 1, "case reassignment waiting for deleted target client");
-    hearingCreateRacePromise = request("/api/hearings", {
+    clientDeleteHearingCreateRacePromise = request("/api/hearings", {
       token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
       body: { case_id: hiddenCase, hearing_at: new Date(Date.now() + 2 * 86400000).toISOString(), hearing_type: "trial", notes: "Must not create hearing after client delete" }
     });
-    actionCreateRacePromise = request("/api/actions", {
+    clientDeleteActionCreateRacePromise = request("/api/actions", {
       token: raceActors["action-create"].token, csrf: raceActors["action-create"].csrf, method: "POST",
       body: { case_id: hiddenCase, title: "Must not create action after client delete" }
     });
@@ -2537,18 +2537,18 @@ try {
     if (clientBlockerOpen) await clientBlocker.query("rollback").catch(() => {});
     clientBlocker.release();
   }
-  const [clientDeleteRace, caseCreateRace, casePatchRace, hearingCreateRace, actionCreateRace] = await Promise.all([
-    clientDeletePromise, caseCreateRacePromise, casePatchRacePromise, hearingCreateRacePromise, actionCreateRacePromise
+  const [clientDeleteRace, caseCreateRace, casePatchRace, clientDeleteHearingCreateRace, clientDeleteActionCreateRace] = await Promise.all([
+    clientDeletePromise, caseCreateRacePromise, casePatchRacePromise, clientDeleteHearingCreateRacePromise, clientDeleteActionCreateRacePromise
   ]);
   assert.equal(clientDeleteRace.status, 204, "client soft-delete should win the queued parent-row race");
   assert.equal(caseCreateRace.status, 400, "case create must reject a client soft-deleted before parent lock acquisition");
   assert.deepEqual(caseCreateRace.body, { error: "invalid_related_client" });
   assert.equal(casePatchRace.status, 400, "case reassignment must reject a client soft-deleted before parent lock acquisition");
   assert.deepEqual(casePatchRace.body, { error: "invalid_related_client" });
-  assert.equal(hearingCreateRace.status, 400, "hearing create must reject a case whose client was soft-deleted while waiting for parent locks");
-  assert.deepEqual(hearingCreateRace.body, { error: "invalid_related_case" });
-  assert.equal(actionCreateRace.status, 400, "action create must reject a case whose client was soft-deleted while waiting for parent locks");
-  assert.deepEqual(actionCreateRace.body, { error: "invalid_related_case" });
+  assert.equal(clientDeleteHearingCreateRace.status, 400, "hearing create must reject a case whose client was soft-deleted while waiting for parent locks");
+  assert.deepEqual(clientDeleteHearingCreateRace.body, { error: "invalid_related_case" });
+  assert.equal(clientDeleteActionCreateRace.status, 400, "action create must reject a case whose client was soft-deleted while waiting for parent locks");
+  assert.deepEqual(clientDeleteActionCreateRace.body, { error: "invalid_related_case" });
   assert.ok((await pool.query("select deleted_at from clients where id=$1", [raceClient])).rows[0].deleted_at);
   assert.equal((await pool.query("select client_id from cases where id=$1", [raceCase])).rows[0].client_id, clientA,
     "failed reassignment must preserve the previous live client relationship");
@@ -2953,7 +2953,7 @@ try {
     if (caseBlockerOpen) await caseBlocker.query("rollback").catch(() => {});
     caseBlocker.release();
   }
-  const [caseDeleteRace, hearingCreateRace, actionCreateRace, hearingPatchRace, actionPatchRace, documentCreateRace, documentPatchRace] =
+  const [caseDeleteRace, clientDeleteHearingCreateRace, clientDeleteActionCreateRace, hearingPatchRace, actionPatchRace, documentCreateRace, documentPatchRace] =
     await Promise.all([caseDeletePromise, ...childPromises]);
   assert.equal(caseDeleteRace.status, 204, "case soft-delete should win the queued parent-row race");
   for (const [label, response, expectedError] of [
