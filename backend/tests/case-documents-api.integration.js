@@ -4171,8 +4171,8 @@ try {
         assert.deepEqual([rowA1.case_id, rowA2.case_id, rowB1.case_id],
           [fixture.caseB, fixture.caseA, fixture.caseB],
           "only the first move may change case_id; rejected moves preserve their original links");
-        assert.equal(cases.find(row => row.id === fixture.caseA).next_hearing_at, null,
-          "source A summary must clear after the committed transfer");
+        assert.equal(cases.find(row => row.id === fixture.caseA).next_hearing_at?.getTime(), fixture.times[1].getTime(),
+          "source A summary must retain its remaining second hearing after the first transfer");
         const summaryB = cases.find(row => row.id === fixture.caseB).next_hearing_at;
         assert.equal(summaryB?.getTime(), fixture.times[0].getTime(),
           "destination B summary must include the earliest transferred hearing");
