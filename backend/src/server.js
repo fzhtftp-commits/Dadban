@@ -1395,7 +1395,7 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "invalid_date_range" });
   }
   const values = [req.auth.officeId];
-  const conditions = ["h.office_id = $1", "h.deleted_at is null", "c.office_id = h.office_id", "c.deleted_at is null"];
+  const conditions = ["h.office_id = $1", "h.deleted_at is null", "c.office_id = h.office_id", "c.deleted_at is null", "cl.deleted_at is null"];
   if (from) { values.push(from); conditions.push(`h.hearing_at >= $${values.length}`); }
   if (to) { values.push(to); conditions.push(`h.hearing_at <= $${values.length}`); }
   if (status) { values.push(status); conditions.push(`h.status = $${values.length}`); }
@@ -1409,7 +1409,7 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
              cl.company_name as client_company_name
       from hearings h
       join cases c on c.id = h.case_id and c.office_id = h.office_id
-      left join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       where ${conditions.join(" and ")}
       order by h.hearing_at asc
       limit $${values.length - 1} offset $${values.length}
@@ -1433,7 +1433,7 @@ app.get("/api/hearings/:id", requireAuth, async (req, res) => {
              cl.company_name as client_company_name
       from hearings h
       join cases c on c.id = h.case_id and c.office_id = h.office_id and c.deleted_at is null
-      left join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       where h.id = $1 and h.office_id = $2 and h.deleted_at is null
     `, [id.data, req.auth.officeId]);
     if (!result.rowCount) return res.status(404).json({ error: "hearing_not_found" });
@@ -1613,7 +1613,7 @@ app.get("/api/actions", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "invalid_action_date_range" });
   }
   const values = [req.auth.officeId];
-  const conditions = ["a.office_id = $1", "a.deleted_at is null", "c.deleted_at is null"];
+  const conditions = ["a.office_id = $1", "a.deleted_at is null", "c.deleted_at is null", "cl.deleted_at is null"];
   if (case_id) { values.push(case_id); conditions.push(`a.case_id = $${values.length}`); }
   if (status) { values.push(status); conditions.push(`a.status = $${values.length}`); }
   if (due_before) { values.push(due_before); conditions.push(`a.due_at <= $${values.length}`); }
@@ -1628,6 +1628,7 @@ app.get("/api/actions", requireAuth, async (req, res) => {
              u.full_name as assignee_name
       from case_actions a
       join cases c on c.id = a.case_id and c.office_id = a.office_id
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       left join users u on u.id = a.assigned_to and u.office_id = a.office_id and u.deleted_at is null
       where ${conditions.join(" and ")}
       order by (a.due_at is null), a.due_at asc, a.created_at desc
@@ -1649,6 +1650,7 @@ app.get("/api/actions/:id", requireAuth, async (req, res) => {
       select a.*, c.case_number, c.title as case_title, u.full_name as assignee_name
       from case_actions a
       join cases c on c.id = a.case_id and c.office_id = a.office_id and c.deleted_at is null
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       left join users u on u.id = a.assigned_to and u.office_id = a.office_id and u.deleted_at is null
       where a.id = $1 and a.office_id = $2 and a.deleted_at is null
     `, [id.data, req.auth.officeId]);
@@ -1866,18 +1868,18 @@ app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin"
   const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
   if (cid && !cid.success) return res.status(400).json({error:"invalid_case_id"});
   const values=[req.auth.officeId,req.auth.userId];
-  const where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null",
+  const where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null","cl.deleted_at is null",
     "((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))"];
   if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
   try {
-    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$2 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
+    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join clients cl on cl.id=c.client_id and cl.office_id=c.office_id and cl.deleted_at is null join users u on u.id=$2 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
   } catch(error){logSafeError("List case documents failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
 app.get("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});
   try {
-    const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$3 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null and ((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))",[id.data,req.auth.officeId,req.auth.userId]);
+    const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id and c.deleted_at is null join clients cl on cl.id=c.client_id and cl.office_id=c.office_id and cl.deleted_at is null join users u on u.id=$3 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null and ((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount) return documentAccessDenied(res);
     return res.json({data:q.rows[0]});
   }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
@@ -1930,7 +1932,7 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
     if(idem.kind==="gone"){await rollbackQuietly(c,"purged document PATCH idempotency replay");return res.status(410).json({error:"idempotency_result_purged"});}
     if(idem.kind==="replay"){
       if(idem.status!==200){await rollbackQuietly(c,"invalid document PATCH replay status");return res.status(500).json({error:"database_error"});}
-      const replay=await c.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at from case_documents d join cases cs on cs.id=d.case_id and cs.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and cs.deleted_at is null for update of d",[id.data,req.auth.officeId]);
+      const replay=await c.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at from case_documents d join cases cs on cs.id=d.case_id and cs.office_id=d.office_id and cs.deleted_at is null join clients cl on cl.id=cs.client_id and cl.office_id=cs.office_id and cl.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null for update of d",[id.data,req.auth.officeId]);
       if(!replay.rowCount||!canReadCaseDocument(actor.role,replay.rows[0].confidentiality)){await rollbackQuietly(c,"document PATCH replay access denied");return documentAccessDenied(res);}
       await c.query("commit");return res.status(200).json({data:replay.rows[0]});
     }
