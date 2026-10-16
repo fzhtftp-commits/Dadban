@@ -1488,6 +1488,66 @@ try {
   )).rows[0].count, 1, "successful retry after lock timeout must leave one completed idempotency record");
   console.log("PASS: real PostgreSQL actor-lock wait hits lock_timeout, rolls back without audit/idempotency residue, releases locks, and a fresh write succeeds");
 
+  // The general CRUD handlers used to issue a raw ROLLBACK and classify the
+  // resulting 55P03 as a generic 500. Exercise the real /api/clients write path
+  // under a genuine actor-row lock wait and prove confirmed rollback is retryable.
+  const clientLockTimeoutName = "Client Lock Timeout Recovery";
+  const clientLockTimeoutNationalId = "9911223344";
+  const clientLockGate = await pool.connect();
+  let clientLockGateOpen = false;
+  let clientLockRequest;
+  const clientCreateAuditBefore = (await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and action='create'",
+    [ids.officeA]
+  )).rows[0].count;
+  try {
+    await clientLockGate.query("begin");
+    await clientLockGate.query("select id from users where id=$1 for update", [ids.userA]);
+    clientLockGateOpen = true;
+    clientLockRequest = request("/api/clients", {
+      token: tokenA, csrf: csrfA, method: "POST", portToUse: timeoutPort,
+      body: { client_type: "individual", full_name: clientLockTimeoutName, national_id: clientLockTimeoutNationalId }
+    });
+    const waitDeadline = Date.now() + 5000;
+    let observedClientActorWait = false;
+    while (Date.now() < waitDeadline) {
+      const waiting = await pool.query(`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname=current_database()
+          and wait_event_type='Lock'
+          and query ilike 'select valid, actor_role from public.lock_live_document_actor%'
+      `);
+      if (waiting.rows[0].count > 0) {
+        observedClientActorWait = true;
+        break;
+      }
+      await delay(10);
+    }
+    assert.equal(observedClientActorWait, true, "client creation must be observed waiting on the PostgreSQL actor lock");
+    const response = await clientLockRequest;
+    assert.equal(response.status, 503, "confirmed rollback after lock_timeout must return retryable 503 for ordinary CRUD routes");
+    assert.deepEqual(response.body, { error: "database_retryable" });
+  } finally {
+    if (clientLockGateOpen) await clientLockGate.query("rollback").catch(() => {});
+    clientLockGate.release();
+    if (clientLockRequest) await clientLockRequest.catch(() => {});
+  }
+  assert.equal((await pool.query("select count(*)::int as count from clients where office_id=$1 and full_name=$2", [ids.officeA, clientLockTimeoutName])).rows[0].count, 0,
+    "timed-out client creation must leave no business row");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and action='create'", [ids.officeA])).rows[0].count, clientCreateAuditBefore,
+    "timed-out client creation must leave no audit row");
+  const recoveredClientCreate = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", portToUse: timeoutPort,
+    body: { client_type: "individual", full_name: clientLockTimeoutName, national_id: clientLockTimeoutNationalId }
+  });
+  assert.equal(recoveredClientCreate.status, 201, "client creation must recover after actor lock is released");
+  assert.equal((await pool.query("select count(*)::int as count from clients where office_id=$1 and full_name=$2", [ids.officeA, clientLockTimeoutName])).rows[0].count, 1);
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and action='create'", [ids.officeA])).rows[0].count, clientCreateAuditBefore + 1,
+    "recovered client creation must produce exactly one audit event");
+  console.log("PASS: client create actor-lock timeout rolls back and recovers with one business row and one audit event");
+
+
   timeoutServer.kill("SIGTERM");
   timeoutServer = null;
 
