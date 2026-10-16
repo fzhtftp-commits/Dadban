@@ -102,6 +102,17 @@ try {
       LANGUAGE plpgsql AS $fn$ BEGIN NEW.updated_at=now(); RETURN NEW; END $fn$;
   `);
 
+  await pool.query(`
+    DO $role$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_ci') THEN
+        CREATE ROLE dadban_document_runtime_ci LOGIN PASSWORD 'ci-only-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+      END IF;
+    END
+    $role$;
+    ALTER ROLE dadban_document_runtime_ci LOGIN PASSWORD 'ci-only-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+  `);
+
   for (const path of [
     "../migrations/004_case_documents_metadata.sql",
     "../migrations/006_case_document_mutation_idempotency.sql",
@@ -112,14 +123,6 @@ try {
   }
 
   await pool.query(`
-    DO $role$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_ci') THEN
-        CREATE ROLE dadban_document_runtime_ci LOGIN PASSWORD 'ci-only-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
-      END IF;
-    END
-    $role$;
-    ALTER ROLE dadban_document_runtime_ci LOGIN PASSWORD 'ci-only-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
     GRANT CONNECT ON DATABASE dadban_runtime_role_test TO dadban_document_runtime_ci;
     REVOKE ALL ON SCHEMA public FROM dadban_document_runtime_ci;
     GRANT USAGE ON SCHEMA public TO dadban_document_runtime_ci;
@@ -129,7 +132,6 @@ try {
     GRANT SELECT ON public.users, public.cases, public.auth_sessions TO dadban_document_runtime_ci;
     -- PostgreSQL requires UPDATE on at least one column of a FOR UPDATE target.
     -- Keep the permission column-scoped; do not grant table-wide UPDATE on users.
-    GRANT EXECUTE ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) TO dadban_document_runtime_ci;
     GRANT UPDATE (last_seen_at, revoked_at) ON public.auth_sessions TO dadban_document_runtime_ci;
     GRANT SELECT ON public.case_documents TO dadban_document_runtime_ci;
     GRANT INSERT (office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by)
