@@ -2518,7 +2518,8 @@ try {
       token: raceActors["case-patch"].token, csrf: raceActors["case-patch"].csrf, method: "PATCH",
       body: { client_id: raceClient }
     });
-    await waitForLockWait("%from public.lock_live_client_parent%", 2, "case create and case reassignment");
+    await waitForLockWait("%from public.lock_live_client_parent%", 1, "case create waiting for deleted target client");
+    await waitForLockWait("%from public.lock_live_case_reassignment%", 1, "case reassignment waiting for deleted target client");
   } finally {
     if (clientBlockerOpen) await clientBlocker.query("rollback").catch(() => {});
     clientBlocker.release();
