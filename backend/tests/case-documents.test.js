@@ -71,7 +71,7 @@ test("all client, case, hearing, and action writes revalidate the live actor and
  for (const start of routes) {
    const from = server.indexOf(start);
    assert.notEqual(from, -1, `missing write route: ${start}`);
-   const next = server.indexOf("\\napp.", from + start.length);
+   const next = server.indexOf("\napp.", from + start.length);
    const route = server.slice(from, next < 0 ? server.length : next);
    const begin = route.indexOf('await client.query("begin");');
    const actor = route.indexOf("lockLiveMutationActor(client, req)");
