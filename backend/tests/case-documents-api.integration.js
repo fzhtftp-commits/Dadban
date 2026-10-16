@@ -2483,7 +2483,7 @@ try {
       trackChild("document create", request("/api/case-documents", {
         token: raceActors["document-create"].token, csrf: raceActors["document-create"].csrf, method: "POST",
         body: { case_id: raceTargetCase, title: "Must not attach to deleted case", document_type: "evidence", confidentiality: "normal" },
-        hostToUse: "127.0.0.2"
+        portToUse: retryPort
       })),
       trackChild("document update", request("/api/case-documents/" + raceParentDoc, {
         token: raceActors["document-patch"].token, csrf: raceActors["document-patch"].csrf, method: "PATCH",
