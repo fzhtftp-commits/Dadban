@@ -2434,6 +2434,14 @@ try {
   // A deleted client must hide its still-retained cases and every child read path.
   assert.equal((await request("/api/clients/" + raceClient, { token: tokenA, csrf: csrfA })).status, 404);
   assert.equal((await request("/api/clients/lookup?national_id=9876501234", { token: tokenA, csrf: csrfA })).status, 404);
+  const clientRestoreViaPatch = await request("/api/clients/" + raceClient, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { deleted_at: null }
+  });
+  assert.equal(clientRestoreViaPatch.status, 400, "client API must not permit restoring soft deletion through a writable field");
+  assert.deepEqual(clientRestoreViaPatch.body, { error: "no_changes" });
+  assert.equal((await request("/api/clients/" + raceClient + "/restore", {
+    token: tokenA, csrf: csrfA, method: "POST", body: {}
+  })).status, 404, "no client restore endpoint is exposed");
   assert.equal((await request("/api/cases/" + hiddenCase, { token: tokenA, csrf: csrfA })).status, 404);
   assert.equal((await request("/api/cases?search=" + encodeURIComponent(raceClientCaseNumber + "-DEPENDENT"), { token: tokenA, csrf: csrfA })).body.data.some(row => row.id === hiddenCase), false);
   assert.equal((await request("/api/hearings/" + hiddenHearing, { token: tokenA, csrf: csrfA })).status, 404);
@@ -2632,6 +2640,15 @@ try {
   assert.equal(documentPatchRace.status, 404, "document PATCH must reject a soft-deleted parent case");
   assert.deepEqual(documentPatchRace.body, { error: "document_not_found" });
   assert.ok((await pool.query("select deleted_at from cases where id=$1", [raceTargetCase])).rows[0].deleted_at);
+  const caseRestoreViaPatch = await request("/api/cases/" + raceTargetCase, {
+    token: tokenA, csrf: csrfA, method: "PATCH", body: { deleted_at: null }
+  });
+  assert.equal(caseRestoreViaPatch.status, 400, "case PATCH schema must not permit direct deleted_at restoration");
+  assert.deepEqual(caseRestoreViaPatch.body, { error: "invalid_case_update" });
+  assert.equal((await request("/api/cases/" + raceTargetCase + "/restore", {
+    token: tokenA, csrf: csrfA, method: "POST", body: {}
+  })).status, 404, "no case restore endpoint is exposed");
+  assert.equal((await pool.query("select deleted_at from cases where id=$1", [raceTargetCase])).rows[0].deleted_at !== null, true);
   assert.equal((await pool.query("select count(*)::int as count from hearings where office_id=$1", [ids.officeA])).rows[0].count, hearingCountBefore,
     "hearing create must not persist against a soft-deleted case");
   assert.equal((await pool.query("select count(*)::int as count from case_actions where office_id=$1", [ids.officeA])).rows[0].count, actionCountBefore,
