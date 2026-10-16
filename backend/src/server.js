@@ -357,6 +357,21 @@ const lockLiveDocumentActor = async (client, req, allowedRoles) => {
 };
 
 
+const lockLiveMutationActor = async (client, req) => {
+  // General business writes are limited to staff roles. Resolve the live role
+  // only after acquiring session/user row locks inside the same transaction.
+  const actor = await lockLiveDocumentActor(client, req, ["owner", "admin", "lawyer", "assistant"]);
+  if (!actor.ok) {
+    return actor.status === 403
+      ? { ...actor, error: "mutation_role_forbidden" }
+      : actor;
+  }
+  // Keep audit metadata aligned with the role serialized by PostgreSQL, not
+  // the potentially stale role captured by requireAuth before this transaction.
+  req.auth.role = actor.role;
+  return actor;
+};
+
 const parseDocumentMutationIdempotencyKey = (req) => {
   const key = req.get("idempotency-key");
   if (key === undefined) return { ok: true, key: null };
@@ -871,6 +886,11 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const result = await client.query(
       `
         insert into clients (
@@ -988,6 +1008,11 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const result = await client.query(
       `
         update clients
@@ -1025,6 +1050,11 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const result = await client.query(
       `
         update clients
@@ -1131,6 +1161,11 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
 
     const owner = await client.query(
       "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
@@ -1221,14 +1256,6 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   const fields = [];
   const values = [id.data, req.auth.officeId];
 
-  if (Object.prototype.hasOwnProperty.call(data, "client_id")) {
-    const owner = await pool.query(
-      "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
-      [data.client_id, req.auth.officeId]
-    );
-    if (!owner.rowCount) return res.status(400).json({ error: "invalid_related_client" });
-  }
-
   for (const field of allowedFields) {
     if (Object.prototype.hasOwnProperty.call(data, field)) {
       values.push(data[field] ?? null);
@@ -1243,6 +1270,21 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "client_id")) {
+      const owner = await client.query(
+        "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
+        [data.client_id, req.auth.officeId]
+      );
+      if (!owner.rowCount) {
+        await client.query("rollback");
+        return res.status(400).json({ error: "invalid_related_client" });
+      }
+    }
     const result = await client.query(
       `
         update cases
@@ -1277,6 +1319,11 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const result = await client.query(
       `
         update cases
@@ -1377,6 +1424,11 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const related = await client.query(
       "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
       [data.case_id, req.auth.officeId]
@@ -1418,6 +1470,11 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const current = await client.query(
       "select id, case_id from hearings where id = $1 and office_id = $2 and deleted_at is null for update",
       [id.data, req.auth.officeId]
@@ -1476,6 +1533,11 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const result = await client.query(
       "update hearings set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id, case_id",
       [id.data, req.auth.officeId, req.auth.userId]
@@ -1584,6 +1646,11 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const related = await client.query(
       "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
       [data.case_id, req.auth.officeId]
@@ -1636,6 +1703,11 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const current = await client.query(
       "select id, case_id, status from case_actions where id = $1 and office_id = $2 and deleted_at is null for update",
       [id.data, req.auth.officeId]
@@ -1704,6 +1776,11 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
     const result = await client.query(
       "update case_actions set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id",
       [id.data, req.auth.officeId, req.auth.userId]
