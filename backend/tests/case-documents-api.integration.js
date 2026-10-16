@@ -2520,6 +2520,33 @@ try {
   )).rows[0].count), Number(hiddenWriteAuditBefore.rows[0].count),
     "rejected child creates under a deleted client must not emit audit rows");
 
+  const hiddenChildDeleteAuditBefore = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
+    [ids.officeA, [hiddenHearing, hiddenAction, hiddenDocument]]
+  )).rows[0].count);
+  const hiddenHearingDelete = await request("/api/hearings/" + hiddenHearing, {
+    token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "DELETE"
+  });
+  const hiddenActionDelete = await request("/api/actions/" + hiddenAction, {
+    token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf, method: "DELETE"
+  });
+  const hiddenDocumentDelete = await request("/api/case-documents/" + hiddenDocument, {
+    token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: "hidden-client-document-delete-01"
+  });
+  assert.equal(hiddenHearingDelete.status, 404, "hearing delete must not mutate a child whose client parent is soft-deleted");
+  assert.equal(hiddenActionDelete.status, 404, "action delete must not mutate a child whose client parent is soft-deleted");
+  assert.equal(hiddenDocumentDelete.status, 404, "document delete must not mutate a child whose client parent is soft-deleted");
+  assert.equal((await pool.query("select deleted_at from hearings where id=$1", [hiddenHearing])).rows[0].deleted_at, null);
+  assert.equal((await pool.query("select deleted_at from case_actions where id=$1", [hiddenAction])).rows[0].deleted_at, null);
+  assert.equal((await pool.query("select deleted_at from case_documents where id=$1", [hiddenDocument])).rows[0].deleted_at, null);
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
+    [ids.officeA, [hiddenHearing, hiddenAction, hiddenDocument]]
+  )).rows[0].count), hiddenChildDeleteAuditBefore, "rejected hidden-child deletes must not emit audit events");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, "hidden-client-document-delete-01"])).rows[0].count, 0,
+    "rejected document delete must roll back its idempotency reservation");
+
   // Physical parent deletion must be restricted while retained child rows exist.
   await assert.rejects(pool.query("delete from clients where id=$1 and office_id=$2", [raceClient, ids.officeA]),
     error => error.code === "23503", "physical client deletion must be blocked by the retained case FK");
@@ -2537,6 +2564,8 @@ try {
   const raceTargetCase = crypto.randomUUID();
   const raceSourceHearing = crypto.randomUUID();
   const raceSourceAction = crypto.randomUUID();
+  const raceDeletedCaseHearing = crypto.randomUUID();
+  const raceDeletedCaseAction = crypto.randomUUID();
   const raceParentDoc = crypto.randomUUID();
   const caseNumberPrefix = "SOFT-DELETE-CASE-" + crypto.randomBytes(5).toString("hex");
   await pool.query(
@@ -2554,6 +2583,14 @@ try {
   await pool.query(
     "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'Source action','todo','normal',$4,$4)",
     [raceSourceAction, ids.officeA, raceSourceCase, ids.userA]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,now()+interval '10 days','hearing','scheduled',$4,$4)",
+    [raceDeletedCaseHearing, ids.officeA, raceTargetCase, ids.userA]
+  );
+  await pool.query(
+    "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'Action under target case','todo','normal',$4,$4)",
+    [raceDeletedCaseAction, ids.officeA, raceTargetCase, ids.userA]
   );
   await pool.query(
     "insert into case_documents(id,office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'Document before parent deletion','evidence','normal',$4,$4)",
@@ -2673,7 +2710,34 @@ try {
   assert.equal(await auditCount("case_action", "update"), actionUpdateAuditBefore, "rejected action reassignment must not emit audit");
   assert.equal(await auditCount("case_document", "create"), documentCreateAuditBefore, "rejected document create must not emit audit");
   assert.equal(await auditCount("case_document", "update"), documentUpdateAuditBefore, "rejected document update must not emit audit");
-  console.log("PASS: soft-delete parent locks serialize client/case child writes; rejected writes leave no child, idempotency, or audit residue");
+
+  const deletedCaseChildAuditBefore = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
+    [ids.officeA, [raceDeletedCaseHearing, raceDeletedCaseAction, raceParentDoc]]
+  )).rows[0].count);
+  const deletedCaseHearingDelete = await request("/api/hearings/" + raceDeletedCaseHearing, {
+    token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "DELETE"
+  });
+  const deletedCaseActionDelete = await request("/api/actions/" + raceDeletedCaseAction, {
+    token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf, method: "DELETE"
+  });
+  const deletedCaseDocumentDelete = await request("/api/case-documents/" + raceParentDoc, {
+    token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: "deleted-case-document-delete-01"
+  });
+  assert.equal(deletedCaseHearingDelete.status, 404, "hearing delete must reject a soft-deleted case parent");
+  assert.equal(deletedCaseActionDelete.status, 404, "action delete must reject a soft-deleted case parent");
+  assert.equal(deletedCaseDocumentDelete.status, 404, "document delete must reject a soft-deleted case parent");
+  assert.equal((await pool.query("select deleted_at from hearings where id=$1", [raceDeletedCaseHearing])).rows[0].deleted_at, null);
+  assert.equal((await pool.query("select deleted_at from case_actions where id=$1", [raceDeletedCaseAction])).rows[0].deleted_at, null);
+  assert.equal((await pool.query("select deleted_at from case_documents where id=$1", [raceParentDoc])).rows[0].deleted_at, null);
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
+    [ids.officeA, [raceDeletedCaseHearing, raceDeletedCaseAction, raceParentDoc]]
+  )).rows[0].count), deletedCaseChildAuditBefore, "rejected deletes under a soft-deleted case must not emit audit events");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, "deleted-case-document-delete-01"])).rows[0].count, 0,
+    "rejected document delete under a deleted case must roll back its idempotency reservation");
+  console.log("PASS: soft-deleted case/client descendants cannot be deleted through child APIs; rejected child deletes leave state, idempotency, and audit unchanged");
 
 
 
