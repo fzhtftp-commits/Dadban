@@ -71,6 +71,7 @@ try {
     DROP TABLE IF EXISTS public.audit_logs CASCADE;
     DROP TABLE IF EXISTS public.auth_sessions CASCADE;
     DROP TABLE IF EXISTS public.cases CASCADE;
+    DROP TABLE IF EXISTS public.clients CASCADE;
     DROP TABLE IF EXISTS public.users CASCADE;
     DROP TABLE IF EXISTS public.offices CASCADE;
     CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -79,6 +80,11 @@ try {
       id uuid PRIMARY KEY, office_id uuid NOT NULL REFERENCES public.offices(id),
       full_name text NOT NULL, email text NOT NULL, role text NOT NULL DEFAULT 'owner',
       is_active boolean NOT NULL DEFAULT true, deleted_at timestamptz,
+      UNIQUE (id, office_id)
+    );
+    CREATE TABLE public.clients (
+      id uuid PRIMARY KEY, office_id uuid NOT NULL REFERENCES public.offices(id),
+      full_name text NOT NULL, deleted_at timestamptz,
       UNIQUE (id, office_id)
     );
     CREATE TABLE public.cases (
@@ -126,7 +132,7 @@ try {
     GRANT CONNECT ON DATABASE dadban_runtime_role_test TO dadban_document_runtime_ci;
     REVOKE ALL ON SCHEMA public FROM dadban_document_runtime_ci;
     GRANT USAGE ON SCHEMA public TO dadban_document_runtime_ci;
-    REVOKE ALL ON public.users, public.cases, public.auth_sessions, public.audit_logs,
+    REVOKE ALL ON public.users, public.clients, public.cases, public.auth_sessions, public.audit_logs,
       public.case_documents, public.case_document_mutation_idempotency
       FROM dadban_document_runtime_ci;
     GRANT SELECT ON public.users, public.cases, public.auth_sessions TO dadban_document_runtime_ci;
@@ -159,6 +165,13 @@ try {
       (SELECT r2.rolname FROM pg_class c JOIN pg_roles r2 ON r2.oid=c.relowner
         WHERE c.oid='public.case_document_mutation_idempotency'::regclass) AS idem_owner,
       has_table_privilege('dadban_document_runtime_ci','public.users','UPDATE') AS can_update_users,
+      has_table_privilege('dadban_document_runtime_ci','public.clients','UPDATE') AS can_update_clients,
+      has_table_privilege('dadban_document_runtime_ci','public.cases','UPDATE') AS can_update_cases,
+      has_column_privilege('dadban_document_runtime_ci','public.clients','deleted_at','UPDATE') AS can_update_client_deleted,
+      has_column_privilege('dadban_document_runtime_ci','public.cases','deleted_at','UPDATE') AS can_update_case_deleted,
+      has_function_privilege('dadban_document_runtime_ci','public.lock_live_client_parent(uuid,uuid)','EXECUTE') AS can_lock_client,
+      has_function_privilege('dadban_document_runtime_ci','public.lock_live_case_client(uuid,uuid)','EXECUTE') AS can_lock_case_client,
+      has_function_privilege('dadban_document_runtime_ci','public.lock_live_case_parents(uuid,uuid[])','EXECUTE') AS can_lock_cases,
       has_column_privilege('dadban_document_runtime_ci','public.users','full_name','UPDATE') AS can_update_full_name,
       has_column_privilege('dadban_document_runtime_ci','public.users','role','UPDATE') AS can_update_user_role,
       has_column_privilege('dadban_document_runtime_ci','public.users','is_active','UPDATE') AS can_update_user_active,
@@ -172,13 +185,16 @@ try {
     FROM pg_roles r WHERE r.rolname='dadban_document_runtime_ci'
   `);
   const role = roleState.rows[0];
-  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_update_full_name","can_update_user_role","can_update_user_active","can_update_user_deleted","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at"]) {
+  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_update_full_name","can_update_user_role","can_update_user_active","can_update_user_deleted","can_update_clients","can_update_cases","can_update_client_deleted","can_update_case_deleted","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at"]) {
     assert.equal(role[attr], false, `runtime role must not have ${attr}`);
   }
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
   assert.deepEqual(runtimeIdentity.rows[0], { role:"dadban_document_runtime_ci", rolsuper:false, rolcreatedb:false, rolcreaterole:false });
   assert.equal(role.can_update_full_name, false, "runtime must not have UPDATE(full_name); row locking is delegated to the SECURITY DEFINER helper");
+  for (const attr of ["can_lock_client","can_lock_case_client","can_lock_cases"]) {
+    assert.equal(role[attr], true, `runtime must have EXECUTE on parent lock helper ${attr}`);
+  }
   const actorFunctionState = await pool.query(`
     SELECT pg_get_userbyid(p.proowner) AS function_owner,
       p.prosecdef AS security_definer, p.proconfig,
@@ -206,8 +222,33 @@ try {
   for (const attr of ["runtime_execute","owner_select_users","owner_update_full_name","owner_update_revoked_at"]) {
     assert.equal(actorFn[attr], true, `actor lock required privilege missing: ${attr}`);
   }
+  const parentFunctionState = await pool.query(`
+    SELECT p.proname, pg_get_userbyid(p.proowner) AS function_owner,
+      p.prosecdef AS security_definer, p.proconfig,
+      has_function_privilege('dadban_document_runtime_ci',p.oid,'EXECUTE') AS runtime_execute,
+      EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f',p.proowner))) acl
+        WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE') AS public_execute
+    FROM pg_proc p
+    WHERE p.oid IN (
+      'public.lock_live_client_parent(uuid,uuid)'::regprocedure,
+      'public.lock_live_case_client(uuid,uuid)'::regprocedure,
+      'public.lock_live_case_parents(uuid,uuid[])'::regprocedure
+    )
+    ORDER BY p.proname
+  `);
+  assert.equal(parentFunctionState.rowCount, 3, "all three parent lock helpers must exist");
+  for (const fn of parentFunctionState.rows) {
+    assert.equal(fn.function_owner, "dadban_actor_lock_owner");
+    assert.equal(fn.security_definer, true);
+    assert.deepEqual(fn.proconfig, ["search_path=pg_catalog, pg_temp"]);
+    assert.equal(fn.runtime_execute, true);
+    assert.equal(fn.public_execute, false);
+  }
+  assert.equal((await pool.query("select has_column_privilege('dadban_actor_lock_owner','public.clients','deleted_at','UPDATE') as clients, has_column_privilege('dadban_actor_lock_owner','public.cases','deleted_at','UPDATE') as cases")).rows[0].clients, true);
+  assert.equal((await pool.query("select has_column_privilege('dadban_actor_lock_owner','public.cases','deleted_at','UPDATE') as allowed")).rows[0].allowed, true);
   console.log("ACTOR LOCK FUNCTION CATALOG ASSERTIONS:", JSON.stringify(actorFn));
-  console.log("PASS: API DB login is non-owner/non-admin; UPDATE is column-scoped, user role/active state is protected, and audit access is append-only");
+  console.log("PARENT LOCK FUNCTION CATALOG ASSERTIONS:", JSON.stringify(parentFunctionState.rows));
+  console.log("PASS: runtime has EXECUTE-only parent locks and no direct UPDATE on clients/cases");
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
