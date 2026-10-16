@@ -35,12 +35,12 @@ async function setup() {
     DO $cleanup$
     BEGIN
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_actor_runtime_ci') THEN
-        DROP OWNED BY dadban_actor_runtime_ci;
+        EXECUTE 'DROP OWNED BY dadban_actor_runtime_ci';
       END IF;
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_actor_lock_owner_ci') THEN
-        DROP OWNED BY dadban_actor_lock_owner_ci;
+        EXECUTE 'DROP OWNED BY dadban_actor_lock_owner_ci';
       END IF;
-    END
+    END;
     $cleanup$;
     DROP ROLE IF EXISTS dadban_actor_runtime_ci;
     DROP ROLE IF EXISTS dadban_actor_lock_owner_ci;
