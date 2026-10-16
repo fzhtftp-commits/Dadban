@@ -125,21 +125,27 @@ try {
       status text not null default 'active', priority text, filing_date date,
       next_hearing_at timestamptz, description text, notes text, created_by uuid, updated_by uuid,
       created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
-      deleted_at timestamptz, unique (id, office_id)
+      deleted_at timestamptz, unique (id, office_id),
+      constraint cases_client_same_office_fk foreign key (client_id, office_id)
+        references clients(id, office_id) on delete restrict
     );
     create table hearings (
       id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
       case_id uuid not null, hearing_at timestamptz not null, hearing_type text,
       court_name text, branch_name text, status text not null default 'scheduled',
       reminder_minutes integer, notes text, created_by uuid, updated_by uuid, created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now(), deleted_at timestamptz
+      updated_at timestamptz not null default now(), deleted_at timestamptz,
+      constraint hearings_case_same_office_fk foreign key (case_id, office_id)
+        references cases(id, office_id) on delete restrict
     );
     create table case_actions (
       id uuid primary key default gen_random_uuid(), office_id uuid not null references offices(id),
       case_id uuid not null, title text not null, description text, due_at timestamptz,
       status text not null default 'todo', priority text, assigned_to uuid,
       completed_at timestamptz, created_by uuid, updated_by uuid, created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now(), deleted_at timestamptz
+      updated_at timestamptz not null default now(), deleted_at timestamptz,
+      constraint case_actions_case_same_office_fk foreign key (case_id, office_id)
+        references cases(id, office_id) on delete restrict
     );
     create table auth_sessions (
       id uuid primary key default gen_random_uuid(), user_id uuid not null,
