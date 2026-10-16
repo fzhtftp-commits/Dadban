@@ -2431,6 +2431,163 @@ try {
   assert.equal(await auditCount("case", "create"), caseCreateAuditBefore, "rejected case create must not emit audit");
   assert.equal(await auditCount("case", "update"), caseUpdateAuditBefore, "rejected case reassignment must not emit audit");
 
+  // Client soft-delete vs PATCH on hearings/actions while their source cases
+  // remain live. Exercise both lock queue orders: delete first must reject child
+  // writes; child writes first may commit, after which the queued delete commits.
+  const clientPatchDeleteFirst = crypto.randomUUID();
+  const clientPatchDeleteFirstHCase = crypto.randomUUID();
+  const clientPatchDeleteFirstACase = crypto.randomUUID();
+  const clientPatchDeleteFirstHearing = crypto.randomUUID();
+  const clientPatchDeleteFirstAction = crypto.randomUUID();
+  const clientPatchDeleteFirstPrefix = "CLIENT-PATCH-DELETE-FIRST-" + crypto.randomBytes(5).toString("hex");
+  const clientPatchDeleteFirstHearingAt = new Date(Date.now() + 9 * 86400000);
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Delete-first PATCH race','8'||lpad(floor(random()*1000000000)::text,9,'0'),$3,$3)",
+    [clientPatchDeleteFirst, ids.officeA, ids.userA]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Delete-first hearing case',$5,$6,$6),($7,$2,$3,$8,'Delete-first action case',null,$6,$6)",
+    [clientPatchDeleteFirstHCase, ids.officeA, clientPatchDeleteFirst, clientPatchDeleteFirstPrefix + "-H", clientPatchDeleteFirstHearingAt, ids.userA,
+     clientPatchDeleteFirstACase, clientPatchDeleteFirstPrefix + "-A"]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,$4,'hearing','scheduled',$5,$5)",
+    [clientPatchDeleteFirstHearing, ids.officeA, clientPatchDeleteFirstHCase, clientPatchDeleteFirstHearingAt, ids.userA]
+  );
+  await pool.query(
+    "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'Delete-first action title','todo','normal',$4,$4)",
+    [clientPatchDeleteFirstAction, ids.officeA, clientPatchDeleteFirstACase, ids.userA]
+  );
+  const deleteFirstAuditBefore = {
+    clientDelete: await auditCount("client", "delete"),
+    hearingUpdate: await auditCount("hearing", "update"),
+    actionUpdate: await auditCount("case_action", "update")
+  };
+  const deleteFirstBlocker = await pool.connect();
+  let deleteFirstBlockerOpen = false;
+  let deleteFirstDeletePromise;
+  let deleteFirstPatchPromises = [];
+  try {
+    await deleteFirstBlocker.query("begin");
+    await deleteFirstBlocker.query("select id from clients where id=$1 for update", [clientPatchDeleteFirst]);
+    deleteFirstBlockerOpen = true;
+    deleteFirstDeletePromise = request("/api/clients/" + clientPatchDeleteFirst, {
+      token: raceActors["client-delete"].token, csrf: raceActors["client-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update clients%deleted_at = now()%", 1, "client delete before child PATCH");
+    deleteFirstPatchPromises = [
+      request("/api/hearings/" + clientPatchDeleteFirstHearing, {
+        token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "PATCH",
+        body: { hearing_at: new Date(clientPatchDeleteFirstHearingAt.getTime() + 86400000).toISOString() }
+      }),
+      request("/api/actions/" + clientPatchDeleteFirstAction, {
+        token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf, method: "PATCH",
+        body: { title: "Must not update after client delete" }
+      })
+    ];
+    await waitForLockWait("%from public.lock_live_case_parents%", 2, "hearing/action PATCH waiting behind client delete");
+  } finally {
+    if (deleteFirstBlockerOpen) await deleteFirstBlocker.query("rollback").catch(() => {});
+    deleteFirstBlocker.release();
+  }
+  const [deleteFirstDelete, deleteFirstHearingPatch, deleteFirstActionPatch] = await Promise.all([
+    deleteFirstDeletePromise, ...deleteFirstPatchPromises
+  ]);
+  assert.equal(deleteFirstDelete.status, 204, "client delete queued first should commit");
+  assert.equal(deleteFirstHearingPatch.status, 400, "hearing PATCH must reject when client delete wins");
+  assert.deepEqual(deleteFirstHearingPatch.body, { error: "invalid_related_case" });
+  assert.equal(deleteFirstActionPatch.status, 400, "action PATCH must reject when client delete wins");
+  assert.deepEqual(deleteFirstActionPatch.body, { error: "invalid_related_case" });
+  assert.ok((await pool.query("select deleted_at from clients where id=$1", [clientPatchDeleteFirst])).rows[0].deleted_at);
+  assert.equal((await pool.query("select deleted_at from cases where id=$1", [clientPatchDeleteFirstHCase])).rows[0].deleted_at, null,
+    "the source case itself remains live even though its client is deleted");
+  assert.equal((await pool.query("select hearing_at from hearings where id=$1", [clientPatchDeleteFirstHearing])).rows[0].hearing_at.getTime(),
+    clientPatchDeleteFirstHearingAt.getTime(), "rejected hearing PATCH must preserve hearing time");
+  assert.equal((await pool.query("select title from case_actions where id=$1", [clientPatchDeleteFirstAction])).rows[0].title,
+    "Delete-first action title", "rejected action PATCH must preserve its title");
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [clientPatchDeleteFirstHCase])).rows[0].next_hearing_at.getTime(),
+    clientPatchDeleteFirstHearingAt.getTime(), "rejected hearing PATCH must not alter next_hearing_at");
+  assert.equal(await auditCount("client", "delete"), deleteFirstAuditBefore.clientDelete + 1);
+  assert.equal(await auditCount("hearing", "update"), deleteFirstAuditBefore.hearingUpdate,
+    "rejected hearing PATCH must not emit audit");
+  assert.equal(await auditCount("case_action", "update"), deleteFirstAuditBefore.actionUpdate,
+    "rejected action PATCH must not emit audit");
+
+  const clientPatchFirst = crypto.randomUUID();
+  const clientPatchFirstHCase = crypto.randomUUID();
+  const clientPatchFirstACase = crypto.randomUUID();
+  const clientPatchFirstHearing = crypto.randomUUID();
+  const clientPatchFirstAction = crypto.randomUUID();
+  const clientPatchFirstPrefix = "CLIENT-PATCH-FIRST-" + crypto.randomBytes(5).toString("hex");
+  const clientPatchFirstOldHearingAt = new Date(Date.now() + 10 * 86400000);
+  const clientPatchFirstNewHearingAt = new Date(Date.now() + 14 * 86400000);
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','PATCH-first race','8'||lpad(floor(random()*1000000000)::text,9,'0'),$3,$3)",
+    [clientPatchFirst, ids.officeA, ids.userA]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'PATCH-first hearing case',$5,$6,$6),($7,$2,$3,$8,'PATCH-first action case',null,$6,$6)",
+    [clientPatchFirstHCase, ids.officeA, clientPatchFirst, clientPatchFirstPrefix + "-H", clientPatchFirstOldHearingAt, ids.userA,
+     clientPatchFirstACase, clientPatchFirstPrefix + "-A"]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,$4,'hearing','scheduled',$5,$5)",
+    [clientPatchFirstHearing, ids.officeA, clientPatchFirstHCase, clientPatchFirstOldHearingAt, ids.userA]
+  );
+  await pool.query(
+    "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'PATCH-first action title','todo','normal',$4,$4)",
+    [clientPatchFirstAction, ids.officeA, clientPatchFirstACase, ids.userA]
+  );
+  const patchFirstAuditBefore = {
+    clientDelete: await auditCount("client", "delete"),
+    hearingUpdate: await auditCount("hearing", "update"),
+    actionUpdate: await auditCount("case_action", "update")
+  };
+  const patchFirstBlocker = await pool.connect();
+  let patchFirstBlockerOpen = false;
+  let patchFirstDeletePromise;
+  let patchFirstChildPromises = [];
+  try {
+    await patchFirstBlocker.query("begin");
+    await patchFirstBlocker.query("select id from clients where id=$1 for update", [clientPatchFirst]);
+    patchFirstBlockerOpen = true;
+    patchFirstChildPromises = [
+      request("/api/hearings/" + clientPatchFirstHearing, {
+        token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "PATCH",
+        body: { hearing_at: clientPatchFirstNewHearingAt.toISOString() }
+      }),
+      request("/api/actions/" + clientPatchFirstAction, {
+        token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf, method: "PATCH",
+        body: { title: "Action updated before client delete" }
+      })
+    ];
+    await waitForLockWait("%from public.lock_live_case_parents%", 2, "hearing/action PATCH queued before client delete");
+    patchFirstDeletePromise = request("/api/clients/" + clientPatchFirst, {
+      token: raceActors["client-delete"].token, csrf: raceActors["client-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update clients%deleted_at = now()%", 1, "client delete queued behind child PATCHes");
+  } finally {
+    if (patchFirstBlockerOpen) await patchFirstBlocker.query("rollback").catch(() => {});
+    patchFirstBlocker.release();
+  }
+  const [patchFirstHearingPatch, patchFirstActionPatch, patchFirstDelete] = await Promise.all([
+    ...patchFirstChildPromises, patchFirstDeletePromise
+  ]);
+  assert.equal(patchFirstHearingPatch.status, 200, "hearing PATCH queued before client delete should commit");
+  assert.equal(patchFirstActionPatch.status, 200, "action PATCH queued before client delete should commit");
+  assert.equal(patchFirstDelete.status, 204, "client delete queued behind successful child PATCHes should commit");
+  assert.ok((await pool.query("select deleted_at from clients where id=$1", [clientPatchFirst])).rows[0].deleted_at);
+  assert.equal((await pool.query("select title from case_actions where id=$1", [clientPatchFirstAction])).rows[0].title,
+    "Action updated before client delete");
+  assert.equal((await pool.query("select hearing_at from hearings where id=$1", [clientPatchFirstHearing])).rows[0].hearing_at.getTime(),
+    clientPatchFirstNewHearingAt.getTime());
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [clientPatchFirstHCase])).rows[0].next_hearing_at.getTime(),
+    clientPatchFirstNewHearingAt.getTime(), "hearing PATCH must atomically refresh next_hearing_at before the queued client delete");
+  assert.equal(await auditCount("client", "delete"), patchFirstAuditBefore.clientDelete + 1);
+  assert.equal(await auditCount("hearing", "update"), patchFirstAuditBefore.hearingUpdate + 1);
+  assert.equal(await auditCount("case_action", "update"), patchFirstAuditBefore.actionUpdate + 1);
+  console.log("PASS: client soft-delete races with hearing/action PATCH in both lock orders; live-parent checks, audit atomicity, and next_hearing_at remain consistent");
+
   // A deleted client must hide its still-retained cases and every child read path.
   assert.equal((await request("/api/clients/" + raceClient, { token: tokenA, csrf: csrfA })).status, 404);
   assert.equal((await request("/api/clients/lookup?national_id=9876501234", { token: tokenA, csrf: csrfA })).status, 404);
