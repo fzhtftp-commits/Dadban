@@ -3417,6 +3417,140 @@ try {
 
 
 
+
+  // Case soft-delete races with hearing-time PATCH and hearing reassignment in
+  // both lock orders. Use actual HTTP handlers and PostgreSQL row/advisory locks;
+  // assert source/destination summaries and audit rows from the database.
+  async function seedCaseHearingRace(label) {
+    const clientId = crypto.randomUUID();
+    const sourceCaseId = crypto.randomUUID();
+    const targetCaseId = crypto.randomUUID();
+    const hearingId = crypto.randomUUID();
+    const prefix = "CASE-HEARING-RACE-" + crypto.randomBytes(5).toString("hex") + "-" + label;
+    const originalAt = new Date(Date.now() + 10 * 86400000);
+    await pool.query(
+      "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual',$3,$4,$5,$5)",
+      [clientId, ids.officeA, "Case hearing race " + label, "7" + String(Math.floor(Math.random() * 1000000000)).padStart(9, "0"), ids.userA]
+    );
+    await pool.query(
+      "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Race source',$5,$6,$6),($7,$2,$3,$8,'Race target',null,$6,$6)",
+      [sourceCaseId, ids.officeA, clientId, prefix + "-SOURCE", originalAt, ids.userA, targetCaseId, prefix + "-TARGET"]
+    );
+    await pool.query(
+      "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,$4,'trial','scheduled',$5,$5)",
+      [hearingId, ids.officeA, sourceCaseId, originalAt, ids.userA]
+    );
+    return { clientId, sourceCaseId, targetCaseId, hearingId, originalAt };
+  }
+
+  async function caseDeleteVsHearingPatch({ label, operation, lockOrder }) {
+    const fixture = await seedCaseHearingRace(label + "-" + lockOrder);
+    const newAt = new Date(fixture.originalAt.getTime() + 2 * 86400000);
+    const auditBefore = {
+      caseDelete: await auditCount("case", "delete"),
+      hearingUpdate: await auditCount("hearing", "update")
+    };
+    const blocker = await pool.connect();
+    let blockerOpen = false;
+    let advisoryHeld = false;
+    const advisoryPair = operation === "time" ? [880003, 31] : [880003, 32];
+    const triggerName = "pause_case_hearing_race_" + operation;
+    const functionName = "pause_case_hearing_race_" + operation + "_fn";
+    let deletePromise;
+    let patchPromise;
+    try {
+      if (lockOrder === "parent-first") {
+        await blocker.query("begin");
+        await blocker.query("select id from cases where id=$1 for update", [fixture.sourceCaseId]);
+        blockerOpen = true;
+        deletePromise = request("/api/cases/" + fixture.sourceCaseId, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, label + " parent DELETE queued first");
+        patchPromise = request("/api/hearings/" + fixture.hearingId, {
+          token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "PATCH",
+          body: operation === "time" ? { hearing_at: newAt.toISOString() } : { case_id: fixture.targetCaseId }
+        });
+        await waitForLockWait("%from public.lock_live_case_parents%", 1, label + " hearing PATCH waits behind parent DELETE");
+        await blocker.query("rollback");
+        blockerOpen = false;
+      } else {
+        await blocker.query("select pg_advisory_lock($1,$2)", advisoryPair);
+        advisoryHeld = true;
+        await pool.query(
+          "create or replace function " + functionName + "() returns trigger language plpgsql as $fn$ begin perform pg_advisory_xact_lock(" +
+            advisoryPair[0] + "," + advisoryPair[1] + "); return new; end $fn$"
+        );
+        await pool.query(
+          "create trigger " + triggerName + " before update on hearings for each row when (old.id = '" +
+            fixture.hearingId + "'::uuid) execute function " + functionName + "()"
+        );
+        patchPromise = request("/api/hearings/" + fixture.hearingId, {
+          token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "PATCH",
+          body: operation === "time" ? { hearing_at: newAt.toISOString() } : { case_id: fixture.targetCaseId }
+        });
+        await waitForLockWait("%update hearings%", 1, label + " child PATCH paused after parent locks");
+        deletePromise = request("/api/cases/" + fixture.sourceCaseId, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, label + " parent DELETE waits behind child PATCH");
+        const unlocked = await blocker.query("select pg_advisory_unlock($1,$2) as unlocked", advisoryPair);
+        assert.equal(unlocked.rows[0].unlocked, true, label + " advisory barrier must release");
+        advisoryHeld = false;
+      }
+      const [deleteResult, patchResult] = await Promise.all([deletePromise, patchPromise]);
+      assert.equal(deleteResult.status, 204, label + " parent soft-delete should commit in either lock order");
+      if (lockOrder === "parent-first") {
+        assert.equal(patchResult.status, 400, label + " child PATCH must reject a case deleted first");
+        assert.deepEqual(patchResult.body, { error: operation === "time" ? "invalid_related_case" : "invalid_related_case" });
+        assert.ok((await pool.query("select deleted_at from cases where id=$1", [fixture.sourceCaseId])).rows[0].deleted_at);
+        const hearing = (await pool.query("select case_id,hearing_at from hearings where id=$1", [fixture.hearingId])).rows[0];
+        assert.equal(hearing.case_id, fixture.sourceCaseId, label + " rejected PATCH must preserve source case assignment");
+        assert.equal(hearing.hearing_at.getTime(), fixture.originalAt.getTime(), label + " rejected PATCH must preserve hearing time");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.sourceCaseId])).rows[0].next_hearing_at.getTime(),
+          fixture.originalAt.getTime(), label + " rejected PATCH must preserve source next_hearing_at");
+        assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.targetCaseId])).rows[0].next_hearing_at, null,
+          label + " rejected PATCH must preserve target next_hearing_at");
+        assert.equal(await auditCount("hearing", "update"), auditBefore.hearingUpdate,
+          label + " rejected PATCH must not emit a hearing audit row");
+      } else {
+        assert.equal(patchResult.status, 200, label + " child PATCH that acquired parent locks first must commit");
+        assert.ok((await pool.query("select deleted_at from cases where id=$1", [fixture.sourceCaseId])).rows[0].deleted_at);
+        const hearing = (await pool.query("select case_id,hearing_at from hearings where id=$1", [fixture.hearingId])).rows[0];
+        if (operation === "time") {
+          assert.equal(hearing.case_id, fixture.sourceCaseId);
+          assert.equal(hearing.hearing_at.getTime(), newAt.getTime());
+          assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.sourceCaseId])).rows[0].next_hearing_at.getTime(),
+            newAt.getTime(), label + " source summary must atomically reflect changed time");
+          assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.targetCaseId])).rows[0].next_hearing_at, null);
+        } else {
+          assert.equal(hearing.case_id, fixture.targetCaseId, label + " hearing must move to destination");
+          assert.equal(hearing.hearing_at.getTime(), fixture.originalAt.getTime());
+          assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.sourceCaseId])).rows[0].next_hearing_at, null,
+            label + " source summary must clear after move");
+          assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [fixture.targetCaseId])).rows[0].next_hearing_at.getTime(),
+            fixture.originalAt.getTime(), label + " destination summary must reflect moved hearing");
+        }
+        assert.equal(await auditCount("hearing", "update"), auditBefore.hearingUpdate + 1,
+          label + " committed PATCH must emit exactly one hearing audit row");
+      }
+      assert.equal(await auditCount("case", "delete"), auditBefore.caseDelete + 1,
+        label + " committed case soft-delete must emit exactly one audit row");
+    } finally {
+      if (blockerOpen) await blocker.query("rollback").catch(() => {});
+      if (advisoryHeld) await blocker.query("select pg_advisory_unlock($1,$2)", advisoryPair).catch(() => {});
+      blocker.release();
+      await pool.query("drop trigger if exists " + triggerName + " on hearings").catch(() => {});
+      await pool.query("drop function if exists " + functionName + "()").catch(() => {});
+    }
+  }
+
+  for (const operation of ["time", "move"]) {
+    await caseDeleteVsHearingPatch({ label: "case soft-delete vs hearing " + operation, operation, lockOrder: "parent-first" });
+    await caseDeleteVsHearingPatch({ label: "case soft-delete vs hearing " + operation, operation, lockOrder: "child-first" });
+  }
+  console.log("PASS: case soft-delete races with hearing-time PATCH and hearing reassignment in both lock orders; source/destination next_hearing_at and audit counts remain consistent");
+
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
