@@ -128,12 +128,6 @@ jobs:
           bash tests/audit-logs-security.sh
         working-directory: backend
 
-      - name: Verify two-office API isolation over HTTP
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
-        run: node tests/case-documents-api.integration.js
-        working-directory: backend
-
       - name: Verify isolated SECURITY DEFINER actor lock prototype and concurrent revocation/role/disable changes
         env:
           PGPASSWORD: postgres
@@ -143,6 +137,12 @@ jobs:
           createdb -h localhost -U postgres dadban_actor_lock_definer_test
           trap 'dropdb -h localhost -U postgres --if-exists dadban_actor_lock_definer_test' EXIT
           node tests/case-documents-security-definer-prototype.integration.js
+        working-directory: backend
+
+      - name: Verify two-office API isolation over HTTP
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
+        run: node tests/case-documents-api.integration.js
         working-directory: backend
 
       - name: Verify case document API least-privilege runtime role
