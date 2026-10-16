@@ -1395,7 +1395,7 @@ try {
   const timeoutPort = port + 2;
   timeoutServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(timeoutPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_STATEMENT_TIMEOUT_MS: "250" },
+    env: { ...process.env, PORT: String(timeoutPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_STATEMENT_TIMEOUT_MS: "750" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   timeoutServer.stdout.on("data", chunk => { timeoutServerOutput += chunk.toString(); });
@@ -1414,6 +1414,78 @@ try {
   assert.equal(afterTimeout.rows[0].title, "Database statement timeout regression", "timed-out update must roll back");
   const timeoutAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [timeoutId]);
   assert.equal(timeoutAudit.rows[0].count, 0, "timed-out update must not leave an audit record");
+  // Real row-lock contention (not a synthetic SQLSTATE): auth succeeds, but the
+  // in-transaction actor revalidation waits on the user's row and hits statement_timeout.
+  // This proves a timed-out authorization wait cannot mutate the document or leave idempotency/audit rows.
+  const actorLockTimeoutKey = "actor-lock-timeout-2026-10-01";
+  const actorLockGate = await pool.connect();
+  let actorLockGateOpen = false;
+  let actorLockRequest;
+  try {
+    await actorLockGate.query("begin");
+    await actorLockGate.query("select id from users where id=$1 for update", [ids.userA]);
+    actorLockGateOpen = true;
+    actorLockRequest = request(`/api/case-documents/${timeoutId}`, {
+      token: tokenA, csrf: csrfA, method: "PATCH", portToUse: timeoutPort,
+      idempotencyKey: actorLockTimeoutKey,
+      body: { title: "Must not commit after actor-lock timeout" }
+    });
+    const waitDeadline = Date.now() + 5000;
+    let observedActorLockWait = false;
+    while (Date.now() < waitDeadline) {
+      const waiting = await pool.query(`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname=current_database()
+          and wait_event_type='Lock'
+          and query ilike 'select valid, actor_role from public.lock_live_document_actor%'
+      `);
+      if (waiting.rows[0].count > 0) {
+        observedActorLockWait = true;
+        break;
+      }
+      await delay(10);
+    }
+    assert.equal(observedActorLockWait, true,
+      "the HTTP write must be observed waiting on the actual PostgreSQL actor-lock helper");
+    const actorLockTimeoutResponse = await actorLockRequest;
+    assert.equal(actorLockTimeoutResponse.status, 503,
+      "a real actor-row lock wait that reaches statement_timeout must be explicitly retryable after rollback");
+    assert.deepEqual(actorLockTimeoutResponse.body, { error: "database_retryable" },
+      "actor-lock timeout response must not expose database internals");
+  } finally {
+    if (actorLockGateOpen) await actorLockGate.query("rollback").catch(() => {});
+    actorLockGate.release();
+    if (actorLockRequest) await actorLockRequest.catch(() => {});
+  }
+  const actorLockTimeoutState = await pool.query("select title from case_documents where id=$1", [timeoutId]);
+  assert.equal(actorLockTimeoutState.rows[0].title, "Database statement timeout regression",
+    "actor-lock timeout must roll back the attempted document update");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, actorLockTimeoutKey]
+  )).rows[0].count, 0, "actor-lock timeout occurs before idempotency reservation and must leave no reservation");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'",
+    [timeoutId]
+  )).rows[0].count, 0, "actor-lock timeout must not emit an audit event");
+  const afterActorLockRelease = await request(`/api/case-documents/${timeoutId}`, {
+    token: tokenA, csrf: csrfA, method: "PATCH", portToUse: timeoutPort,
+    idempotencyKey: actorLockTimeoutKey, body: { title: "Recovered after actor-lock timeout" }
+  });
+  assert.equal(afterActorLockRelease.status, 200,
+    "after the blocker releases its row lock, a fresh request must acquire authorization locks and complete");
+  assert.equal(afterActorLockRelease.body.data.title, "Recovered after actor-lock timeout");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'",
+    [timeoutId]
+  )).rows[0].count, 1, "only the post-timeout successful mutation may be audited");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=200",
+    [ids.officeA, ids.userA, actorLockTimeoutKey]
+  )).rows[0].count, 1, "successful retry after lock timeout must leave one completed idempotency record");
+  console.log("PASS: real PostgreSQL actor-lock wait times out, rolls back without audit/idempotency residue, releases locks, and a fresh write succeeds");
+
   await pool.query("drop trigger delay_target_document_update_trigger on case_documents");
   await pool.query("drop function delay_target_document_update()");
   timeoutServer.kill("SIGTERM");
