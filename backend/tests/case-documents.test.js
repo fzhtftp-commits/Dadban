@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
 const sharedRateLimitMigration = await readFile(new URL("../migrations/005_shared_rate_limits.sql", import.meta.url), "utf8");
 const mutationIdempotencyMigration = await readFile(new URL("../migrations/006_case_document_mutation_idempotency.sql", import.meta.url), "utf8");
+const actorLockMigration = await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8");
 const sharedRateLimiter = await readFile(new URL("../src/shared-rate-limiter.js", import.meta.url), "utf8");
 const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 const transactionHelper = await readFile(new URL("../src/document-transaction.js", import.meta.url), "utf8");
@@ -43,11 +44,15 @@ test("PATCH and DELETE idempotency keys are persisted without duplicating docume
  assert.match(server, /idempotency_key_reused/);
 });
 
-test("document write transactions revalidate and lock the live session and user", () => {
+test("document write transactions revalidate and lock the live session and user through the least-privilege definer helper", () => {
  assert.match(server, /const lockLiveDocumentActor = async/);
- assert.match(server, /for update of s, u/);
- assert.match(server, /s\.expires_at > clock_timestamp\(\) and u\.is_active = true and u\.deleted_at is null/);
- assert.match(server, /Lock identity rows first, then check expiry with the wall clock after any lock wait/);
+ assert.match(server, /public\.lock_live_document_actor\(\$1,\$2,\$3\)/);
+ assert.match(actorLockMigration, /SECURITY DEFINER/);
+ assert.match(actorLockMigration, /FOR UPDATE OF s,u/);
+ assert.match(actorLockMigration, /SET search_path = pg_catalog, public/);
+ assert.match(actorLockMigration, /NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT/);
+ assert.match(actorLockMigration, /s\.expires_at > clock_timestamp\(\)[\s\S]*u\.is_active[\s\S]*u\.deleted_at IS NULL/);
+ assert.match(actorLockMigration, /REVOKE ALL ON FUNCTION public\.lock_live_document_actor\(uuid,uuid,uuid\) FROM PUBLIC/);
  assert.equal((server.match(/lockLiveDocumentActor\(c, req,/g) || []).length, 3, "create, update, and delete must revalidate actor state inside their transactions");
  assert.match(server, /rollbackSucceeded && \["40001", "40P01", "55P03", "57014"\]\.includes\(error\?\.code\)/);
  assert.match(server, /dbError\(error,rollbackSucceeded\)/);
