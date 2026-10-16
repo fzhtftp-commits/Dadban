@@ -64,6 +64,10 @@ async function denied(query, label) {
 
 try {
   await pool.query(`
+    DROP FUNCTION IF EXISTS public.lock_live_document_actor(uuid,uuid,uuid) CASCADE;
+    DROP FUNCTION IF EXISTS public.lock_live_client_parent(uuid,uuid) CASCADE;
+    DROP FUNCTION IF EXISTS public.lock_live_case_client(uuid,uuid) CASCADE;
+    DROP FUNCTION IF EXISTS public.lock_live_case_parents(uuid,uuid[]) CASCADE;
     DROP FUNCTION IF EXISTS public.prevent_case_document_idempotency_delete() CASCADE;
     DROP FUNCTION IF EXISTS public.prevent_case_document_idempotency_reopen() CASCADE;
     DROP TABLE IF EXISTS public.case_document_mutation_idempotency CASCADE;
