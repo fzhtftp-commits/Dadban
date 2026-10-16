@@ -227,7 +227,7 @@ try {
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_LOCK_TIMEOUT_MS: "20000" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   server.stdout.on("data", chunk => { serverOutput += chunk.toString(); });
