@@ -1,0 +1,80 @@
+BEGIN;
+
+-- Case reassignment must lock the live case first, then both its current and
+-- requested client rows in a single stable UUID order. This prevents a case
+-- from being moved away after its old client was soft-deleted and prevents
+-- opposing A->B / B->A transfers from acquiring client locks in reverse order.
+CREATE FUNCTION public.lock_live_case_reassignment(
+  p_case uuid,
+  p_office uuid,
+  p_target_client uuid
+)
+RETURNS TABLE(id uuid, old_client_id uuid, target_client_id uuid, parents_live boolean)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+DECLARE
+  locked_case record;
+  locked_client record;
+  locked_client_ids uuid[] := ARRAY[]::uuid[];
+  expected_client_count integer;
+BEGIN
+  SELECT c.id, c.client_id
+    INTO locked_case
+  FROM public.cases AS c
+  WHERE c.id = p_case
+    AND c.office_id = p_office
+    AND c.deleted_at IS NULL
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  IF p_target_client IS NULL THEN
+    RETURN QUERY SELECT locked_case.id, locked_case.client_id, p_target_client, false;
+    RETURN;
+  END IF;
+
+  SELECT count(DISTINCT client_id)::integer
+    INTO expected_client_count
+  FROM unnest(ARRAY[locked_case.client_id, p_target_client]) AS requested(client_id);
+
+  FOR locked_client IN
+    SELECT cl.id
+    FROM public.clients AS cl
+    WHERE cl.office_id = p_office
+      AND cl.id = ANY(ARRAY[locked_case.client_id, p_target_client])
+      AND cl.deleted_at IS NULL
+    ORDER BY cl.id
+    FOR UPDATE
+  LOOP
+    locked_client_ids := array_append(locked_client_ids, locked_client.id);
+  END LOOP;
+
+  -- Under READ COMMITTED, a row whose soft-delete won while this statement
+  -- waited is rechecked against deleted_at and is not counted as live.
+  RETURN QUERY
+    SELECT locked_case.id,
+           locked_case.client_id,
+           p_target_client,
+           cardinality(locked_client_ids) = expected_client_count;
+END
+$function$;
+
+ALTER FUNCTION public.lock_live_case_reassignment(uuid,uuid,uuid) OWNER TO dadban_actor_lock_owner;
+REVOKE ALL ON FUNCTION public.lock_live_case_reassignment(uuid,uuid,uuid) FROM PUBLIC;
+
+DO $grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime') THEN
+    GRANT EXECUTE ON FUNCTION public.lock_live_case_reassignment(uuid,uuid,uuid) TO dadban_document_runtime;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_ci') THEN
+    GRANT EXECUTE ON FUNCTION public.lock_live_case_reassignment(uuid,uuid,uuid) TO dadban_document_runtime_ci;
+  END IF;
+END
+$grants$;
+
+COMMIT;
