@@ -5,6 +5,7 @@ const migration = await readFile(new URL("../migrations/004_case_documents_metad
 const sharedRateLimitMigration = await readFile(new URL("../migrations/005_shared_rate_limits.sql", import.meta.url), "utf8");
 const mutationIdempotencyMigration = await readFile(new URL("../migrations/006_case_document_mutation_idempotency.sql", import.meta.url), "utf8");
 const actorLockMigration = await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8");
+const caseReassignmentLockMigration = await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8");
 const sharedRateLimiter = await readFile(new URL("../src/shared-rate-limiter.js", import.meta.url), "utf8");
 const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 const transactionHelper = await readFile(new URL("../src/document-transaction.js", import.meta.url), "utf8");
@@ -65,7 +66,11 @@ test("document write transactions revalidate and lock the live session and user 
    assert.ok(actorLockMigration.includes(`GRANT EXECUTE ON FUNCTION public.${fn} TO dadban_document_runtime_ci`), `runtime must only execute parent lock ${fn}`);
  }
  assert.match(server, /public\.lock_live_client_parent\(\$1,\$2\)/);
- assert.match(server, /public\.lock_live_case_client\(\$1,\$2\)/);
+ assert.match(server, /public\.lock_live_case_reassignment\(\$1,\$2,\$3\)/);
+ assert.match(caseReassignmentLockMigration, /ORDER BY cl\.id[\s\S]*FOR UPDATE/);
+ assert.match(caseReassignmentLockMigration, /parents_live boolean/);
+ assert.match(caseReassignmentLockMigration, /REVOKE ALL ON FUNCTION public\.lock_live_case_reassignment\(uuid,uuid,uuid\) FROM PUBLIC/);
+ assert.ok(caseReassignmentLockMigration.includes("GRANT EXECUTE ON FUNCTION public.lock_live_case_reassignment(uuid,uuid,uuid) TO dadban_document_runtime_ci"));
  assert.match(server, /public\.lock_live_case_parents\(\$1,\$2::uuid\[\]\)/);
  assert.doesNotMatch(server, /select id from clients where id = \$1 and office_id = \$2 and deleted_at is null for update/i);
  assert.doesNotMatch(server, /select id from cases where id = \$1 and office_id = \$2 and deleted_at is null for update/i);
