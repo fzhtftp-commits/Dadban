@@ -33,8 +33,7 @@ BEGIN
   END IF;
 
   IF p_target_client IS NULL THEN
-    RETURN QUERY SELECT locked_case.id, locked_case.client_id, p_target_client, false;
-    RETURN;
+    p_target_client := locked_case.client_id;
   END IF;
 
   SELECT count(DISTINCT client_id)::integer
