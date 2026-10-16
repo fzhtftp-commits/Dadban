@@ -7,7 +7,6 @@
 \ir ../migrations/005_shared_rate_limits.sql
 \ir ../migrations/006_case_document_mutation_idempotency.sql
 \ir ../migrations/007_case_document_mutation_tombstones.sql
-\ir ../migrations/008_security_definer_document_actor_lock.sql
 
 DO $catalog$
 DECLARE cols text[]; status_check text; constraint_names text[];
