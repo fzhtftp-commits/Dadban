@@ -497,6 +497,24 @@ const syncCaseNextHearing = async (client, officeId, caseId) => {
     [caseId, officeId]
   );
 };
+
+// Reassigned hearings touch both the old and new case summary rows. Lock those
+// rows in database UUID order before updating either summary so concurrent moves
+// A→B and B→A cannot each hold one case row while waiting for the other.
+const syncCaseNextHearings = async (client, officeId, caseIds) => {
+  const uniqueIds = [...new Set(caseIds.map(String))];
+  if (!uniqueIds.length) return;
+  const locked = await client.query(
+    `select id from cases
+     where office_id = $1 and id = any($2::uuid[]) and deleted_at is null
+     order by id
+     for update`,
+    [officeId, uniqueIds]
+  );
+  for (const row of locked.rows) {
+    await syncCaseNextHearing(client, officeId, row.id);
+  }
+};
 const writeAuditLog = async (client, auth, action, entityType, entityId, req, metadata = null) => {
   await client.query(
     `
@@ -733,9 +751,9 @@ app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, asy
     setClearAuthCookies(res);
     return res.json({ ok: true });
   } catch (error) {
-    try { await client.query("rollback"); } catch {}
+    const rollbackSucceeded = await rollbackQuietly(client, "Logout failed");
     logSafeError("Logout failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
     releaseClient(client);
@@ -1512,10 +1530,7 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       `update hearings set ${sets.join(", ")} where id = $${values.length - 1} and office_id = $${values.length} and deleted_at is null returning *`,
       values
     );
-    await syncCaseNextHearing(client, req.auth.officeId, previousCaseId);
-    if (nextCaseId !== previousCaseId) {
-      await syncCaseNextHearing(client, req.auth.officeId, nextCaseId);
-    }
+    await syncCaseNextHearings(client, req.auth.officeId, [previousCaseId, nextCaseId]);
     await writeAuditLog(client, req.auth, "update", "hearing", id.data, req, { fields: Object.keys(data) });
     await client.query("commit");
     return res.json({ data: result.rows[0] });
