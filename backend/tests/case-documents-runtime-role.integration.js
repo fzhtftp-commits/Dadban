@@ -177,6 +177,34 @@ try {
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
   assert.deepEqual(runtimeIdentity.rows[0], { role:"dadban_document_runtime_ci", rolsuper:false, rolcreatedb:false, rolcreaterole:false });
   assert.equal(role.can_update_full_name, false, "runtime must not have UPDATE(full_name); row locking is delegated to the SECURITY DEFINER helper");
+  const actorFunctionState = await pool.query(`
+    SELECT pg_get_userbyid(p.proowner) AS function_owner,
+      p.prosecdef AS security_definer, p.proconfig,
+      owner.rolsuper AS owner_superuser, owner.rolcanlogin AS owner_can_login,
+      owner.rolcreatedb AS owner_createdb, owner.rolcreaterole AS owner_createrole,
+      owner.rolinherit AS owner_inherit,
+      has_function_privilege('dadban_document_runtime_ci', p.oid, 'EXECUTE') AS runtime_execute,
+      EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+        WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE') AS public_execute,
+      has_table_privilege('dadban_actor_lock_owner','public.users','SELECT') AS owner_select_users,
+      has_column_privilege('dadban_actor_lock_owner','public.users','full_name','UPDATE') AS owner_update_full_name,
+      has_table_privilege('dadban_actor_lock_owner','public.users','UPDATE') AS owner_table_update_users,
+      has_column_privilege('dadban_actor_lock_owner','public.auth_sessions','revoked_at','UPDATE') AS owner_update_revoked_at
+    FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner
+    WHERE p.oid='public.lock_live_document_actor(uuid,uuid,uuid)'::regprocedure
+  `);
+  const actorFn = actorFunctionState.rows[0];
+  assert.ok(actorFn, "SECURITY DEFINER actor lock function must exist");
+  assert.equal(actorFn.function_owner, "dadban_actor_lock_owner");
+  assert.equal(actorFn.security_definer, true);
+  assert.deepEqual(actorFn.proconfig, ["search_path=pg_catalog, pg_temp"]);
+  for (const attr of ["owner_superuser","owner_can_login","owner_createdb","owner_createrole","owner_inherit","public_execute","owner_table_update_users"]) {
+    assert.equal(actorFn[attr], false, `actor lock unsafe privilege: ${attr}`);
+  }
+  for (const attr of ["runtime_execute","owner_select_users","owner_update_full_name","owner_update_revoked_at"]) {
+    assert.equal(actorFn[attr], true, `actor lock required privilege missing: ${attr}`);
+  }
+  console.log("ACTOR LOCK FUNCTION CATALOG ASSERTIONS:", JSON.stringify(actorFn));
   console.log("PASS: API DB login is non-owner/non-admin; UPDATE is column-scoped, user role/active state is protected, and audit access is append-only");
 
   server = spawn(process.execPath, ["src/server.js"], {
