@@ -1261,7 +1261,7 @@ try {
   const waitForActorLockWait = async () => {
     const deadline=Date.now()+5000;
     while(Date.now()<deadline){
-      const waiting=await pool.query("select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select s.id, u.role from auth_sessions%'");
+      const waiting=await pool.query("select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select valid, actor_role from public.lock_live_document_actor%'");
       if(waiting.rows[0].count>0)return;
       await delay(10);
     }
