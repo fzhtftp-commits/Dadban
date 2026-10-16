@@ -24,7 +24,8 @@ const ids = {
   client: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa02",
   case: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa03",
   hearing: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa04",
-  action: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa05"
+  action: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa05",
+  targetClient: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa06"
 };
 let server;
 let serverOutput = "";
@@ -90,6 +91,8 @@ try {
   await pool.query(await readFile(new URL("../../database/schema.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../../database/migrations/20261010_office_isolation_constraints.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../../database/migrations/20261014_case_actions.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8"));
 
   await pool.query(
     "insert into offices(id,name) values ($1,'Audit Mutation Test Office')",
@@ -112,6 +115,10 @@ try {
   await pool.query(
     "insert into clients(id,office_id,client_type,full_name,national_id,status,created_by,updated_by) values ($1,$2,'individual','Original Audit Test Client','1234567890','active',$3,$3)",
     [ids.client, ids.office, ids.user]
+  );
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,status,created_by,updated_by) values ($1,$2,'individual','Target Audit Test Client','1234567891','active',$3,$3)",
+    [ids.targetClient, ids.office, ids.user]
   );
   await pool.query(
     "insert into cases(id,office_id,client_id,case_number,title,status,priority,created_by,updated_by) values ($1,$2,$3,'AUDIT-ROLLBACK-001','Original Audit Test Case','active','normal',$4,$4)",
@@ -178,9 +185,13 @@ try {
       table: "cases", entityType: "case", action: "create"
     },
     {
-      label: "case update", method: "PATCH", path: `/api/cases/${ids.case}`,
-      body: { title: "Must Not Persist Case Update" }, table: "cases", entityType: "case", action: "update",
-      checkUnchanged: async () => assert.equal((await pool.query("select title from cases where id=$1", [ids.case])).rows[0].title, "Original Audit Test Case")
+      label: "case reassignment", method: "PATCH", path: `/api/cases/${ids.case}`,
+      body: { client_id: ids.targetClient, title: "Must Not Persist Case Reassignment" }, table: "cases", entityType: "case", action: "update",
+      checkUnchanged: async () => {
+        const current = (await pool.query("select title, client_id from cases where id=$1", [ids.case])).rows[0];
+        assert.equal(current.title, "Original Audit Test Case");
+        assert.equal(current.client_id, ids.client, "audit failure must roll back the client_id relationship");
+      }
     },
     {
       label: "case delete", method: "DELETE", path: `/api/cases/${ids.case}`,
