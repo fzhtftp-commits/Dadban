@@ -1628,50 +1628,6 @@ try {
 
 
 
-  // A real lock_timeout on the dedicated timeout server must roll back the
-  // hearing reassignment, both parent summaries, and its audit event together.
-  const timeoutFixture = await seedDualCaseDeleteMultiHearingRace("lock-timeout");
-  const timeoutAuditBefore = Number((await pool.query(
-    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=$2 and action='update'",
-    [ids.officeA, timeoutFixture.hearingA1]
-  )).rows[0].count);
-  const timeoutBlocker = await pool.connect();
-  let timeoutBlockerOpen = false;
-  let timeoutMovePromise;
-  try {
-    await timeoutBlocker.query("begin");
-    await timeoutBlocker.query("select id from cases where id=$1 for update", [timeoutFixture.caseA]);
-    timeoutBlockerOpen = true;
-    timeoutMovePromise = request("/api/hearings/" + timeoutFixture.hearingA1, {
-      token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
-      method: "PATCH", portToUse: timeoutPort, body: { case_id: timeoutFixture.caseB }
-    });
-    await waitForLockWait("%from public.lock_live_case_parents%", 1, "hearing move waits on locked parent before lock_timeout");
-    const timeoutResponse = await timeoutMovePromise;
-    assert.equal(timeoutResponse.status, 503, "parent-row lock_timeout must return retryable 503");
-    assert.deepEqual(timeoutResponse.body, { error: "database_retryable" });
-  } finally {
-    if (timeoutBlockerOpen) await timeoutBlocker.query("rollback").catch(() => {});
-    if (timeoutMovePromise) await timeoutMovePromise.catch(() => {});
-    timeoutBlocker.release();
-  }
-  const timeoutHearing = (await pool.query(
-    "select case_id,hearing_at from hearings where id=$1", [timeoutFixture.hearingA1]
-  )).rows[0];
-  assert.equal(timeoutHearing.case_id, timeoutFixture.caseA, "timed-out move must roll back hearing assignment");
-  assert.equal(timeoutHearing.hearing_at.getTime(), timeoutFixture.times[0].getTime(), "timed-out move must preserve hearing time");
-  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [timeoutFixture.caseA])).rows[0].next_hearing_at.getTime(),
-    timeoutFixture.times[0].getTime(), "timed-out move must preserve source summary");
-  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [timeoutFixture.caseB])).rows[0].next_hearing_at.getTime(),
-    timeoutFixture.times[2].getTime(), "timed-out move must preserve destination summary");
-  assert.equal(Number((await pool.query(
-    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=$2 and action='update'",
-    [ids.officeA, timeoutFixture.hearingA1]
-  )).rows[0].count), timeoutAuditBefore, "timed-out move must leave no audit row");
-
-
-  timeoutServer.kill("SIGTERM");
-  timeoutServer = null;
 
   const retriedIdempotentCreate = await request("/api/case-documents", {
     token: tokenA, csrf: csrfA, method: "POST", portToUse: auditPort, idempotencyKey: "retry-after-db-failure-01",
@@ -4243,6 +4199,50 @@ try {
 
   await runDualCaseDeleteMultiHearingRace("parent-first");
   await runDualCaseDeleteMultiHearingRace("child-first");
+
+  // A real lock_timeout on the dedicated timeout server must roll back the
+  // hearing reassignment, both parent summaries, and its audit event together.
+  const timeoutFixture = await seedDualCaseDeleteMultiHearingRace("lock-timeout");
+  const timeoutAuditBefore = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=$2 and action='update'",
+    [ids.officeA, timeoutFixture.hearingA1]
+  )).rows[0].count);
+  const timeoutBlocker = await pool.connect();
+  let timeoutBlockerOpen = false;
+  let timeoutMovePromise;
+  try {
+    await timeoutBlocker.query("begin");
+    await timeoutBlocker.query("select id from cases where id=$1 for update", [timeoutFixture.caseA]);
+    timeoutBlockerOpen = true;
+    timeoutMovePromise = request("/api/hearings/" + timeoutFixture.hearingA1, {
+      token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+      method: "PATCH", portToUse: timeoutPort, body: { case_id: timeoutFixture.caseB }
+    });
+    await waitForLockWait("%from public.lock_live_case_parents%", 1, "hearing move waits on locked parent before lock_timeout");
+    const timeoutResponse = await timeoutMovePromise;
+    assert.equal(timeoutResponse.status, 503, "parent-row lock_timeout must return retryable 503");
+    assert.deepEqual(timeoutResponse.body, { error: "database_retryable" });
+  } finally {
+    if (timeoutBlockerOpen) await timeoutBlocker.query("rollback").catch(() => {});
+    if (timeoutMovePromise) await timeoutMovePromise.catch(() => {});
+    timeoutBlocker.release();
+  }
+  const timeoutHearing = (await pool.query(
+    "select case_id,hearing_at from hearings where id=$1", [timeoutFixture.hearingA1]
+  )).rows[0];
+  assert.equal(timeoutHearing.case_id, timeoutFixture.caseA, "timed-out move must roll back hearing assignment");
+  assert.equal(timeoutHearing.hearing_at.getTime(), timeoutFixture.times[0].getTime(), "timed-out move must preserve hearing time");
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [timeoutFixture.caseA])).rows[0].next_hearing_at.getTime(),
+    timeoutFixture.times[0].getTime(), "timed-out move must preserve source summary");
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [timeoutFixture.caseB])).rows[0].next_hearing_at.getTime(),
+    timeoutFixture.times[2].getTime(), "timed-out move must preserve destination summary");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=$2 and action='update'",
+    [ids.officeA, timeoutFixture.hearingA1]
+  )).rows[0].count), timeoutAuditBefore, "timed-out move must leave no audit row");
+
+  timeoutServer.kill("SIGTERM");
+  timeoutServer = null;
 
   console.log("PASS: dual case soft-delete vs multiple opposite-direction hearing moves in both lock orders; lock_timeout rolls back assignment, summaries, and audit atomically");
 
