@@ -2758,8 +2758,7 @@ try {
   await pool.query(`
     create or replace function pause_child_soft_delete_race() returns trigger language plpgsql as $fn$
     begin
-      if old.deleted_at is null and new.deleted_at is not null
-         and new.title is distinct from 'never-match-title' then
+      if old.deleted_at is null and new.deleted_at is not null then
         perform pg_sleep(0.6);
       end if;
       return new;
