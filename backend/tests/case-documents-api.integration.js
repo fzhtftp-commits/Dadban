@@ -2376,7 +2376,7 @@ try {
     clientDeletePromise = request("/api/clients/" + raceClient, {
       token: raceActors["client-delete"].token, csrf: raceActors["client-delete"].csrf, method: "DELETE"
     });
-    await waitForLockWait("%update clients set deleted_at = now()%", 1, "client delete");
+    await waitForLockWait("%update clients%deleted_at = now()%", 1, "client delete");
     caseCreateRacePromise = request("/api/cases", {
       token: raceActors["case-create"].token, csrf: raceActors["case-create"].csrf, method: "POST",
       body: { client_id: raceClient, case_number: raceClientCaseNumber, title: "Must not attach to deleted client" }
@@ -2457,7 +2457,7 @@ try {
     caseDeletePromise = request("/api/cases/" + raceTargetCase, {
       token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
     });
-    await waitForLockWait("%update cases set deleted_at = now()%", 1, "case delete");
+    await waitForLockWait("%update cases%deleted_at = now()%", 1, "case delete");
     childPromises = [
       request("/api/hearings", {
         token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
