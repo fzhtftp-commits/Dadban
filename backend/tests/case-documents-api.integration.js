@@ -582,7 +582,7 @@ try {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       const waiting = await pool.query(
-        "select pid from pg_stat_activity where datname=current_database() and query ilike '%lock_live_document_actor%' and wait_event_type='Lock'"
+        "select pid from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and (query ilike '%lock_live_document_actor%' or query ilike 'update auth_sessions set last_seen_at%')"
       );
       if (waiting.rowCount > 0) return waiting.rows[0].pid;
       await delay(25);
