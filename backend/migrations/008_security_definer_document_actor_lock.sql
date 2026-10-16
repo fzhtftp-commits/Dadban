@@ -21,6 +21,15 @@ BEGIN
      OR owner_state.rolcreaterole OR owner_state.rolinherit THEN
     RAISE EXCEPTION 'dadban_actor_lock_owner must be NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT';
   END IF;
+  -- A membership either way could let another login SET ROLE to this owner or
+  -- let this owner assume broader privileges; the dedicated owner must be isolated.
+  IF EXISTS (
+    SELECT 1 FROM pg_auth_members m
+    JOIN pg_roles owner_role ON owner_role.oid = m.roleid OR owner_role.oid = m.member
+    WHERE owner_role.rolname = 'dadban_actor_lock_owner'
+  ) THEN
+    RAISE EXCEPTION 'dadban_actor_lock_owner must not participate in role memberships';
+  END IF;
 END
 $preflight$;
 
