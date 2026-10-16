@@ -3733,6 +3733,100 @@ try {
   await destinationDeleteVsMove("child-first");
   console.log("PASS: destination case soft-delete vs hearing reassignment serializes in both lock orders; ordered parent locks, source/destination summaries, and audit counts stay consistent");
 
+
+  // Inverse lock order for the source-parent race: the hearing move acquires
+  // both parent rows first, with destination UUID sorting before source UUID;
+  // source soft-delete must queue and commit only after move + summaries + audit.
+  const sourceFirstIds = [crypto.randomUUID(), crypto.randomUUID()].sort();
+  const sourceFirstTargetCase = sourceFirstIds[0];
+  const sourceFirstSourceCase = sourceFirstIds[1];
+  assert.ok(sourceFirstTargetCase.localeCompare(sourceFirstSourceCase) < 0,
+    "fixture must force destination UUID to sort before source UUID");
+  const sourceFirstClient = crypto.randomUUID();
+  const sourceFirstHearing = crypto.randomUUID();
+  const sourceFirstPrefix = "SOURCE-DELETE-CHILD-FIRST-" + crypto.randomBytes(5).toString("hex");
+  const sourceFirstAt = new Date(Date.now() + 15 * 86400000);
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Source child-first race','4'||lpad(floor(random()*1000000000)::text,9,'0'),$3,$3)",
+    [sourceFirstClient, ids.officeA, ids.userA]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Source case deleted after move',$5,$6,$6),($7,$2,$3,$8,'Live destination case',null,$6,$6)",
+    [sourceFirstSourceCase, ids.officeA, sourceFirstClient, sourceFirstPrefix + "-SOURCE", sourceFirstAt, ids.userA,
+      sourceFirstTargetCase, sourceFirstPrefix + "-TARGET"]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,$4,'trial','scheduled',$5,$5)",
+    [sourceFirstHearing, ids.officeA, sourceFirstSourceCase, sourceFirstAt, ids.userA]
+  );
+  const sourceFirstAuditBefore = {
+    caseDelete: await auditCount("case", "delete"),
+    hearingUpdate: await auditCount("hearing", "update")
+  };
+  const sourceFirstGate = await pool.connect();
+  let sourceFirstAdvisoryHeld = false;
+  const sourceFirstAdvisory = [880005, 51];
+  const sourceFirstTrigger = "pause_source_delete_child_first_hearing";
+  const sourceFirstFunction = sourceFirstTrigger + "_fn";
+  let sourceFirstMovePromise;
+  let sourceFirstDeletePromise;
+  try {
+    await sourceFirstGate.query("select pg_advisory_lock($1,$2)", sourceFirstAdvisory);
+    sourceFirstAdvisoryHeld = true;
+    await pool.query(
+      "create or replace function " + sourceFirstFunction + "() returns trigger language plpgsql as $fn$ begin perform pg_advisory_xact_lock(" +
+        sourceFirstAdvisory[0] + "," + sourceFirstAdvisory[1] + "); return new; end $fn$"
+    );
+    await pool.query(
+      "create trigger " + sourceFirstTrigger + " before update on hearings for each row when (old.id = '" +
+        sourceFirstHearing + "'::uuid) execute function " + sourceFirstFunction + "()"
+    );
+    sourceFirstMovePromise = request("/api/hearings/" + sourceFirstHearing, {
+      token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+      method: "PATCH", body: { case_id: sourceFirstTargetCase }
+    });
+    await waitForLockWait("%update hearings%", 1, "source-first child-first hearing move paused after UUID-ordered parent locks");
+    sourceFirstDeletePromise = request("/api/cases/" + sourceFirstSourceCase, {
+      token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update cases%deleted_at = now()%", 1, "source DELETE queued behind hearing move");
+    const sourceFirstUnlock = await sourceFirstGate.query(
+      "select pg_advisory_unlock($1,$2) as unlocked", sourceFirstAdvisory
+    );
+    assert.equal(sourceFirstUnlock.rows[0].unlocked, true, "source child-first barrier must release");
+    sourceFirstAdvisoryHeld = false;
+    const [sourceFirstMoveResult, sourceFirstDeleteResult] = await Promise.all([
+      sourceFirstMovePromise, sourceFirstDeletePromise
+    ]);
+    assert.equal(sourceFirstMoveResult.status, 200, "hearing move holding both parent locks must commit first");
+    assert.equal(sourceFirstDeleteResult.status, 204, "queued source soft-delete must commit after the move");
+    assert.ok((await pool.query("select deleted_at from cases where id=$1", [sourceFirstSourceCase])).rows[0].deleted_at,
+      "source case soft-delete must persist after transfer");
+    const sourceFirstHearingRow = (await pool.query(
+      "select case_id,hearing_at from hearings where id=$1", [sourceFirstHearing]
+    )).rows[0];
+    assert.equal(sourceFirstHearingRow.case_id, sourceFirstTargetCase,
+      "hearing must remain linked to the live destination after source deletion");
+    assert.equal(sourceFirstHearingRow.hearing_at.getTime(), sourceFirstAt.getTime(),
+      "moving a hearing must preserve its scheduled time");
+    assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [sourceFirstSourceCase])).rows[0].next_hearing_at,
+      null, "source summary must be cleared by the committed move before source deletion");
+    assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [sourceFirstTargetCase])).rows[0].next_hearing_at.getTime(),
+      sourceFirstAt.getTime(), "destination summary must reflect the transferred hearing");
+    assert.equal(await auditCount("hearing", "update"), sourceFirstAuditBefore.hearingUpdate + 1,
+      "successful move must commit exactly one hearing-update audit row");
+    assert.equal(await auditCount("case", "delete"), sourceFirstAuditBefore.caseDelete + 1,
+      "successful source delete must commit exactly one case-delete audit row");
+  } finally {
+    if (sourceFirstAdvisoryHeld) await sourceFirstGate.query(
+      "select pg_advisory_unlock($1,$2)", sourceFirstAdvisory
+    ).catch(() => {});
+    sourceFirstGate.release();
+    await pool.query("drop trigger if exists " + sourceFirstTrigger + " on hearings").catch(() => {});
+    await pool.query("drop function if exists " + sourceFirstFunction + "()").catch(() => {});
+  }
+  console.log("PASS: source case soft-delete vs hearing move child-first with inverted UUID order; move/audit commit before delete and source/destination summaries stay consistent");
+
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
