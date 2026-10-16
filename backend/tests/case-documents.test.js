@@ -61,6 +61,27 @@ test("document write transactions revalidate and lock the live session and user 
  assert.match(server, /dbError\(error,rollbackSucceeded\)/);
 });
 
+test("all client, case, hearing, and action writes revalidate the live actor and writable role in-transaction", () => {
+ const routes = [
+   'app.post("/api/clients",', 'app.patch("/api/clients/:id",', 'app.delete("/api/clients/:id",',
+   'app.post("/api/cases",', 'app.patch("/api/cases/:id",', 'app.delete("/api/cases/:id",',
+   'app.post("/api/hearings",', 'app.patch("/api/hearings/:id",', 'app.delete("/api/hearings/:id",',
+   'app.post("/api/actions",', 'app.patch("/api/actions/:id",', 'app.delete("/api/actions/:id",'
+ ];
+ for (const start of routes) {
+   const from = server.indexOf(start);
+   assert.notEqual(from, -1, `missing write route: ${start}`);
+   const next = server.indexOf("\\napp.", from + start.length);
+   const route = server.slice(from, next < 0 ? server.length : next);
+   const begin = route.indexOf('await client.query("begin");');
+   const actor = route.indexOf("lockLiveMutationActor(client, req)");
+   assert.ok(begin >= 0 && actor > begin, `${start} must revalidate actor after BEGIN and before any business write`);
+ }
+ assert.match(server, /const lockLiveMutationActor = async/);
+ assert.match(server, /\["owner", "admin", "lawyer", "assistant"\]/);
+ assert.match(server, /mutation_role_forbidden/);
+});
+ 
 test("confidentiality policy is enforced by API and audit", () => {
  assert.match(server, /const canReadCaseDocument = \(role, level\) =>/);
  assert.ok(server.includes("u.role='assistant' and d.confidentiality in ('normal','confidential')"));
