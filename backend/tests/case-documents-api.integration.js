@@ -669,6 +669,143 @@ try {
   }
   console.log("PASS: general business write rejects a session revoked while waiting for the PostgreSQL actor lock");
 
+
+  // Exercise all 12 business mutation routes against the same three live-authorization
+  // races. Each request is deliberately queued behind the relevant PostgreSQL row lock;
+  // after the control transaction commits, the handler must reject and leave both
+  // business state and audit_logs unchanged.
+  const generalMutationRaceCases = [
+    {
+      label: "client create", method: "POST", path: "/api/clients",
+      make: marker => ({ client_type: "individual", full_name: marker, national_id: "889900" + String(generalRaceSequence).padStart(4, "0") }),
+      verify: async marker => assert.equal((await pool.query("select count(*)::int as count from clients where full_name=$1", [marker])).rows[0].count, 0, "denied client create must not persist")
+    },
+    {
+      label: "client update", method: "PATCH", path: () => "/api/clients/" + clientA,
+      make: marker => ({ full_name: marker }),
+      verify: async () => assert.equal((await pool.query("select full_name from clients where id=$1", [clientA])).rows[0].full_name, "Client A", "denied client update must not persist")
+    },
+    {
+      label: "client delete", method: "DELETE", path: () => "/api/clients/" + clientA,
+      make: () => undefined,
+      verify: async () => assert.equal((await pool.query("select deleted_at from clients where id=$1", [clientA])).rows[0].deleted_at, null, "denied client delete must not soft-delete")
+    },
+    {
+      label: "case create", method: "POST", path: "/api/cases",
+      make: marker => ({ client_id: clientA, case_number: marker, title: marker }),
+      verify: async marker => assert.equal((await pool.query("select count(*)::int as count from cases where case_number=$1", [marker])).rows[0].count, 0, "denied case create must not persist")
+    },
+    {
+      label: "case update", method: "PATCH", path: () => "/api/cases/" + ids.caseA,
+      make: marker => ({ title: marker }),
+      verify: async () => assert.equal((await pool.query("select title from cases where id=$1", [ids.caseA])).rows[0].title, "Case A", "denied case update must not persist")
+    },
+    {
+      label: "case delete", method: "DELETE", path: () => "/api/cases/" + ids.caseA,
+      make: () => undefined,
+      verify: async () => assert.equal((await pool.query("select deleted_at from cases where id=$1", [ids.caseA])).rows[0].deleted_at, null, "denied case delete must not soft-delete")
+    },
+    {
+      label: "hearing create", method: "POST", path: "/api/hearings",
+      make: marker => ({ case_id: ids.caseA, hearing_at: new Date(Date.now() + 86400000).toISOString(), hearing_type: "trial", notes: marker }),
+      verify: async marker => assert.equal((await pool.query("select count(*)::int as count from hearings where notes=$1", [marker])).rows[0].count, 0, "denied hearing create must not persist")
+    },
+    {
+      label: "hearing update", method: "PATCH", path: () => "/api/hearings/" + hearingA,
+      make: marker => ({ notes: marker }),
+      verify: async () => assert.equal((await pool.query("select notes from hearings where id=$1", [hearingA])).rows[0].notes, null, "denied hearing update must not persist")
+    },
+    {
+      label: "hearing delete", method: "DELETE", path: () => "/api/hearings/" + hearingA,
+      make: () => undefined,
+      verify: async () => assert.equal((await pool.query("select deleted_at from hearings where id=$1", [hearingA])).rows[0].deleted_at, null, "denied hearing delete must not soft-delete")
+    },
+    {
+      label: "action create", method: "POST", path: "/api/actions",
+      make: marker => ({ case_id: ids.caseA, title: marker, assigned_to: ids.userA }),
+      verify: async marker => assert.equal((await pool.query("select count(*)::int as count from case_actions where title=$1", [marker])).rows[0].count, 0, "denied action create must not persist")
+    },
+    {
+      label: "action update", method: "PATCH", path: () => "/api/actions/" + actionA,
+      make: marker => ({ title: marker }),
+      verify: async () => assert.equal((await pool.query("select title from case_actions where id=$1", [actionA])).rows[0].title, "Action A", "denied action update must not persist")
+    },
+    {
+      label: "action delete", method: "DELETE", path: () => "/api/actions/" + actionA,
+      make: () => undefined,
+      verify: async () => assert.equal((await pool.query("select deleted_at from case_actions where id=$1", [actionA])).rows[0].deleted_at, null, "denied action delete must not soft-delete")
+    }
+  ];
+  let generalRaceSequence = 0;
+  const liveAuthorizationRaceScenarios = [
+    {
+      name: "role downgrade",
+      account: roleAccounts.find(account => account.role === "lawyer"),
+      expectedStatus: 403,
+      gateMutation: async gate => gate.query("update users set role='viewer' where id=$1", [roleAccounts.find(account => account.role === "lawyer").id]),
+      restore: async account => pool.query("update users set role='lawyer' where id=$1", [account.id])
+    },
+    {
+      name: "account deactivation",
+      account: roleAccounts.find(account => account.role === "assistant"),
+      expectedStatus: 401,
+      gateMutation: async gate => gate.query("update users set is_active=false where id=$1", [roleAccounts.find(account => account.role === "assistant").id]),
+      restore: async account => pool.query("update users set is_active=true where id=$1", [account.id])
+    },
+    {
+      name: "session revocation",
+      account: roleAccounts.find(account => account.role === "admin"),
+      expectedStatus: 401,
+      gateMutation: async (gate, account) => gate.query(
+        "update auth_sessions set revoked_at=now() where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null returning id",
+        [hash(account.token), account.id, ids.officeA]
+      ),
+      restore: async account => pool.query(
+        "update auth_sessions set revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
+        [hash(account.token), account.id, ids.officeA]
+      )
+    }
+  ];
+  for (const scenario of liveAuthorizationRaceScenarios) {
+    for (const mutationCase of generalMutationRaceCases) {
+      generalRaceSequence++;
+      const markerText = "race-" + scenario.name.replaceAll(" ", "-") + "-" + mutationCase.label.replaceAll(" ", "-") + "-" + generalRaceSequence;
+      const account = scenario.account;
+      const gate = await pool.connect();
+      let gateOpen = false;
+      try {
+        await gate.query("begin");
+        gateOpen = true;
+        const controlResult = await scenario.gateMutation(gate, account);
+        if (scenario.name === "session revocation") {
+          assert.equal(controlResult.rowCount, 1, "session race must lock one live disposable session");
+        }
+        const auditBefore = Number((await pool.query("select count(*)::bigint as count from audit_logs")).rows[0].count);
+        const pathValue = typeof mutationCase.path === "function" ? mutationCase.path() : mutationCase.path;
+        const bodyValue = mutationCase.make(markerText);
+        const pendingWrite = request(pathValue, {
+          token: account.token, csrf: account.csrf, method: mutationCase.method,
+          ...(bodyValue === undefined ? {} : { body: bodyValue })
+        });
+        await waitForGeneralActorLockWait();
+        await gate.query("commit");
+        gateOpen = false;
+        const response = await pendingWrite;
+        assert.equal(response.status, scenario.expectedStatus,
+          scenario.name + " must reject " + mutationCase.label + "; got " + response.status + ": " + JSON.stringify(response.body));
+        await mutationCase.verify(markerText);
+        const auditAfter = Number((await pool.query("select count(*)::bigint as count from audit_logs")).rows[0].count);
+        assert.equal(auditAfter, auditBefore, scenario.name + " " + mutationCase.label + " rejection must not write an audit event");
+        console.log("PASS: " + scenario.name + " race rejects " + mutationCase.label + " without business or audit mutation");
+      } finally {
+        if (gateOpen) await gate.query("rollback").catch(() => {});
+        gate.release();
+        await scenario.restore(account);
+      }
+    }
+  }
+  console.log("PASS: 36 live-authorization race cases cover create/update/delete for clients, cases, hearings and actions under role downgrade, account deactivation and session revocation");
+
   console.log("PASS: client/case writes reject viewer role and re-check concurrent role downgrade and user deactivation under PostgreSQL actor locks");
 
   console.log("PASS: cross-office HTTP mutation isolation for clients, cases, hearings and actions");
