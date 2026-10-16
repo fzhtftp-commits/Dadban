@@ -1414,6 +1414,8 @@ try {
   assert.equal(afterTimeout.rows[0].title, "Database statement timeout regression", "timed-out update must roll back");
   const timeoutAudit = await pool.query("select count(*)::int as count from audit_logs where entity_type='case_document' and entity_id=$1 and action='update'", [timeoutId]);
   assert.equal(timeoutAudit.rows[0].count, 0, "timed-out update must not leave an audit record");
+  await pool.query("drop trigger delay_target_document_update_trigger on case_documents");
+  await pool.query("drop function delay_target_document_update()");
   // Real row-lock contention (not a synthetic SQLSTATE): auth succeeds, but the
   // in-transaction actor revalidation waits on the user's row and hits statement_timeout.
   // This proves a timed-out authorization wait cannot mutate the document or leave idempotency/audit rows.
@@ -1486,8 +1488,6 @@ try {
   )).rows[0].count, 1, "successful retry after lock timeout must leave one completed idempotency record");
   console.log("PASS: real PostgreSQL actor-lock wait times out, rolls back without audit/idempotency residue, releases locks, and a fresh write succeeds");
 
-  await pool.query("drop trigger delay_target_document_update_trigger on case_documents");
-  await pool.query("drop function delay_target_document_update()");
   timeoutServer.kill("SIGTERM");
   timeoutServer = null;
 
