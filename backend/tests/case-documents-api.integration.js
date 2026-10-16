@@ -1359,8 +1359,20 @@ try {
   await pool.query("drop trigger reject_document_mutation_audit_trigger on audit_logs");
   await pool.query("drop function reject_document_mutation_audit()");
 
-  const softDelete = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA, method: "DELETE" });
-  assert.equal(softDelete.status, 204, "own document should soft-delete successfully");
+  const softDelete = await request(`/api/case-documents/${documentId}`, {
+    token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: failedDeleteKey
+  });
+  assert.equal(softDelete.status, 204,
+    "the exact same idempotency key must succeed after the prior audit INSERT failure rolls back");
+  const recoveredDeleteState = await pool.query("select deleted_at from case_documents where id=$1", [documentId]);
+  assert.ok(recoveredDeleteState.rows[0].deleted_at,
+    "retry after audit INSERT recovery must commit the soft delete");
+  const recoveredDeleteKeyCount = Number((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, failedDeleteKey]
+  )).rows[0].count);
+  assert.equal(recoveredDeleteKeyCount, 1,
+    "successful retry must persist exactly one idempotency record for the previously failed key");
   const hiddenDetail = await request(`/api/case-documents/${documentId}`, { token: tokenA, csrf: csrfA });
   assert.equal(hiddenDetail.status, 404, "soft-deleted document must be hidden from detail API");
   const hiddenList = await request("/api/case-documents", { token: tokenA, csrf: csrfA });
