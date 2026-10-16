@@ -129,15 +129,49 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
+DECLARE
+  locked_case record;
+  locked_client record;
+  locked_case_ids uuid[] := ARRAY[]::uuid[];
+  locked_client_ids uuid[] := ARRAY[]::uuid[];
 BEGIN
-  -- Stable UUID order avoids A→B/B→A lock cycles. READ COMMITTED rechecks the
-  -- deleted_at predicate after waiting for a concurrent soft-delete.
-  RETURN QUERY
-    SELECT c.id
+  -- Stable case UUID order, then stable client UUID order, matches case PATCH's
+  -- case->client lock order and prevents child writes through a deleted client.
+  -- A client DELETE takes only the client row, so it cannot form the reverse edge.
+  FOR locked_case IN
+    SELECT c.id, c.client_id
     FROM public.cases AS c
     WHERE c.office_id=p_office AND c.id=ANY(p_case_ids) AND c.deleted_at IS NULL
     ORDER BY c.id
-    FOR UPDATE;
+    FOR UPDATE
+  LOOP
+    locked_case_ids := array_append(locked_case_ids, locked_case.id);
+    locked_client_ids := array_append(locked_client_ids, locked_case.client_id);
+  END LOOP;
+
+  IF cardinality(locked_case_ids) = 0 THEN
+    RETURN;
+  END IF;
+
+  -- If a client delete wins first, READ COMMITTED rechecks deleted_at after
+  -- waiting and this loop will not lock that now-hidden client.
+  FOR locked_client IN
+    SELECT cl.id
+    FROM public.clients AS cl
+    WHERE cl.office_id=p_office AND cl.id=ANY(locked_client_ids) AND cl.deleted_at IS NULL
+    ORDER BY cl.id
+    FOR UPDATE
+  LOOP
+    NULL;
+  END LOOP;
+
+  RETURN QUERY
+    SELECT c.id
+    FROM public.cases AS c
+    JOIN public.clients AS cl
+      ON cl.id=c.client_id AND cl.office_id=c.office_id AND cl.deleted_at IS NULL
+    WHERE c.office_id=p_office AND c.id=ANY(locked_case_ids) AND c.deleted_at IS NULL
+    ORDER BY c.id;
 END
 $function$;
 ALTER FUNCTION public.lock_live_case_parents(uuid,uuid[]) OWNER TO dadban_actor_lock_owner;
