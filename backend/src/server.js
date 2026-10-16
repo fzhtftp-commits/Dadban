@@ -561,7 +561,7 @@ app.post("/api/auth/register", requireTrustedOrigin, registerRateLimit, async (r
   }
 
   const { full_name, email, password, office_name } = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
@@ -615,12 +615,12 @@ app.post("/api/auth/register", requireTrustedOrigin, registerRateLimit, async (r
       }
     });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Registration failed");
     logSafeError("Registration failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -629,7 +629,7 @@ app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, re
   if (!parsed.success) return res.status(400).json({ error: "invalid_login" });
 
   const { email, password } = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   let transactionStarted = false;
 
   try {
@@ -700,7 +700,7 @@ app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, re
     logSafeError("Login failed", error);
     return res.status(500).json({ error: "authentication_error" });
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -719,7 +719,7 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const revoked = await client.query(
@@ -738,7 +738,7 @@ app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, asy
     const failure = dbError(error);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -884,7 +884,7 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
   if (!parsed.success) return res.status(400).json({ error: "invalid_client" });
 
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
@@ -917,12 +917,12 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
     await client.query("commit");
     return res.status(201).json({ data: created });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create client failed");
     logSafeError("Create client failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1006,7 +1006,7 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
   values.push(req.auth.userId);
   fields.push(`updated_by = $${values.length}`);
 
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
@@ -1035,12 +1035,12 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
     await client.query("commit");
     return res.json({ data: updated });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update client failed");
     logSafeError("Update client failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1048,7 +1048,7 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_client_id" });
 
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
@@ -1076,12 +1076,12 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete client failed");
     logSafeError("Delete client failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1159,7 +1159,7 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
   if (!parsed.success) return res.status(400).json({ error: "invalid_case" });
 
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
@@ -1202,12 +1202,12 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
     await client.query("commit");
     return res.status(201).json({ data: created });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create case failed");
     logSafeError("Create case failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1269,7 +1269,7 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   values.push(req.auth.userId);
   fields.push(`updated_by = $${values.length}`);
 
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1305,12 +1305,12 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
     await client.query("commit");
     return res.json({ data: updated });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update case failed");
     logSafeError("Update case failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1318,7 +1318,7 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_case_id" });
 
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1343,12 +1343,12 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete case failed");
     logSafeError("Delete case failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1423,7 +1423,7 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
   const parsed = hearingCreateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_hearing" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1454,12 +1454,12 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
     await client.query("commit");
     return res.status(201).json({ data: hearing });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create hearing failed");
     logSafeError("Create hearing failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1469,7 +1469,7 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
   if (!id.success) return res.status(400).json({ error: "invalid_hearing_id" });
   if (!parsed.success) return res.status(400).json({ error: "invalid_hearing" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1520,19 +1520,19 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     await client.query("commit");
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update hearing failed");
     logSafeError("Update hearing failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
 app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_hearing_id" });
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1553,12 +1553,12 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete hearing failed");
     logSafeError("Delete hearing failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1645,7 +1645,7 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
   const parsed = actionCreateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_action" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1687,12 +1687,12 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
     await client.query("commit");
     return res.status(201).json({ data: action });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create case action failed");
     logSafeError("Create case action failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1702,7 +1702,7 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
   if (!id.success) return res.status(400).json({ error: "invalid_action_id" });
   if (!parsed.success) return res.status(400).json({ error: "invalid_action_update" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1763,19 +1763,19 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
     await client.query("commit");
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update case action failed");
     logSafeError("Update case action failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
 app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_action_id" });
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const actor = await lockLiveMutationActor(client, req);
@@ -1795,12 +1795,12 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete case action failed");
     logSafeError("Delete case action failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
