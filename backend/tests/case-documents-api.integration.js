@@ -637,6 +637,38 @@ try {
     deactivateGate.release();
     await pool.query("update users set is_active=true where id=$1", [deactivationAccount.id]);
   }
+  // Revoke a session while a general business write is queued on the actor lock.
+  // The test transaction changes only disposable PostgreSQL fixtures.
+  const revokeRaceAccount = roleAccounts.find(account => account.role === "admin");
+  const revokeGate = await pool.connect();
+  let revokeGateOpen = false;
+  try {
+    await revokeGate.query("begin");
+    revokeGateOpen = true;
+    const revokeTarget = await revokeGate.query(
+      "update auth_sessions set revoked_at=now() where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null returning id",
+      [hash(revokeRaceAccount.token), revokeRaceAccount.id, ids.officeA]
+    );
+    assert.equal(revokeTarget.rowCount, 1, "fixture must have a live disposable session to revoke");
+    const pendingRevokedWrite = request("/api/clients", {
+      token: revokeRaceAccount.token, csrf: revokeRaceAccount.csrf, method: "POST",
+      body: { client_type: "individual", full_name: "Revoked-Session Forbidden Client", national_id: "7788990011" }
+    });
+    await waitForGeneralActorLockWait();
+    await revokeGate.query("commit");
+    revokeGateOpen = false;
+    const revokedWriteResult = await pendingRevokedWrite;
+    assert.equal(revokedWriteResult.status, 401, "a session revoked while the business write waits must not authorize the write");
+    assert.equal((await pool.query("select count(*)::int as count from clients where full_name='Revoked-Session Forbidden Client'")).rows[0].count, 0,
+      "revoked-session race must not persist a client");
+  } finally {
+    if (revokeGateOpen) await revokeGate.query("rollback").catch(() => {});
+    revokeGate.release();
+    await pool.query("update auth_sessions set revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
+      [hash(revokeRaceAccount.token), revokeRaceAccount.id, ids.officeA]);
+  }
+  console.log("PASS: general business write rejects a session revoked while waiting for the PostgreSQL actor lock");
+
   console.log("PASS: client/case writes reject viewer role and re-check concurrent role downgrade and user deactivation under PostgreSQL actor locks");
 
   console.log("PASS: cross-office HTTP mutation isolation for clients, cases, hearings and actions");
