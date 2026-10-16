@@ -187,8 +187,42 @@ try {
     },
     {
       label: "client delete", method: "DELETE", path: `/api/clients/${ids.client}`,
-      table: "clients", entityType: "client", action: "delete",
-      checkUnchanged: async () => assert.equal((await pool.query("select deleted_at from clients where id=$1", [ids.client])).rows[0].deleted_at, null)
+      table: "clients", entityType: "client", action: "delete", auditEntityId: ids.client,
+      checkUnchanged: async () => {
+        const client = (await pool.query(
+          "select deleted_at from clients where id=$1", [ids.client]
+        )).rows[0];
+        const currentCase = (await pool.query(
+          "select client_id,deleted_at,next_hearing_at from cases where id=$1", [ids.case]
+        )).rows[0];
+        const hearing = (await pool.query(
+          "select case_id,hearing_at,notes,deleted_at from hearings where id=$1", [ids.hearing]
+        )).rows[0];
+        const action = (await pool.query(
+          "select case_id,title,deleted_at from case_actions where id=$1", [ids.action]
+        )).rows[0];
+        assert.equal(client.deleted_at, null, "audit failure must roll back client deleted_at");
+        assert.equal(currentCase.client_id, ids.client, "audit failure must preserve case-to-client relationship");
+        assert.equal(currentCase.deleted_at, null, "audit failure must not soft-delete the case");
+        assert.equal(currentCase.next_hearing_at.getTime(), hearing.hearing_at.getTime(),
+          "audit failure must preserve next_hearing_at");
+        assert.equal(hearing.case_id, ids.case, "audit failure must preserve dependent hearing case_id");
+        assert.equal(hearing.notes, "Original hearing notes", "audit failure must preserve hearing data");
+        assert.equal(hearing.deleted_at, null, "audit failure must not soft-delete the hearing");
+        assert.equal(action.case_id, ids.case, "audit failure must preserve dependent action case_id");
+        assert.equal(action.title, "Original action title", "audit failure must preserve action data");
+        assert.equal(action.deleted_at, null, "audit failure must not soft-delete the action");
+        for (const [entityType, entityId] of [
+          ["case", ids.case], ["hearing", ids.hearing], ["case_action", ids.action]
+        ]) {
+          const childAuditCount = Number((await pool.query(
+            "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3",
+            [ids.office, entityType, entityId]
+          )).rows[0].count);
+          assert.equal(childAuditCount, 0,
+            "failed client delete must not emit dependent " + entityType + " audit rows");
+        }
+      }
     },
     {
       label: "case create", method: "POST", path: "/api/cases",
