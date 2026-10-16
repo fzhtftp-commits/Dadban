@@ -160,6 +160,8 @@ try {
   await pool.query(mutationIdempotencyMigration);
   const mutationTombstoneMigration = await readFile(new URL("../migrations/007_case_document_mutation_tombstones.sql", import.meta.url), "utf8");
   await pool.query(mutationTombstoneMigration);
+  const actorLockMigration = await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8");
+  await pool.query(actorLockMigration);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
