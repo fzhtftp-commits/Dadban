@@ -4241,6 +4241,231 @@ try {
     [ids.officeA, timeoutFixture.hearingA1]
   )).rows[0].count), timeoutAuditBefore, "timed-out move must leave no audit row");
 
+
+  // Case soft-delete versus hearing DELETE and case-action PATCH/DELETE.
+  // Hearing PATCH already has deterministic parent-first/child-first coverage above;
+  // these distinct paths close the delete and action-write race matrix without
+  // duplicating the existing hearing-edit tests.
+  async function seedCaseChildMutationRace(label) {
+    const clientId = crypto.randomUUID();
+    const caseId = crypto.randomUUID();
+    const hearingId = crypto.randomUUID();
+    const actionId = crypto.randomUUID();
+    const prefix = "CASE-CHILD-MUTATION-" + crypto.randomBytes(5).toString("hex") + "-" + label;
+    const hearingAt = new Date(Date.now() + 12 * 86400000);
+    await pool.query(
+      "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual',$3,'7'||lpad(floor(random()*1000000000)::text,9,'0'),$4,$4)",
+      [clientId, ids.officeA, "Case child mutation race " + label, ids.userA]
+    );
+    await pool.query(
+      "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Child mutation race case',$5,$6,$6)",
+      [caseId, ids.officeA, clientId, prefix, hearingAt, ids.userA]
+    );
+    await pool.query(
+      "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,$4,'trial','scheduled',$5,$5)",
+      [hearingId, ids.officeA, caseId, hearingAt, ids.userA]
+    );
+    await pool.query(
+      "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,$4,'todo','normal',$5,$5)",
+      [actionId, ids.officeA, caseId, "Original action " + label, ids.userA]
+    );
+    return { clientId, caseId, hearingId, actionId, hearingAt, actionTitle: "Original action " + label };
+  }
+
+  async function runCaseChildMutationRace({ label, childKind, childOperation, ordering }) {
+    const fixture = await seedCaseChildMutationRace(label + "-" + ordering);
+    const childId = childKind === "hearing" ? fixture.hearingId : fixture.actionId;
+    const childPath = (childKind === "hearing" ? "/api/hearings/" : "/api/actions/") + childId;
+    const childEntity = childKind === "hearing" ? "hearing" : "case_action";
+    const auditAction = childOperation === "patch" ? "update" : "delete";
+    const triggerTable = childKind === "hearing" ? "hearings" : "case_actions";
+    const waitPattern = childKind === "hearing" ? "%update hearings%" : "%update case_actions%";
+    const childToken = childKind === "hearing" ? raceActors["hearing-patch"] : raceActors["action-patch"];
+    const advisory = [880009, childKind === "hearing" ? 81 : 82];
+    const triggerName = "pause_case_child_mutation_race";
+    const functionName = triggerName + "_fn";
+    const childAuditBefore = Number((await pool.query(
+      "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action=$4",
+      [ids.officeA, childEntity, childId, auditAction]
+    )).rows[0].count);
+    const caseAuditBefore = Number((await pool.query(
+      "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case' and entity_id=$2 and action='delete'",
+      [ids.officeA, fixture.caseId]
+    )).rows[0].count);
+    const blocker = await pool.connect();
+    let blockerOpen = false;
+    let advisoryHeld = false;
+    let parentDeletePromise;
+    let childPromise;
+    const childBody = childOperation === "patch"
+      ? (childKind === "hearing" ? { notes: "Edited before parent deletion" } : { title: "Edited before parent deletion" })
+      : undefined;
+    try {
+      if (ordering === "parent-first") {
+        await blocker.query("begin");
+        await blocker.query("select id from cases where id=$1 for update", [fixture.caseId]);
+        blockerOpen = true;
+        parentDeletePromise = request("/api/cases/" + fixture.caseId, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, label + " parent DELETE queued first");
+        childPromise = request(childPath, {
+          token: childToken.token, csrf: childToken.csrf,
+          method: childOperation === "patch" ? "PATCH" : "DELETE",
+          ...(childBody === undefined ? {} : { body: childBody })
+        });
+        await waitForLockWait("%from public.lock_live_case_parents%", 1, label + " child mutation waits behind parent DELETE");
+        await blocker.query("rollback");
+        blockerOpen = false;
+      } else {
+        await blocker.query("select pg_advisory_lock($1,$2)", advisory);
+        advisoryHeld = true;
+        await pool.query(
+          "create or replace function " + functionName + "() returns trigger language plpgsql as $fn$ begin perform pg_advisory_xact_lock(" +
+            advisory[0] + "," + advisory[1] + "); return new; end $fn$"
+        );
+        await pool.query(
+          "create trigger " + triggerName + " before update on " + triggerTable +
+          " for each row when (old.id = '" + childId + "'::uuid) execute function " + functionName + "()"
+        );
+        childPromise = request(childPath, {
+          token: childToken.token, csrf: childToken.csrf,
+          method: childOperation === "patch" ? "PATCH" : "DELETE",
+          ...(childBody === undefined ? {} : { body: childBody })
+        });
+        await waitForLockWait(waitPattern, 1, label + " child mutation paused after acquiring live-parent locks");
+        parentDeletePromise = request("/api/cases/" + fixture.caseId, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, label + " parent DELETE waits behind child mutation");
+        const unlocked = await blocker.query("select pg_advisory_unlock($1,$2) as unlocked", advisory);
+        assert.equal(unlocked.rows[0].unlocked, true, label + " child-mutation barrier must release");
+        advisoryHeld = false;
+      }
+
+      const [parentResult, childResult] = await Promise.all([parentDeletePromise, childPromise]);
+      assert.equal(parentResult.status, 204, label + " parent soft-delete must commit in both schedules");
+      const caseRow = (await pool.query(
+        "select deleted_at,next_hearing_at from cases where id=$1", [fixture.caseId]
+      )).rows[0];
+      assert.ok(caseRow.deleted_at, label + " parent tombstone must persist");
+      const hearing = (await pool.query(
+        "select case_id,hearing_at,notes,deleted_at from hearings where id=$1", [fixture.hearingId]
+      )).rows[0];
+      const action = (await pool.query(
+        "select case_id,title,deleted_at from case_actions where id=$1", [fixture.actionId]
+      )).rows[0];
+      assert.equal(hearing.case_id, fixture.caseId, label + " hearing case_id must remain unchanged");
+      assert.equal(hearing.hearing_at.getTime(), fixture.hearingAt.getTime(), label + " hearing_at must remain unchanged");
+      if (childKind === "hearing" && childOperation === "delete") {
+        if (ordering === "parent-first") {
+          assert.equal(childResult.status, 404, label + " hearing DELETE must reject after parent tombstone");
+          assert.equal(hearing.deleted_at, null, label + " rejected hearing DELETE must preserve child tombstone");
+          assert.equal(caseRow.next_hearing_at.getTime(), fixture.hearingAt.getTime(),
+            label + " rejected hearing DELETE must preserve next_hearing_at");
+        } else {
+          assert.equal(childResult.status, 204, label + " hearing DELETE must commit before parent tombstone");
+          assert.ok(hearing.deleted_at, label + " committed hearing DELETE must persist child tombstone");
+          assert.equal(caseRow.next_hearing_at, null, label + " hearing DELETE must clear next_hearing_at atomically");
+        }
+      } else {
+        assert.equal(hearing.deleted_at, null, label + " unrelated hearing must remain live");
+        assert.equal(caseRow.next_hearing_at.getTime(), fixture.hearingAt.getTime(),
+          label + " action mutation must preserve the hearing summary");
+      }
+      if (childKind === "action" && childOperation === "patch") {
+        if (ordering === "parent-first") {
+          assert.equal(childResult.status, 400, label + " action PATCH must reject after parent tombstone");
+          assert.deepEqual(childResult.body, { error: "invalid_related_case" });
+          assert.equal(action.title, fixture.actionTitle, label + " rejected action PATCH must preserve title");
+        } else {
+          assert.equal(childResult.status, 200, label + " action PATCH must commit before parent tombstone");
+          assert.equal(action.title, "Edited before parent deletion", label + " committed action title must persist");
+        }
+        assert.equal(action.deleted_at, null, label + " action PATCH must not change child tombstone");
+      }
+      if (childKind === "action" && childOperation === "delete") {
+        if (ordering === "parent-first") {
+          assert.equal(childResult.status, 404, label + " action DELETE must reject after parent tombstone");
+          assert.equal(action.deleted_at, null, label + " rejected action DELETE must preserve child tombstone");
+        } else {
+          assert.equal(childResult.status, 204, label + " action DELETE must commit before parent tombstone");
+          assert.ok(action.deleted_at, label + " committed action DELETE must persist child tombstone");
+        }
+      }
+      const childAuditAfter = Number((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action=$4",
+        [ids.officeA, childEntity, childId, auditAction]
+      )).rows[0].count);
+      assert.equal(childAuditAfter, childAuditBefore + (ordering === "child-first" ? 1 : 0),
+        label + " child audit must commit exactly when child mutation wins");
+      const caseAuditAfter = Number((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case' and entity_id=$2 and action='delete'",
+        [ids.officeA, fixture.caseId]
+      )).rows[0].count);
+      assert.equal(caseAuditAfter, caseAuditBefore + 1, label + " parent delete must emit exactly one audit row");
+    } finally {
+      if (blockerOpen) await blocker.query("rollback").catch(() => {});
+      if (advisoryHeld) await blocker.query("select pg_advisory_unlock($1,$2)", advisory).catch(() => {});
+      blocker.release();
+      await pool.query("drop trigger if exists " + triggerName + " on " + triggerTable).catch(() => {});
+      await pool.query("drop function if exists " + functionName + "()").catch(() => {});
+    }
+  }
+
+  for (const scenario of [
+    { label: "hearing DELETE parent-first", childKind: "hearing", childOperation: "delete", ordering: "parent-first" },
+    { label: "hearing DELETE child-first", childKind: "hearing", childOperation: "delete", ordering: "child-first" },
+    { label: "action PATCH parent-first", childKind: "action", childOperation: "patch", ordering: "parent-first" },
+    { label: "action PATCH child-first", childKind: "action", childOperation: "patch", ordering: "child-first" },
+    { label: "action DELETE parent-first", childKind: "action", childOperation: "delete", ordering: "parent-first" },
+    { label: "action DELETE child-first", childKind: "action", childOperation: "delete", ordering: "child-first" }
+  ]) {
+    await runCaseChildMutationRace(scenario);
+  }
+
+  // Exercise lock_timeout on the action-edit path too (the existing hearing
+  // reassignment timeout test above does not cover case-action PATCH).
+  const timeoutActionFixture = await seedCaseChildMutationRace("action-lock-timeout");
+  const timeoutActionAuditBefore = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_action' and entity_id=$2 and action='update'",
+    [ids.officeA, timeoutActionFixture.actionId]
+  )).rows[0].count);
+  const timeoutActionBlocker = await pool.connect();
+  let timeoutActionBlockerOpen = false;
+  let timeoutActionPromise;
+  try {
+    await timeoutActionBlocker.query("begin");
+    await timeoutActionBlocker.query("select id from cases where id=$1 for update", [timeoutActionFixture.caseId]);
+    timeoutActionBlockerOpen = true;
+    timeoutActionPromise = request("/api/actions/" + timeoutActionFixture.actionId, {
+      token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf,
+      method: "PATCH", portToUse: timeoutPort, body: { title: "Must roll back on lock_timeout" }
+    });
+    await waitForLockWait("%from public.lock_live_case_parents%", 1, "action PATCH waits on live parent before lock_timeout");
+    const timeoutActionResponse = await timeoutActionPromise;
+    assert.equal(timeoutActionResponse.status, 503, "action parent lock_timeout must return retryable 503");
+    assert.deepEqual(timeoutActionResponse.body, { error: "database_retryable" });
+  } finally {
+    if (timeoutActionBlockerOpen) await timeoutActionBlocker.query("rollback").catch(() => {});
+    if (timeoutActionPromise) await timeoutActionPromise.catch(() => {});
+    timeoutActionBlocker.release();
+  }
+  const timeoutActionAfter = (await pool.query(
+    "select title,deleted_at from case_actions where id=$1", [timeoutActionFixture.actionId]
+  )).rows[0];
+  assert.equal(timeoutActionAfter.title, timeoutActionFixture.actionTitle, "timed-out action PATCH must roll back its title");
+  assert.equal(timeoutActionAfter.deleted_at, null, "timed-out action PATCH must preserve deleted_at");
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [timeoutActionFixture.caseId])).rows[0].next_hearing_at.getTime(),
+    timeoutActionFixture.hearingAt.getTime(), "timed-out action PATCH must preserve next_hearing_at");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_action' and entity_id=$2 and action='update'",
+    [ids.officeA, timeoutActionFixture.actionId]
+  )).rows[0].count), timeoutActionAuditBefore, "timed-out action PATCH must leave no audit row");
+
+  console.log("PASS: case soft-delete races with hearing DELETE and action PATCH/DELETE in both lock orders; child state, next_hearing_at, exact audit counts, and action lock_timeout rollback are atomic");
+
+
   timeoutServer.kill("SIGTERM");
   timeoutServer = null;
 
