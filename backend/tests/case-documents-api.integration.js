@@ -2711,6 +2711,95 @@ try {
   assert.equal(await auditCount("case_document", "create"), documentCreateAuditBefore, "rejected document create must not emit audit");
   assert.equal(await auditCount("case_document", "update"), documentUpdateAuditBefore, "rejected document update must not emit audit");
 
+  // Regression: a PATCH must not "rescue" a child by reassigning it away
+  // after its source parent has already been soft-deleted. The previous tests
+  // cover a deleted destination; this covers a deleted source and preserves
+  // the source/destination lock-order invariant.
+  const sourceMoveTargetCase = crypto.randomUUID();
+  const sourceMoveHearing = crypto.randomUUID();
+  const sourceMoveAction = crypto.randomUUID();
+  const sourceMoveDocument = crypto.randomUUID();
+  const sourceMoveCaseNumber = caseNumberPrefix + "-MOVE-TARGET";
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Live reassignment destination',$5,$5)",
+    [sourceMoveTargetCase, ids.officeA, raceCaseClient, sourceMoveCaseNumber, ids.userA]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,now()+interval '12 days','hearing','scheduled',$4,$4)",
+    [sourceMoveHearing, ids.officeA, raceSourceCase, ids.userA]
+  );
+  await pool.query(
+    "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'Source-parent move action','todo','normal',$4,$4)",
+    [sourceMoveAction, ids.officeA, raceSourceCase, ids.userA]
+  );
+  await pool.query(
+    "insert into case_documents(id,office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'Source-parent move document','evidence','normal',$4,$4)",
+    [sourceMoveDocument, ids.officeA, raceSourceCase, ids.userA]
+  );
+  const sourceMoveAuditBefore = {
+    caseDelete: await auditCount("case", "delete"),
+    hearingUpdate: await auditCount("hearing", "update"),
+    actionUpdate: await auditCount("case_action", "update"),
+    documentUpdate: await auditCount("case_document", "update")
+  };
+  const sourceBlocker = await pool.connect();
+  let sourceBlockerOpen = false;
+  let sourceDeletePromise;
+  let sourcePatchPromises = [];
+  try {
+    await sourceBlocker.query("begin");
+    await sourceBlocker.query("select id from cases where id=$1 for update", [raceSourceCase]);
+    sourceBlockerOpen = true;
+    sourceDeletePromise = request("/api/cases/" + raceSourceCase, {
+      token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update cases%deleted_at = now()%", 1, "source case delete");
+    sourcePatchPromises = [
+      request("/api/hearings/" + sourceMoveHearing, {
+        token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+        method: "PATCH", body: { case_id: sourceMoveTargetCase }
+      }),
+      request("/api/actions/" + sourceMoveAction, {
+        token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf,
+        method: "PATCH", body: { case_id: sourceMoveTargetCase }
+      }),
+      request("/api/case-documents/" + sourceMoveDocument, {
+        token: raceActors["document-patch"].token, csrf: raceActors["document-patch"].csrf,
+        method: "PATCH", idempotencyKey: "source-case-delete-patch-01",
+        body: { title: "Must not mutate child under deleted source" }
+      })
+    ];
+    await waitForLockWait("%from public.lock_live_case_parents%", 3, "child PATCHes waiting on source case deletion");
+  } finally {
+    if (sourceBlockerOpen) await sourceBlocker.query("rollback").catch(() => {});
+    sourceBlocker.release();
+  }
+  const [sourceDeleteResult, sourceHearingPatchResult, sourceActionPatchResult, sourceDocumentPatchResult] =
+    await Promise.all([sourceDeletePromise, ...sourcePatchPromises]);
+  assert.equal(sourceDeleteResult.status, 204, "source case soft-delete should commit before queued child PATCHes");
+  assert.equal(sourceHearingPatchResult.status, 400, "hearing PATCH must reject a deleted source parent even when destination is live");
+  assert.deepEqual(sourceHearingPatchResult.body, { error: "invalid_related_case" });
+  assert.equal(sourceActionPatchResult.status, 400, "action PATCH must reject a deleted source parent even when destination is live");
+  assert.deepEqual(sourceActionPatchResult.body, { error: "invalid_related_case" });
+  assert.equal(sourceDocumentPatchResult.status, 404, "document metadata PATCH must reject a deleted source parent");
+  assert.deepEqual(sourceDocumentPatchResult.body, { error: "document_not_found" });
+  assert.equal((await pool.query("select case_id from hearings where id=$1", [sourceMoveHearing])).rows[0].case_id, raceSourceCase);
+  assert.equal((await pool.query("select case_id from case_actions where id=$1", [sourceMoveAction])).rows[0].case_id, raceSourceCase);
+  assert.equal((await pool.query("select title from case_documents where id=$1", [sourceMoveDocument])).rows[0].title, "Source-parent move document");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, raceActors["document-patch"].userId, "source-case-delete-patch-01"])).rows[0].count, 0,
+    "rejected document PATCH against a deleted source must roll back its idempotency reservation");
+  assert.equal(await auditCount("case", "delete"), sourceMoveAuditBefore.caseDelete + 1);
+  assert.equal(await auditCount("hearing", "update"), sourceMoveAuditBefore.hearingUpdate,
+    "rejected source-parent hearing reassignment must not write audit");
+  assert.equal(await auditCount("case_action", "update"), sourceMoveAuditBefore.actionUpdate,
+    "rejected source-parent action reassignment must not write audit");
+  assert.equal(await auditCount("case_document", "update"), sourceMoveAuditBefore.documentUpdate,
+    "rejected source-parent document PATCH must not write audit");
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [sourceMoveTargetCase])).rows[0].next_hearing_at, null,
+    "rejected hearing reassignment must not change the destination next_hearing_at summary");
+  console.log("PASS: source-parent soft-delete wins against hearing/action reassignment and document PATCH; no child, audit, idempotency, or destination summary mutation survives");
+
   const deletedCaseChildAuditBefore = Number((await pool.query(
     "select count(*)::int as count from audit_logs where office_id=$1 and entity_id = any($2::uuid[])",
     [ids.officeA, [raceDeletedCaseHearing, raceDeletedCaseAction, raceParentDoc]]
