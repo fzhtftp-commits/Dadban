@@ -1382,6 +1382,19 @@ try {
     assert.equal((await pool.query("select title from case_documents where id=$1", [idsByLevel.normal])).rows[0].title, beforeInactiveTitle, "deactivation race must not mutate metadata");
 
     await pool.query("update users set is_active=true, role='lawyer' where id=$1", [roleRaceLawyer.id]);
+    const revokedClientName = "Session Revocation Race Client";
+    const pendingRevokedClient = request("/api/clients", {
+      token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "POST", portToUse: rolePort,
+      body: { client_type: "individual", full_name: revokedClientName, national_id: "8877665544" }
+    });
+    await waitForRoleHeartbeat();
+    await pool.query("update auth_sessions set revoked_at=now() where token_hash=$1", [lawyerTokenHash]);
+    const revokedClientResult = await pendingRevokedClient;
+    assert.equal(revokedClientResult.status, 401, "client create must reject session revocation after requireAuth captured the session");
+    assert.equal((await pool.query("select count(*)::int as count from clients where full_name=$1", [revokedClientName])).rows[0].count, 0,
+      "session revocation race must not persist a client");
+    await pool.query("update auth_sessions set revoked_at=null where token_hash=$1", [lawyerTokenHash]);
+
     const pendingRevokedPatch = request("/api/case-documents/" + idsByLevel.normal, { token: roleRaceLawyer.token, csrf: roleRaceLawyer.csrf, method: "PATCH", portToUse: rolePort, body: { title: "must not update after session revocation" } });
     await waitForRoleHeartbeat();
     await pool.query("update auth_sessions set revoked_at=now() where token_hash=$1", [lawyerTokenHash]);
