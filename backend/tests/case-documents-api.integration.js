@@ -1126,7 +1126,7 @@ try {
     const waitForDeadlockApiLock = async () => {
       const deadline = Date.now() + 10000;
       while (Date.now() < deadline) {
-        const waiting = await pool.query("select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select confidentiality from case_documents%'");
+        const waiting = await pool.query("select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select case_id,confidentiality from case_documents%'");
         if (waiting.rows[0].count >= 1) return;
         await delay(25);
       }
@@ -1948,7 +1948,7 @@ try {
     const deadline=Date.now()+10000;
     while(Date.now()<deadline){
       const waiting=await pool.query(
-        "select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select confidentiality from case_documents%'"
+        "select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike 'select case_id,confidentiality from case_documents%'"
       );
       if(waiting.rows[0].count>=expected)return;
       await delay(25);
