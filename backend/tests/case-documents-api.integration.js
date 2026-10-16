@@ -3996,6 +3996,250 @@ try {
   await runOppositeMoveDeleteRace("child-first");
   console.log("PASS: opposite-direction hearing moves race with case soft-delete in both lock orders; UUID ordering, summaries, and exact audit counts remain consistent without deadlock");
 
+
+  // Three-way race: multiple hearings move in opposite directions while both
+  // parent cases are soft-deleted. Exercise deterministic queue order and a
+  // real lock_timeout rollback using the isolated timeout-configured API server.
+  async function seedDualCaseDeleteMultiHearingRace(label) {
+    const ordered = [crypto.randomUUID(), crypto.randomUUID()].sort();
+    const caseA = ordered[0];
+    const caseB = ordered[1];
+    assert.ok(caseA.localeCompare(caseB) < 0, "fixture must establish UUID lock order A before B");
+    const clientId = crypto.randomUUID();
+    const hearingA1 = crypto.randomUUID();
+    const hearingA2 = crypto.randomUUID();
+    const hearingB1 = crypto.randomUUID();
+    const prefix = "DUAL-DELETE-MULTI-MOVE-" + crypto.randomBytes(5).toString("hex") + "-" + label;
+    const times = [
+      new Date(Date.now() + 4 * 86400000),
+      new Date(Date.now() + 7 * 86400000),
+      new Date(Date.now() + 10 * 86400000)
+    ];
+    await pool.query(
+      "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual',$3,'7'||lpad(floor(random()*1000000000)::text,9,'0'),$4,$4)",
+      [clientId, ids.officeA, "Dual case delete race " + label, ids.userA]
+    );
+    await pool.query(
+      "insert into cases(id,office_id,client_id,case_number,title,next_hearing_at,created_by,updated_by) values($1,$2,$3,$4,'Case A',$5,$6,$6),($7,$2,$3,$8,'Case B',$9,$6,$6)",
+      [caseA, ids.officeA, clientId, prefix + "-A", times[0], ids.userA, caseB, prefix + "-B", times[2]]
+    );
+    await pool.query(
+      "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values" +
+      "($1,$2,$3,$4,'trial','scheduled',$5,$5),($6,$2,$3,$7,'trial','scheduled',$5,$5),($8,$2,$9,$10,'trial','scheduled',$5,$5)",
+      [hearingA1, ids.officeA, caseA, times[0], ids.userA, hearingA2, times[1], hearingB1, caseB, times[2]]
+    );
+    return { caseA, caseB, hearingA1, hearingA2, hearingB1, times };
+  }
+
+  async function runDualCaseDeleteMultiHearingRace(ordering) {
+    const fixture = await seedDualCaseDeleteMultiHearingRace(ordering);
+    const auditBefore = {
+      caseADelete: Number((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case' and entity_id=$2 and action='delete'",
+        [ids.officeA, fixture.caseA]
+      )).rows[0].count),
+      caseBDelete: Number((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case' and entity_id=$2 and action='delete'",
+        [ids.officeA, fixture.caseB]
+      )).rows[0].count),
+      hearingUpdates: Number((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=any($2::uuid[]) and action='update'",
+        [ids.officeA, [fixture.hearingA1, fixture.hearingA2, fixture.hearingB1]]
+      )).rows[0].count)
+    };
+    const blocker = await pool.connect();
+    const advisory = [880007, ordering === "parent-first" ? 71 : 72];
+    const triggerName = "pause_dual_case_delete_multi_move";
+    const functionName = triggerName + "_fn";
+    let blockerOpen = false;
+    let advisoryHeld = false;
+    let deleteAPromise;
+    let deleteBPromise;
+    let moveA1Promise;
+    let moveA2Promise;
+    let moveB1Promise;
+    try {
+      if (ordering === "parent-first") {
+        await blocker.query("begin");
+        await blocker.query("select id from cases where id=any($1::uuid[]) order by id for update", [[fixture.caseA, fixture.caseB]]);
+        blockerOpen = true;
+        deleteAPromise = request("/api/cases/" + fixture.caseA, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, "first case DELETE waits on UUID-ordered blocker");
+        deleteBPromise = request("/api/cases/" + fixture.caseB, {
+          token: tokenA, csrf: csrfA, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 2, "both case DELETE requests are queued");
+        moveA1Promise = request("/api/hearings/" + fixture.hearingA1, {
+          token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+          method: "PATCH", body: { case_id: fixture.caseB }
+        });
+        moveA2Promise = request("/api/hearings/" + fixture.hearingA2, {
+          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseB }
+        });
+        moveB1Promise = request("/api/hearings/" + fixture.hearingB1, {
+          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseA }
+        });
+        await waitForLockWait("%from public.lock_live_case_parents%", 3, "all three hearing moves queue behind both case deletions");
+        await blocker.query("rollback");
+        blockerOpen = false;
+      } else {
+        await blocker.query("select pg_advisory_lock($1,$2)", advisory);
+        advisoryHeld = true;
+        await pool.query(
+          "create or replace function " + functionName + "() returns trigger language plpgsql as $fn$ begin perform pg_advisory_xact_lock(" +
+            advisory[0] + "," + advisory[1] + "); return new; end $fn$"
+        );
+        await pool.query(
+          "create trigger " + triggerName + " before update on hearings for each row when (old.id = '" +
+            fixture.hearingA1 + "'::uuid) execute function " + functionName + "()"
+        );
+        moveA1Promise = request("/api/hearings/" + fixture.hearingA1, {
+          token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+          method: "PATCH", body: { case_id: fixture.caseB }
+        });
+        await waitForLockWait("%update hearings%", 1, "first hearing move paused after locking A and B in UUID order");
+        deleteAPromise = request("/api/cases/" + fixture.caseA, {
+          token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 1, "case A delete queued behind first move");
+        deleteBPromise = request("/api/cases/" + fixture.caseB, {
+          token: tokenA, csrf: csrfA, method: "DELETE"
+        });
+        await waitForLockWait("%update cases%deleted_at = now()%", 2, "both case deletions queued behind first move");
+        moveA2Promise = request("/api/hearings/" + fixture.hearingA2, {
+          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseB }
+        });
+        moveB1Promise = request("/api/hearings/" + fixture.hearingB1, {
+          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseA }
+        });
+        await waitForLockWait("%from public.lock_live_case_parents%", 2, "remaining hearing moves queue behind UUID-ordered case locks");
+        const unlocked = await blocker.query("select pg_advisory_unlock($1,$2) as unlocked", advisory);
+        assert.equal(unlocked.rows[0].unlocked, true, "multi-hearing barrier must release");
+        advisoryHeld = false;
+      }
+
+      const [deleteA, deleteB, moveA1, moveA2, moveB1] = await Promise.all([
+        deleteAPromise, deleteBPromise, moveA1Promise, moveA2Promise, moveB1Promise
+      ]);
+      assert.equal(deleteA.status, 204, "case A soft-delete must commit");
+      assert.equal(deleteB.status, 204, "case B soft-delete must commit");
+      const cases = (await pool.query(
+        "select id,deleted_at,next_hearing_at from cases where id=any($1::uuid[]) order by id",
+        [[fixture.caseA, fixture.caseB]]
+      )).rows;
+      assert.equal(cases.length, 2);
+      assert.ok(cases.every(row => row.deleted_at !== null), "both case tombstones must persist");
+      const hearings = (await pool.query(
+        "select id,case_id,hearing_at from hearings where id=any($1::uuid[])",
+        [[fixture.hearingA1, fixture.hearingA2, fixture.hearingB1]]
+      )).rows;
+      const rowA1 = hearings.find(row => row.id === fixture.hearingA1);
+      const rowA2 = hearings.find(row => row.id === fixture.hearingA2);
+      const rowB1 = hearings.find(row => row.id === fixture.hearingB1);
+      assert.deepEqual(
+        [rowA1.hearing_at.getTime(), rowA2.hearing_at.getTime(), rowB1.hearing_at.getTime()],
+        fixture.times.map(time => time.getTime()),
+        "every hearing_at must survive concurrent moves and deletions unchanged"
+      );
+
+      if (ordering === "parent-first") {
+        for (const result of [moveA1, moveA2, moveB1]) {
+          assert.equal(result.status, 400, "each move must reject when both parent cases were deleted first");
+          assert.deepEqual(result.body, { error: "invalid_related_case" });
+        }
+        assert.deepEqual([rowA1.case_id, rowA2.case_id, rowB1.case_id],
+          [fixture.caseA, fixture.caseA, fixture.caseB], "parent-first rejection must preserve all original case_id values");
+        assert.deepEqual(cases.map(row => row.next_hearing_at?.getTime() ?? null),
+          [fixture.times[0].getTime(), fixture.times[2].getTime()],
+          "rejected moves must not mutate either case's pre-existing summary");
+        assert.equal(Number((await pool.query(
+          "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=any($2::uuid[]) and action='update'",
+          [ids.officeA, [fixture.hearingA1, fixture.hearingA2, fixture.hearingB1]]
+        )).rows[0].count), auditBefore.hearingUpdates, "all rejected moves must leave hearing audit unchanged");
+      } else {
+        assert.equal(moveA1.status, 200, "first A-to-B transfer must commit before both deletions");
+        assert.equal(moveA2.status, 400, "queued A-to-B transfer must reject once destination B is deleted");
+        assert.deepEqual(moveA2.body, { error: "invalid_related_case" });
+        assert.equal(moveB1.status, 400, "queued B-to-A transfer must reject once destination A is deleted");
+        assert.deepEqual(moveB1.body, { error: "invalid_related_case" });
+        assert.deepEqual([rowA1.case_id, rowA2.case_id, rowB1.case_id],
+          [fixture.caseB, fixture.caseA, fixture.caseB],
+          "only the first move may change case_id; rejected moves preserve their original links");
+        assert.equal(cases.find(row => row.id === fixture.caseA).next_hearing_at, null,
+          "source A summary must clear after the committed transfer");
+        const summaryB = cases.find(row => row.id === fixture.caseB).next_hearing_at;
+        assert.equal(summaryB?.getTime(), fixture.times[0].getTime(),
+          "destination B summary must include the earliest transferred hearing");
+        assert.equal(Number((await pool.query(
+          "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=any($2::uuid[]) and action='update'",
+          [ids.officeA, [fixture.hearingA1, fixture.hearingA2, fixture.hearingB1]]
+        )).rows[0].count), auditBefore.hearingUpdates + 1,
+        "only the committed transfer may leave a hearing-update audit row");
+      }
+      assert.equal(Number((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case' and entity_id=$2 and action='delete'",
+        [ids.officeA, fixture.caseA]
+      )).rows[0].count), auditBefore.caseADelete + 1, "case A deletion audit must commit exactly once");
+      assert.equal(Number((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case' and entity_id=$2 and action='delete'",
+        [ids.officeA, fixture.caseB]
+      )).rows[0].count), auditBefore.caseBDelete + 1, "case B deletion audit must commit exactly once");
+    } finally {
+      if (blockerOpen) await blocker.query("rollback").catch(() => {});
+      if (advisoryHeld) await blocker.query("select pg_advisory_unlock($1,$2)", advisory).catch(() => {});
+      blocker.release();
+      await pool.query("drop trigger if exists " + triggerName + " on hearings").catch(() => {});
+      await pool.query("drop function if exists " + functionName + "()").catch(() => {});
+    }
+  }
+
+  await runDualCaseDeleteMultiHearingRace("parent-first");
+  await runDualCaseDeleteMultiHearingRace("child-first");
+
+  // A real lock_timeout on the dedicated timeout server must roll back the
+  // hearing reassignment, both parent summaries, and its audit event together.
+  const timeoutFixture = await seedDualCaseDeleteMultiHearingRace("lock-timeout");
+  const timeoutAuditBefore = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=$2 and action='update'",
+    [ids.officeA, timeoutFixture.hearingA1]
+  )).rows[0].count);
+  const timeoutBlocker = await pool.connect();
+  let timeoutBlockerOpen = false;
+  let timeoutMovePromise;
+  try {
+    await timeoutBlocker.query("begin");
+    await timeoutBlocker.query("select id from cases where id=$1 for update", [timeoutFixture.caseA]);
+    timeoutBlockerOpen = true;
+    timeoutMovePromise = request("/api/hearings/" + timeoutFixture.hearingA1, {
+      token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf,
+      method: "PATCH", portToUse: timeoutPort, body: { case_id: timeoutFixture.caseB }
+    });
+    await waitForLockWait("%from public.lock_live_case_parents%", 1, "hearing move waits on locked parent before lock_timeout");
+    const timeoutResponse = await timeoutMovePromise;
+    assert.equal(timeoutResponse.status, 503, "parent-row lock_timeout must return retryable 503");
+    assert.deepEqual(timeoutResponse.body, { error: "database_retryable" });
+  } finally {
+    if (timeoutBlockerOpen) await timeoutBlocker.query("rollback").catch(() => {});
+    if (timeoutMovePromise) await timeoutMovePromise.catch(() => {});
+    timeoutBlocker.release();
+  }
+  const timeoutHearing = (await pool.query(
+    "select case_id,hearing_at from hearings where id=$1", [timeoutFixture.hearingA1]
+  )).rows[0];
+  assert.equal(timeoutHearing.case_id, timeoutFixture.caseA, "timed-out move must roll back hearing assignment");
+  assert.equal(timeoutHearing.hearing_at.getTime(), timeoutFixture.times[0].getTime(), "timed-out move must preserve hearing time");
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [timeoutFixture.caseA])).rows[0].next_hearing_at.getTime(),
+    timeoutFixture.times[0].getTime(), "timed-out move must preserve source summary");
+  assert.equal((await pool.query("select next_hearing_at from cases where id=$1", [timeoutFixture.caseB])).rows[0].next_hearing_at.getTime(),
+    timeoutFixture.times[2].getTime(), "timed-out move must preserve destination summary");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=$2 and action='update'",
+    [ids.officeA, timeoutFixture.hearingA1]
+  )).rows[0].count), timeoutAuditBefore, "timed-out move must leave no audit row");
+  console.log("PASS: dual case soft-delete vs multiple opposite-direction hearing moves in both lock orders; lock_timeout rolls back assignment, summaries, and audit atomically");
+
 } catch (error) {
   console.error(error);
   if (server) console.error(serverOutput);
