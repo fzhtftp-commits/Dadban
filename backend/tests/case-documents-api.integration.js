@@ -2458,34 +2458,44 @@ try {
       token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
     });
     await waitForLockWait("%update cases%deleted_at = now()%", 1, "case delete");
+    const childSettled = new Set();
+    const trackChild = (label, promise) => promise.then(response => {
+      childSettled.add(label);
+      return response;
+    });
     childPromises = [
-      request("/api/hearings", {
+      trackChild("hearing create", request("/api/hearings", {
         token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
         body: { case_id: raceTargetCase, hearing_at: new Date(Date.now()+86400000).toISOString(), hearing_type: "trial" }
-      }),
-      request("/api/actions", {
+      })),
+      trackChild("action create", request("/api/actions", {
         token: raceActors["action-create"].token, csrf: raceActors["action-create"].csrf, method: "POST",
         body: { case_id: raceTargetCase, title: "Must not attach to deleted case" }
-      }),
-      request("/api/hearings/" + raceSourceHearing, {
+      })),
+      trackChild("hearing reassignment", request("/api/hearings/" + raceSourceHearing, {
         token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "PATCH",
         body: { case_id: raceTargetCase }
-      }),
-      request("/api/actions/" + raceSourceAction, {
+      })),
+      trackChild("action reassignment", request("/api/actions/" + raceSourceAction, {
         token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf, method: "PATCH",
         body: { case_id: raceTargetCase }
-      }),
-      request("/api/case-documents", {
+      })),
+      trackChild("document create", request("/api/case-documents", {
         token: raceActors["document-create"].token, csrf: raceActors["document-create"].csrf, method: "POST",
         body: { case_id: raceTargetCase, title: "Must not attach to deleted case", document_type: "evidence", confidentiality: "normal" }
-      }),
-      request("/api/case-documents/" + raceParentDoc, {
+      })),
+      trackChild("document update", request("/api/case-documents/" + raceParentDoc, {
         token: raceActors["document-patch"].token, csrf: raceActors["document-patch"].csrf, method: "PATCH",
         idempotencyKey: "parent-case-delete-race-01",
         body: { title: "Must not update after parent deletion" }
-      })
+      }))
     ];
-    await waitForLockWait("%from cases%for update%", 6, "hearing/action/document create and reassignment");
+    // Five operations wait directly in the parent-row SELECT. The remaining
+    // metadata PATCH may be waiting earlier in its idempotency/document lock path;
+    // it must not return a response before the parent delete is allowed to commit.
+    await waitForLockWait("%from cases%for update%", 5, "hearing/action/document create and reassignment");
+    assert.equal(childSettled.size, 0,
+      "no child mutation may finish while the parent soft-delete is still blocked; early responses: " + [...childSettled].join(", "));
   } finally {
     if (caseBlockerOpen) await caseBlocker.query("rollback").catch(() => {});
     caseBlocker.release();
