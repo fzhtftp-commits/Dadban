@@ -2308,6 +2308,231 @@ try {
     [ids.officeA, interruptedFixture])).rows[0].count, 1, "retry after process interruption must write exactly one audit event");
   console.log("PASS: killing API process before COMMIT rolls back mutation and idempotency reservation; same-key retry commits one complete record and audit");
 
+  // Soft-delete and child-write races must serialize on the referenced parent.
+  // Use distinct actors so lockLiveMutationActor's session/user locks do not
+  // serialize the requests before they reach the business parent row.
+  const makeRaceActor = async (label) => {
+    const userId = crypto.randomUUID();
+    const token = crypto.randomBytes(24).toString("hex");
+    const csrf = crypto.randomBytes(24).toString("hex");
+    await pool.query(
+      "insert into users(id,office_id,full_name,email,role) values($1,$2,$3,$4,'owner')",
+      [userId, ids.officeA, "Soft-delete race " + label, userId + "@race.example.test"]
+    );
+    await pool.query(
+      "insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values($1,$2,$3,$4,now()+interval '1 hour')",
+      [userId, ids.officeA, hash(token), hash(csrf)]
+    );
+    return { userId, token, csrf };
+  };
+  const raceActors = {};
+  for (const label of ["client-delete","case-create","case-patch","case-delete","hearing-create","action-create","hearing-patch","action-patch","document-create","document-patch"]) {
+    raceActors[label] = await makeRaceActor(label);
+  }
+  const waitForLockWait = async (pattern, expectedCount, label) => {
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const waiting = await pool.query(
+        "select count(*)::int as count from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query ilike $1",
+        [pattern]
+      );
+      if (waiting.rows[0].count >= expectedCount) return;
+      await delay(20);
+    }
+    const last = await pool.query(
+      "select pid,wait_event_type,wait_event,left(query,240) as query from pg_stat_activity where datname=current_database() and wait_event_type='Lock'"
+    );
+    assert.fail(`${label}: expected ${expectedCount} lock waiter(s) for ${pattern}; current waits: ${JSON.stringify(last.rows)}`);
+  };
+  const auditCount = async (entityType, action) => Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and action=$3",
+    [ids.officeA, entityType, action]
+  )).rows[0].count);
+
+  // Client soft-delete vs case create and case reassignment to that client.
+  const raceClient = crypto.randomUUID();
+  const raceCase = crypto.randomUUID();
+  const raceClientCaseNumber = "SOFT-DELETE-CLIENT-" + crypto.randomBytes(5).toString("hex");
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Client parent race','9876501234',$3,$3)",
+    [raceClient, ids.officeA, ids.userA]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Case to reassign',$5,$5)",
+    [raceCase, ids.officeA, clientA, raceClientCaseNumber + "-SOURCE", ids.userA]
+  );
+  const clientDeleteAuditBefore = await auditCount("client", "delete");
+  const caseCreateAuditBefore = await auditCount("case", "create");
+  const caseUpdateAuditBefore = await auditCount("case", "update");
+  const clientBlocker = await pool.connect();
+  let clientBlockerOpen = false;
+  let clientDeletePromise;
+  let caseCreateRacePromise;
+  let casePatchRacePromise;
+  try {
+    await clientBlocker.query("begin");
+    await clientBlocker.query("select id from clients where id=$1 for update", [raceClient]);
+    clientBlockerOpen = true;
+    clientDeletePromise = request("/api/clients/" + raceClient, {
+      token: raceActors["client-delete"].token, csrf: raceActors["client-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update clients set deleted_at = now()%", 1, "client delete");
+    caseCreateRacePromise = request("/api/cases", {
+      token: raceActors["case-create"].token, csrf: raceActors["case-create"].csrf, method: "POST",
+      body: { client_id: raceClient, case_number: raceClientCaseNumber, title: "Must not attach to deleted client" }
+    });
+    casePatchRacePromise = request("/api/cases/" + raceCase, {
+      token: raceActors["case-patch"].token, csrf: raceActors["case-patch"].csrf, method: "PATCH",
+      body: { client_id: raceClient }
+    });
+    await waitForLockWait("%from clients%for update%", 2, "case create and case reassignment");
+  } finally {
+    if (clientBlockerOpen) await clientBlocker.query("rollback").catch(() => {});
+    clientBlocker.release();
+  }
+  const [clientDeleteRace, caseCreateRace, casePatchRace] = await Promise.all([
+    clientDeletePromise, caseCreateRacePromise, casePatchRacePromise
+  ]);
+  assert.equal(clientDeleteRace.status, 204, "client soft-delete should win the queued parent-row race");
+  assert.equal(caseCreateRace.status, 400, "case create must reject a client soft-deleted before parent lock acquisition");
+  assert.deepEqual(caseCreateRace.body, { error: "invalid_related_client" });
+  assert.equal(casePatchRace.status, 400, "case reassignment must reject a client soft-deleted before parent lock acquisition");
+  assert.deepEqual(casePatchRace.body, { error: "invalid_related_client" });
+  assert.ok((await pool.query("select deleted_at from clients where id=$1", [raceClient])).rows[0].deleted_at);
+  assert.equal((await pool.query("select client_id from cases where id=$1", [raceCase])).rows[0].client_id, clientA,
+    "failed reassignment must preserve the previous live client relationship");
+  assert.equal((await pool.query("select count(*)::int as count from cases where case_number=$1", [raceClientCaseNumber])).rows[0].count, 0,
+    "case create must not persist against a soft-deleted client");
+  assert.equal(await auditCount("client", "delete"), clientDeleteAuditBefore + 1,
+    "successful parent soft-delete must commit exactly one audit row");
+  assert.equal(await auditCount("case", "create"), caseCreateAuditBefore, "rejected case create must not emit audit");
+  assert.equal(await auditCount("case", "update"), caseUpdateAuditBefore, "rejected case reassignment must not emit audit");
+
+  // Case soft-delete vs hearing/action/document create and reassignment/update.
+  const raceCaseClient = crypto.randomUUID();
+  const raceSourceCase = crypto.randomUUID();
+  const raceTargetCase = crypto.randomUUID();
+  const raceSourceHearing = crypto.randomUUID();
+  const raceSourceAction = crypto.randomUUID();
+  const raceParentDoc = crypto.randomUUID();
+  const caseNumberPrefix = "SOFT-DELETE-CASE-" + crypto.randomBytes(5).toString("hex");
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Case parent race client','8765401234',$3,$3)",
+    [raceCaseClient, ids.officeA, ids.userA]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Source live case',$6,$6),($5,$2,$3,$7,'Target case to delete',$6,$6)",
+    [raceSourceCase, ids.officeA, raceCaseClient, caseNumberPrefix + "-SOURCE", raceTargetCase, ids.userA, caseNumberPrefix + "-TARGET"]
+  );
+  await pool.query(
+    "insert into hearings(id,office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,$3,now()+interval '9 days','hearing','scheduled',$4,$4)",
+    [raceSourceHearing, ids.officeA, raceSourceCase, ids.userA]
+  );
+  await pool.query(
+    "insert into case_actions(id,office_id,case_id,title,status,priority,created_by,updated_by) values($1,$2,$3,'Source action','todo','normal',$4,$4)",
+    [raceSourceAction, ids.officeA, raceSourceCase, ids.userA]
+  );
+  await pool.query(
+    "insert into case_documents(id,office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'Document before parent deletion','evidence','normal',$4,$4)",
+    [raceParentDoc, ids.officeA, raceTargetCase, ids.userA]
+  );
+  const caseDeleteAuditBefore = await auditCount("case", "delete");
+  const hearingCreateAuditBefore = await auditCount("hearing", "create");
+  const hearingUpdateAuditBefore = await auditCount("hearing", "update");
+  const actionCreateAuditBefore = await auditCount("case_action", "create");
+  const actionUpdateAuditBefore = await auditCount("case_action", "update");
+  const documentCreateAuditBefore = await auditCount("case_document", "create");
+  const documentUpdateAuditBefore = await auditCount("case_document", "update");
+  const documentCountBefore = Number((await pool.query("select count(*)::int as count from case_documents where office_id=$1", [ids.officeA])).rows[0].count);
+  const hearingCountBefore = Number((await pool.query("select count(*)::int as count from hearings where office_id=$1", [ids.officeA])).rows[0].count);
+  const actionCountBefore = Number((await pool.query("select count(*)::int as count from case_actions where office_id=$1", [ids.officeA])).rows[0].count);
+  const caseBlocker = await pool.connect();
+  let caseBlockerOpen = false;
+  let caseDeletePromise;
+  let childPromises = [];
+  try {
+    await caseBlocker.query("begin");
+    await caseBlocker.query("select id from cases where id=$1 for update", [raceTargetCase]);
+    caseBlockerOpen = true;
+    caseDeletePromise = request("/api/cases/" + raceTargetCase, {
+      token: raceActors["case-delete"].token, csrf: raceActors["case-delete"].csrf, method: "DELETE"
+    });
+    await waitForLockWait("%update cases set deleted_at = now()%", 1, "case delete");
+    childPromises = [
+      request("/api/hearings", {
+        token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
+        body: { case_id: raceTargetCase, hearing_at: new Date(Date.now()+86400000).toISOString(), hearing_type: "trial" }
+      }),
+      request("/api/actions", {
+        token: raceActors["action-create"].token, csrf: raceActors["action-create"].csrf, method: "POST",
+        body: { case_id: raceTargetCase, title: "Must not attach to deleted case" }
+      }),
+      request("/api/hearings/" + raceSourceHearing, {
+        token: raceActors["hearing-patch"].token, csrf: raceActors["hearing-patch"].csrf, method: "PATCH",
+        body: { case_id: raceTargetCase }
+      }),
+      request("/api/actions/" + raceSourceAction, {
+        token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf, method: "PATCH",
+        body: { case_id: raceTargetCase }
+      }),
+      request("/api/case-documents", {
+        token: raceActors["document-create"].token, csrf: raceActors["document-create"].csrf, method: "POST",
+        body: { case_id: raceTargetCase, title: "Must not attach to deleted case", document_type: "evidence", confidentiality: "normal" }
+      }),
+      request("/api/case-documents/" + raceParentDoc, {
+        token: raceActors["document-patch"].token, csrf: raceActors["document-patch"].csrf, method: "PATCH",
+        idempotencyKey: "parent-case-delete-race-01",
+        body: { title: "Must not update after parent deletion" }
+      })
+    ];
+    await waitForLockWait("%from cases%for update%", 6, "hearing/action/document create and reassignment");
+  } finally {
+    if (caseBlockerOpen) await caseBlocker.query("rollback").catch(() => {});
+    caseBlocker.release();
+  }
+  const [caseDeleteRace, hearingCreateRace, actionCreateRace, hearingPatchRace, actionPatchRace, documentCreateRace, documentPatchRace] =
+    await Promise.all([caseDeletePromise, ...childPromises]);
+  assert.equal(caseDeleteRace.status, 204, "case soft-delete should win the queued parent-row race");
+  for (const [label, response, expectedError] of [
+    ["hearing create", hearingCreateRace, "invalid_related_case"],
+    ["action create", actionCreateRace, "invalid_related_case"],
+    ["hearing reassignment", hearingPatchRace, "invalid_related_case"],
+    ["action reassignment", actionPatchRace, "invalid_related_case"],
+    ["document create", documentCreateRace, "invalid_related_case"]
+  ]) {
+    assert.equal(response.status, 400, label + " must reject a soft-deleted parent case");
+    assert.deepEqual(response.body, { error: expectedError }, label + " response must remain sanitized");
+  }
+  assert.equal(documentPatchRace.status, 404, "document PATCH must reject a soft-deleted parent case");
+  assert.deepEqual(documentPatchRace.body, { error: "document_not_found" });
+  assert.ok((await pool.query("select deleted_at from cases where id=$1", [raceTargetCase])).rows[0].deleted_at);
+  assert.equal((await pool.query("select count(*)::int as count from hearings where office_id=$1", [ids.officeA])).rows[0].count, hearingCountBefore,
+    "hearing create must not persist against a soft-deleted case");
+  assert.equal((await pool.query("select count(*)::int as count from case_actions where office_id=$1", [ids.officeA])).rows[0].count, actionCountBefore,
+    "action create must not persist against a soft-deleted case");
+  assert.equal((await pool.query("select case_id from hearings where id=$1", [raceSourceHearing])).rows[0].case_id, raceSourceCase,
+    "failed hearing reassignment must preserve its original parent");
+  assert.equal((await pool.query("select case_id from case_actions where id=$1", [raceSourceAction])).rows[0].case_id, raceSourceCase,
+    "failed action reassignment must preserve its original parent");
+  const docAfterParentRace = await pool.query("select title from case_documents where id=$1", [raceParentDoc]);
+  assert.equal(docAfterParentRace.rows[0].title, "Document before parent deletion",
+    "document metadata must not change after its parent case is soft-deleted");
+  assert.equal((await pool.query("select count(*)::int as count from case_documents where office_id=$1", [ids.officeA])).rows[0].count, documentCountBefore,
+    "document create must not persist against a soft-deleted case");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, raceActors["document-patch"].userId, "parent-case-delete-race-01"])).rows[0].count, 0,
+    "rejected document update must roll back its idempotency reservation");
+  assert.equal(await auditCount("case", "delete"), caseDeleteAuditBefore + 1,
+    "case soft-delete must commit exactly one audit row");
+  assert.equal(await auditCount("hearing", "create"), hearingCreateAuditBefore, "rejected hearing create must not emit audit");
+  assert.equal(await auditCount("hearing", "update"), hearingUpdateAuditBefore, "rejected hearing reassignment must not emit audit");
+  assert.equal(await auditCount("case_action", "create"), actionCreateAuditBefore, "rejected action create must not emit audit");
+  assert.equal(await auditCount("case_action", "update"), actionUpdateAuditBefore, "rejected action reassignment must not emit audit");
+  assert.equal(await auditCount("case_document", "create"), documentCreateAuditBefore, "rejected document create must not emit audit");
+  assert.equal(await auditCount("case_document", "update"), documentUpdateAuditBefore, "rejected document update must not emit audit");
+  console.log("PASS: soft-delete parent locks serialize client/case child writes; rejected writes leave no child, idempotency, or audit residue");
+
+
 
 
 } catch (error) {
