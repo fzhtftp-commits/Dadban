@@ -34,6 +34,8 @@ const pool = databaseUrl
       max: 10,
       connectionTimeoutMillis: 10000,
       statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 15000),
+      // Bound row/table lock waits separately from total statement execution time.
+      options: `-c lock_timeout=${Number(process.env.DB_LOCK_TIMEOUT_MS || 5000)}`,
       ssl: databaseUrl.includes("localhost")
         ? false
         : { ca: supabaseCa, rejectUnauthorized: true }
