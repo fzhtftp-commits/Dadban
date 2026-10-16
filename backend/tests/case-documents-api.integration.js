@@ -1547,6 +1547,74 @@ try {
     "recovered client creation must produce exactly one audit event");
   console.log("PASS: client create actor-lock timeout rolls back and recovers with one business row and one audit event");
 
+  // Opposite-direction hearing moves used to update the old case summary before
+  // the new one. Concurrent A→B and B→A requests could therefore hold A/B in
+  // opposite order and deadlock. The trigger creates a real overlap in PostgreSQL.
+  const lockOrderCaseA = (await pool.query(
+    "insert into cases(office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,'LOCK-ORDER-A','Lock order case A',$3,$3) returning id",
+    [ids.officeA, clientA, ids.userA]
+  )).rows[0].id;
+  const lockOrderCaseB = (await pool.query(
+    "insert into cases(office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,'LOCK-ORDER-B','Lock order case B',$3,$3) returning id",
+    [ids.officeA, clientA, ids.userA]
+  )).rows[0].id;
+  const lockOrderHearingA = (await pool.query(
+    "insert into hearings(office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,now()+interval '2 days','trial','scheduled',$3,$3) returning id",
+    [ids.officeA, lockOrderCaseA, ids.userA]
+  )).rows[0].id;
+  const lockOrderHearingB = (await pool.query(
+    "insert into hearings(office_id,case_id,hearing_at,hearing_type,status,created_by,updated_by) values($1,$2,now()+interval '3 days','trial','scheduled',$3,$3) returning id",
+    [ids.officeA, lockOrderCaseB, ids.userA]
+  )).rows[0].id;
+  await pool.query(`
+    create or replace function pause_lock_order_case_summary() returns trigger language plpgsql as $fn$
+    begin
+      if new.case_number like 'LOCK-ORDER-%' then perform pg_sleep(0.25); end if;
+      return new;
+    end;
+    $fn$;
+    create trigger pause_lock_order_case_summary_trigger before update on cases
+      for each row execute function pause_lock_order_case_summary();
+  `);
+  try {
+    const moveAtoB = request("/api/hearings/" + lockOrderHearingA, {
+      token: tokenA, csrf: csrfA, method: "PATCH",
+      body: { case_id: lockOrderCaseB }
+    });
+    const moveBtoA = request("/api/hearings/" + lockOrderHearingB, {
+      token: tokenA, csrf: csrfA, method: "PATCH",
+      body: { case_id: lockOrderCaseA }
+    });
+    const [moveAResult, moveBResult] = await Promise.all([moveAtoB, moveBtoA]);
+    assert.equal(moveAResult.status, 200, "A→B hearing move must complete without deadlock");
+    assert.equal(moveBResult.status, 200, "B→A hearing move must complete without deadlock");
+    const finalHearings = await pool.query("select id,case_id from hearings where id=any($1::uuid[])", [[lockOrderHearingA, lockOrderHearingB]]);
+    assert.equal(finalHearings.rows.find(row => row.id === lockOrderHearingA).case_id, lockOrderCaseB);
+    assert.equal(finalHearings.rows.find(row => row.id === lockOrderHearingB).case_id, lockOrderCaseA);
+    const summaryState = await pool.query(`
+      select c.id,c.next_hearing_at,
+        (select min(h.hearing_at) from hearings h where h.office_id=c.office_id and h.case_id=c.id
+          and h.deleted_at is null and h.status in ('scheduled','postponed') and h.hearing_at>=now()) as expected
+      from cases c where c.id=any($1::uuid[]) order by c.id
+    `, [[lockOrderCaseA, lockOrderCaseB]]);
+    assert.equal(summaryState.rowCount, 2);
+    for (const row of summaryState.rows) {
+      assert.equal(row.next_hearing_at?.toISOString(), row.expected?.toISOString(),
+        "case summary must reflect the final serialized hearing assignment");
+    }
+    for (const hearingId of [lockOrderHearingA, lockOrderHearingB]) {
+      assert.equal((await pool.query(
+        "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='hearing' and entity_id=$2 and action='update'",
+        [ids.officeA, hearingId]
+      )).rows[0].count, 1, "each committed hearing move must emit one audit event");
+    }
+  } finally {
+    await pool.query("drop trigger if exists pause_lock_order_case_summary_trigger on cases").catch(() => {});
+    await pool.query("drop function if exists pause_lock_order_case_summary()").catch(() => {});
+  }
+  console.log("PASS: concurrent opposite-direction hearing moves use deterministic case-row lock order without deadlock");
+
+
 
   timeoutServer.kill("SIGTERM");
   timeoutServer = null;
