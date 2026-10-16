@@ -1514,7 +1514,10 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     const previousCaseId = current.rows[0].case_id;
     const nextCaseId = data.case_id ?? previousCaseId;
     const lockedCases = await lockLiveCases(client, req.auth.officeId, [previousCaseId, nextCaseId]);
-    if (!lockedCases.some(row => row.id === nextCaseId)) {
+    if (!lockedCases.some(row => row.id === previousCaseId) ||
+        !lockedCases.some(row => row.id === nextCaseId)) {
+      // A child attached to a soft-deleted case/client is hidden and must not
+      // be mutated merely because PATCH attempts to move it to a live case.
       await client.query("rollback");
       return res.status(400).json({ error: "invalid_related_case" });
     }
@@ -1756,12 +1759,14 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
       await client.query("rollback");
       return res.status(404).json({ error: "action_not_found" });
     }
-    const nextCaseId = data.case_id ?? current.rows[0].case_id;
+    const previousCaseId = current.rows[0].case_id;
+    const nextCaseId = data.case_id ?? previousCaseId;
     const related = await client.query(
-      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
-      [nextCaseId, req.auth.officeId]
+      "select id from public.lock_live_case_parents($1,$2::uuid[])",
+      [req.auth.officeId, [...new Set([previousCaseId, nextCaseId])]]
     );
-    if (!related.rowCount) {
+    if (!related.rows.some(row => row.id === previousCaseId) ||
+        !related.rows.some(row => row.id === nextCaseId)) {
       await client.query("rollback");
       return res.status(400).json({ error: "invalid_related_case" });
     }
