@@ -1297,19 +1297,14 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
       return res.status(actor.status).json({ error: actor.error });
     }
     const currentCase = await client.query(
-      "select id, client_id from public.lock_live_case_client($1,$2)",
-      [id.data, req.auth.officeId]
+      "select id, old_client_id, target_client_id, parents_live from public.lock_live_case_reassignment($1,$2,$3)",
+      [id.data, req.auth.officeId, data.client_id ?? null]
     );
     if (!currentCase.rowCount) {
       await client.query("rollback");
       return res.status(404).json({ error: "case_not_found" });
     }
-    const relatedClientId = data.client_id ?? currentCase.rows[0].client_id;
-    const owner = await client.query(
-      "select id from public.lock_live_client_parent($1,$2)",
-      [relatedClientId, req.auth.officeId]
-    );
-    if (!owner.rowCount) {
+    if (!currentCase.rows[0].parents_live) {
       await client.query("rollback");
       return res.status(400).json({ error: "invalid_related_client" });
     }
