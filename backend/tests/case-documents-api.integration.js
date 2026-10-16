@@ -2385,7 +2385,7 @@ try {
       token: raceActors["case-patch"].token, csrf: raceActors["case-patch"].csrf, method: "PATCH",
       body: { client_id: raceClient }
     });
-    await waitForLockWait("%from clients%for update%", 2, "case create and case reassignment");
+    await waitForLockWait("%from public.lock_live_client_parent%", 2, "case create and case reassignment");
   } finally {
     if (clientBlockerOpen) await clientBlocker.query("rollback").catch(() => {});
     clientBlocker.release();
@@ -2494,7 +2494,7 @@ try {
     // Five operations wait directly in the parent-row SELECT. The remaining
     // metadata PATCH may be waiting earlier in its idempotency/document lock path;
     // it must not return a response before the parent delete is allowed to commit.
-    await waitForLockWait("%from cases%for update%", 5, "hearing/action/document create and reassignment");
+    await waitForLockWait("%from public.lock_live_case_parents%", 5, "hearing/action/document create and reassignment");
     assert.equal(childSettled.size, 0,
       "no child mutation may finish while the parent soft-delete is still blocked; early responses: " + [...childSettled].join(", "));
   } finally {
