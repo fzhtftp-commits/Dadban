@@ -1580,7 +1580,7 @@ try {
     await waitForBlockedPatchCount(2);
     // Both API transactions have started before this marker while their row-lock query is blocked.
     // created_at based on transaction_timestamp()/now() would predate this marker.
-    const lockReleaseMarker=(await pool.query("select clock_timestamp() as released_at")).rows[0].released_at;
+    const lockReleaseMarkerUs=(await pool.query("select floor(extract(epoch from clock_timestamp()) * 1000000)::bigint::text as released_at_us")).rows[0].released_at_us;
     await classificationBlocker.query("commit");
     const [firstClassResult,secondClassResult]=await Promise.all([firstClassPatch,secondClassPatch]);
     assert.equal(firstClassResult.status,200,"first queued classification PATCH must succeed");
@@ -1590,7 +1590,7 @@ try {
     const classificationState=await pool.query("select confidentiality from case_documents where id=$1",[concurrentClassId]);
     assert.equal(classificationState.rows[0].confidentiality,"restricted","final state must match the second serialized PATCH");
     const classificationEvents=await pool.query(
-      "select metadata,created_at from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' and metadata ? 'confidentiality_change' order by created_at asc",
+      "select metadata,created_at,floor(extract(epoch from created_at) * 1000000)::bigint::text as created_at_us from audit_logs where entity_type='case_document' and entity_id=$1 and action='update' and metadata ? 'confidentiality_change' order by created_at asc",
       [concurrentClassId]
     );
     assert.equal(classificationEvents.rowCount,2,"both committed classification changes must have exactly one audit event each");
@@ -1600,8 +1600,8 @@ try {
     ],"concurrent audit events must form the actual serialized from→to chain");
     assert.ok(new Date(classificationEvents.rows[0].created_at)<new Date(classificationEvents.rows[1].created_at),
       "audit timestamps must follow the serialized classification order, not transaction start time");
-    assert.ok(classificationEvents.rows.every(row=>new Date(row.created_at)>new Date(lockReleaseMarker)),
-      "audit timestamps must record event insertion after the lock releases, not earlier transaction start time");
+    assert.ok(classificationEvents.rows.every(row=>BigInt(row.created_at_us)>BigInt(lockReleaseMarkerUs)),
+      "audit timestamps must record event insertion after the lock releases, not earlier transaction start time (microsecond precision)");
     console.log("PASS: concurrent confidentiality PATCHes serialize and preserve audit transition/timestamp order");
   } finally {
     await classificationBlocker.query("rollback").catch(()=>{});
