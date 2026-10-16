@@ -156,7 +156,6 @@ async function raceMutation(label, sql, expected) {
     try { await locker.query("ROLLBACK"); } catch {}
     mutator.release();
     locker.release();
-    await admin.query("SELECT pg_stat_reset()").catch(() => {});
   }
 }
 
@@ -169,12 +168,12 @@ try {
   );
   await raceMutation(
     "role change",
-    "UPDATE actor_lock_test.users SET role='viewer' WHERE id=$2",
+    "UPDATE actor_lock_test.users SET role='viewer' WHERE id=$2 AND $1::uuid IS NOT NULL",
     { valid: true, role: "viewer" }
   );
   await raceMutation(
     "user deactivation",
-    "UPDATE actor_lock_test.users SET is_active=false WHERE id=$2",
+    "UPDATE actor_lock_test.users SET is_active=false WHERE id=$2 AND $1::uuid IS NOT NULL",
     { valid: false, role: "owner" }
   );
   const totals = await admin.query(`
