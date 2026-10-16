@@ -4068,7 +4068,7 @@ try {
         });
         await waitForLockWait("%update cases%deleted_at = now()%", 1, "first case DELETE waits on UUID-ordered blocker");
         deleteBPromise = request("/api/cases/" + fixture.caseB, {
-          token: tokenA, csrf: csrfA, method: "DELETE"
+          token: raceActors["case-patch"].token, csrf: raceActors["case-patch"].csrf, method: "DELETE"
         });
         await waitForLockWait("%update cases%deleted_at = now()%", 2, "both case DELETE requests are queued");
         moveA1Promise = request("/api/hearings/" + fixture.hearingA1, {
@@ -4076,10 +4076,12 @@ try {
           method: "PATCH", body: { case_id: fixture.caseB }
         });
         moveA2Promise = request("/api/hearings/" + fixture.hearingA2, {
-          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseB }
+          token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf,
+          method: "PATCH", body: { case_id: fixture.caseB }
         });
         moveB1Promise = request("/api/hearings/" + fixture.hearingB1, {
-          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseA }
+          token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf,
+          method: "PATCH", body: { case_id: fixture.caseA }
         });
         await waitForLockWait("%from public.lock_live_case_parents%", 3, "all three hearing moves queue behind both case deletions");
         await blocker.query("rollback");
@@ -4105,14 +4107,16 @@ try {
         });
         await waitForLockWait("%update cases%deleted_at = now()%", 1, "case A delete queued behind first move");
         deleteBPromise = request("/api/cases/" + fixture.caseB, {
-          token: tokenA, csrf: csrfA, method: "DELETE"
+          token: raceActors["case-patch"].token, csrf: raceActors["case-patch"].csrf, method: "DELETE"
         });
         await waitForLockWait("%update cases%deleted_at = now()%", 2, "both case deletions queued behind first move");
         moveA2Promise = request("/api/hearings/" + fixture.hearingA2, {
-          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseB }
+          token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf,
+          method: "PATCH", body: { case_id: fixture.caseB }
         });
         moveB1Promise = request("/api/hearings/" + fixture.hearingB1, {
-          token: tokenA, csrf: csrfA, method: "PATCH", body: { case_id: fixture.caseA }
+          token: raceActors["action-patch"].token, csrf: raceActors["action-patch"].csrf,
+          method: "PATCH", body: { case_id: fixture.caseA }
         });
         await waitForLockWait("%from public.lock_live_case_parents%", 2, "remaining hearing moves queue behind UUID-ordered case locks");
         const unlocked = await blocker.query("select pg_advisory_unlock($1,$2) as unlocked", advisory);
