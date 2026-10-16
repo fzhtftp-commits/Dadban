@@ -93,8 +93,10 @@ try {
     );
     CREATE TABLE public.cases (
       id uuid PRIMARY KEY, office_id uuid NOT NULL REFERENCES public.offices(id),
+      client_id uuid NOT NULL,
       case_number text NOT NULL, title text NOT NULL, deleted_at timestamptz,
-      UNIQUE (id, office_id)
+      UNIQUE (id, office_id),
+      FOREIGN KEY (client_id, office_id) REFERENCES public.clients(id, office_id) ON DELETE RESTRICT
     );
     CREATE TABLE public.auth_sessions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL,
@@ -139,7 +141,7 @@ try {
     REVOKE ALL ON public.users, public.clients, public.cases, public.auth_sessions, public.audit_logs,
       public.case_documents, public.case_document_mutation_idempotency
       FROM dadban_document_runtime_ci;
-    GRANT SELECT ON public.users, public.cases, public.auth_sessions TO dadban_document_runtime_ci;
+    GRANT SELECT ON public.users, public.clients, public.cases, public.auth_sessions TO dadban_document_runtime_ci;
     -- PostgreSQL requires UPDATE on at least one column of a FOR UPDATE target.
     -- Keep the permission column-scoped; do not grant table-wide UPDATE on users.
     GRANT UPDATE (last_seen_at, revoked_at) ON public.auth_sessions TO dadban_document_runtime_ci;
@@ -155,7 +157,8 @@ try {
 
   await pool.query("INSERT INTO offices(id,name) VALUES($1,'Runtime Role Test Office')", [officeId]);
   await pool.query("INSERT INTO users(id,office_id,full_name,email,role) VALUES($1,$2,'Runtime Role Owner','runtime-role@example.test','owner')", [userId,officeId]);
-  await pool.query("INSERT INTO cases(id,office_id,case_number,title) VALUES($1,$2,'RT-001','Runtime Role Test Case')", [caseId,officeId]);
+  await pool.query("INSERT INTO clients(id,office_id,full_name) VALUES('cccccccc-cccc-4ccc-8ccc-cccccccccc03',$1,'Runtime Role Client')", [officeId]);
+  await pool.query("INSERT INTO cases(id,office_id,client_id,case_number,title) VALUES($1,$2,'cccccccc-cccc-4ccc-8ccc-cccccccccc03','RT-001','Runtime Role Test Case')", [caseId,officeId]);
   await pool.query(
     "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')",
     [userId,officeId,hash(token),hash(csrf)]
