@@ -129,7 +129,8 @@ try {
     "../migrations/004_case_documents_metadata.sql",
     "../migrations/006_case_document_mutation_idempotency.sql",
     "../migrations/007_case_document_mutation_tombstones.sql",
-    "../migrations/008_security_definer_document_actor_lock.sql"
+    "../migrations/008_security_definer_document_actor_lock.sql",
+    "../migrations/009_case_reassignment_parent_locks.sql"
   ]) {
     await pool.query(await readFile(new URL(path, import.meta.url), "utf8"));
   }
@@ -179,6 +180,7 @@ try {
       has_function_privilege('dadban_document_runtime_ci','public.lock_live_client_parent(uuid,uuid)','EXECUTE') AS can_lock_client,
       has_function_privilege('dadban_document_runtime_ci','public.lock_live_case_client(uuid,uuid)','EXECUTE') AS can_lock_case_client,
       has_function_privilege('dadban_document_runtime_ci','public.lock_live_case_parents(uuid,uuid[])','EXECUTE') AS can_lock_cases,
+       has_function_privilege('dadban_document_runtime_ci','public.lock_live_case_reassignment(uuid,uuid,uuid)','EXECUTE') AS can_lock_reassignment,
       has_column_privilege('dadban_document_runtime_ci','public.users','full_name','UPDATE') AS can_update_full_name,
       has_column_privilege('dadban_document_runtime_ci','public.users','role','UPDATE') AS can_update_user_role,
       has_column_privilege('dadban_document_runtime_ci','public.users','is_active','UPDATE') AS can_update_user_active,
@@ -199,7 +201,7 @@ try {
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
   assert.deepEqual(runtimeIdentity.rows[0], { role:"dadban_document_runtime_ci", rolsuper:false, rolcreatedb:false, rolcreaterole:false });
   assert.equal(role.can_update_full_name, false, "runtime must not have UPDATE(full_name); row locking is delegated to the SECURITY DEFINER helper");
-  for (const attr of ["can_lock_client","can_lock_case_client","can_lock_cases"]) {
+  for (const attr of ["can_lock_client","can_lock_case_client","can_lock_cases","can_lock_reassignment"]) {
     assert.equal(role[attr], true, `runtime must have EXECUTE on parent lock helper ${attr}`);
   }
   const actorFunctionState = await pool.query(`
@@ -243,7 +245,7 @@ try {
     )
     ORDER BY p.proname
   `);
-  assert.equal(parentFunctionState.rowCount, 3, "all three parent lock helpers must exist");
+  assert.equal(parentFunctionState.rowCount, 4, "all four parent lock helpers must exist");
   for (const fn of parentFunctionState.rows) {
     assert.equal(fn.function_owner, "dadban_actor_lock_owner");
     assert.equal(fn.security_definer, true);
