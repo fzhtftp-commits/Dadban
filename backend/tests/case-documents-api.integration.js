@@ -2497,11 +2497,15 @@ try {
   const clientDeleteAuditBefore = await auditCount("client", "delete");
   const caseCreateAuditBefore = await auditCount("case", "create");
   const caseUpdateAuditBefore = await auditCount("case", "update");
+  const hearingCreateAuditBeforeClientRace = await auditCount("hearing", "create");
+  const actionCreateAuditBeforeClientRace = await auditCount("case_action", "create");
   const clientBlocker = await pool.connect();
   let clientBlockerOpen = false;
   let clientDeletePromise;
   let caseCreateRacePromise;
   let casePatchRacePromise;
+  let hearingCreateRacePromise;
+  let actionCreateRacePromise;
   try {
     await clientBlocker.query("begin");
     await clientBlocker.query("select id from clients where id=$1 for update", [raceClient]);
@@ -2520,18 +2524,31 @@ try {
     });
     await waitForLockWait("%from public.lock_live_client_parent%", 1, "case create waiting for deleted target client");
     await waitForLockWait("%from public.lock_live_case_reassignment%", 1, "case reassignment waiting for deleted target client");
+    hearingCreateRacePromise = request("/api/hearings", {
+      token: raceActors["hearing-create"].token, csrf: raceActors["hearing-create"].csrf, method: "POST",
+      body: { case_id: hiddenCase, hearing_at: new Date(Date.now() + 2 * 86400000).toISOString(), hearing_type: "trial", notes: "Must not create hearing after client delete" }
+    });
+    actionCreateRacePromise = request("/api/actions", {
+      token: raceActors["action-create"].token, csrf: raceActors["action-create"].csrf, method: "POST",
+      body: { case_id: hiddenCase, title: "Must not create action after client delete" }
+    });
+    await waitForLockWait("%from public.lock_live_case_parents%", 2, "hearing/action create waiting for deleted client");
   } finally {
     if (clientBlockerOpen) await clientBlocker.query("rollback").catch(() => {});
     clientBlocker.release();
   }
-  const [clientDeleteRace, caseCreateRace, casePatchRace] = await Promise.all([
-    clientDeletePromise, caseCreateRacePromise, casePatchRacePromise
+  const [clientDeleteRace, caseCreateRace, casePatchRace, hearingCreateRace, actionCreateRace] = await Promise.all([
+    clientDeletePromise, caseCreateRacePromise, casePatchRacePromise, hearingCreateRacePromise, actionCreateRacePromise
   ]);
   assert.equal(clientDeleteRace.status, 204, "client soft-delete should win the queued parent-row race");
   assert.equal(caseCreateRace.status, 400, "case create must reject a client soft-deleted before parent lock acquisition");
   assert.deepEqual(caseCreateRace.body, { error: "invalid_related_client" });
   assert.equal(casePatchRace.status, 400, "case reassignment must reject a client soft-deleted before parent lock acquisition");
   assert.deepEqual(casePatchRace.body, { error: "invalid_related_client" });
+  assert.equal(hearingCreateRace.status, 400, "hearing create must reject a case whose client was soft-deleted while waiting for parent locks");
+  assert.deepEqual(hearingCreateRace.body, { error: "invalid_related_case" });
+  assert.equal(actionCreateRace.status, 400, "action create must reject a case whose client was soft-deleted while waiting for parent locks");
+  assert.deepEqual(actionCreateRace.body, { error: "invalid_related_case" });
   assert.ok((await pool.query("select deleted_at from clients where id=$1", [raceClient])).rows[0].deleted_at);
   assert.equal((await pool.query("select client_id from cases where id=$1", [raceCase])).rows[0].client_id, clientA,
     "failed reassignment must preserve the previous live client relationship");
@@ -2541,6 +2558,13 @@ try {
     "successful parent soft-delete must commit exactly one audit row");
   assert.equal(await auditCount("case", "create"), caseCreateAuditBefore, "rejected case create must not emit audit");
   assert.equal(await auditCount("case", "update"), caseUpdateAuditBefore, "rejected case reassignment must not emit audit");
+  assert.equal(await pool.query("select count(*)::int as count from hearings where notes=$1", ["Must not create hearing after client delete"]).then(r => r.rows[0].count), 0,
+    "hearing create must not persist after its client's soft-delete");
+  assert.equal(await pool.query("select count(*)::int as count from case_actions where title=$1", ["Must not create action after client delete"]).then(r => r.rows[0].count), 0,
+    "action create must not persist after its client's soft-delete");
+  assert.equal(await auditCount("hearing", "create"), hearingCreateAuditBeforeClientRace, "rejected hearing create must not emit audit");
+  assert.equal(await auditCount("case_action", "create"), actionCreateAuditBeforeClientRace, "rejected action create must not emit audit");
+  console.log("PASS: client soft-delete serializes hearing/action creation; queued creates are rejected with no child rows or audit events");
 
   // Client soft-delete vs PATCH on hearings/actions while their source cases
   // remain live. Exercise both lock queue orders: delete first must reject child
