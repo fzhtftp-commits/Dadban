@@ -32,6 +32,16 @@ async function waitForLockWait(applicationName) {
 async function setup() {
   await admin.query(`
     DROP SCHEMA IF EXISTS actor_lock_test CASCADE;
+    DO $cleanup$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_actor_runtime_ci') THEN
+        DROP OWNED BY dadban_actor_runtime_ci;
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_actor_lock_owner_ci') THEN
+        DROP OWNED BY dadban_actor_lock_owner_ci;
+      END IF;
+    END
+    $cleanup$;
     DROP ROLE IF EXISTS dadban_actor_runtime_ci;
     DROP ROLE IF EXISTS dadban_actor_lock_owner_ci;
     CREATE ROLE dadban_actor_lock_owner_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
@@ -42,6 +52,7 @@ async function setup() {
     GRANT USAGE ON SCHEMA actor_lock_test TO dadban_actor_lock_owner_ci, dadban_actor_runtime_ci;
     CREATE TABLE actor_lock_test.users (
       id uuid PRIMARY KEY, office_id uuid NOT NULL, role text NOT NULL,
+      full_name text NOT NULL DEFAULT 'Synthetic Actor',
       is_active boolean NOT NULL DEFAULT true, deleted_at timestamptz
     );
     CREATE TABLE actor_lock_test.auth_sessions (
@@ -56,7 +67,7 @@ async function setup() {
     -- PostgreSQL requires UPDATE privilege on each FOR UPDATE target; these narrow grants
     -- belong only to the NOLOGIN function owner, never to the API runtime role.
     GRANT UPDATE (full_name) ON actor_lock_test.users TO dadban_actor_lock_owner_ci;
-  `.replace("role text NOT NULL,\n      is_active", "role text NOT NULL,\n      full_name text NOT NULL DEFAULT 'Synthetic Actor', is_active"));
+  `);
 
   await admin.query("GRANT UPDATE (revoked_at) ON actor_lock_test.auth_sessions TO dadban_actor_lock_owner_ci");
   await admin.query(`
@@ -188,6 +199,8 @@ try {
 } finally {
   await runtime.end();
   await admin.query("DROP SCHEMA IF EXISTS actor_lock_test CASCADE").catch(() => {});
+  await admin.query("DROP OWNED BY dadban_actor_runtime_ci").catch(() => {});
+  await admin.query("DROP OWNED BY dadban_actor_lock_owner_ci").catch(() => {});
   await admin.query("DROP ROLE IF EXISTS dadban_actor_runtime_ci").catch(() => {});
   await admin.query("DROP ROLE IF EXISTS dadban_actor_lock_owner_ci").catch(() => {});
   await admin.end();
