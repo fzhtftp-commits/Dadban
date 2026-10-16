@@ -35,7 +35,7 @@ CREATE FUNCTION public.lock_live_document_actor(p_session uuid, p_user uuid, p_o
 RETURNS TABLE(valid boolean, actor_role text)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE locked_role text; is_live boolean;
 BEGIN
@@ -69,9 +69,6 @@ REVOKE ALL ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) FROM PUBL
 -- different DB login must explicitly GRANT EXECUTE to that runtime role.
 DO $grants$
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres') THEN
-    GRANT EXECUTE ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) TO postgres;
-  END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime') THEN
     GRANT EXECUTE ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) TO dadban_document_runtime;
   END IF;
