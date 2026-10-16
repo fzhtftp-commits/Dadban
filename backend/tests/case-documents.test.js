@@ -56,6 +56,19 @@ test("document write transactions revalidate and lock the live session and user 
  assert.match(actorLockMigration, /must not participate in role memberships/);
  assert.doesNotMatch(actorLockMigration, /TO postgres/);
  assert.ok(actorLockMigration.includes("GRANT EXECUTE ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) TO dadban_document_runtime_ci"));
+ for (const fn of [
+   "lock_live_client_parent(uuid,uuid)",
+   "lock_live_case_client(uuid,uuid)",
+   "lock_live_case_parents(uuid,uuid[])"
+ ]) {
+   assert.ok(actorLockMigration.includes(`CREATE FUNCTION public.${fn.split("(")[0]}`), `missing SECURITY DEFINER parent lock ${fn}`);
+   assert.ok(actorLockMigration.includes(`GRANT EXECUTE ON FUNCTION public.${fn} TO dadban_document_runtime_ci`), `runtime must only execute parent lock ${fn}`);
+ }
+ assert.match(server, /public\.lock_live_client_parent\(\$1,\$2\)/);
+ assert.match(server, /public\.lock_live_case_client\(\$1,\$2\)/);
+ assert.match(server, /public\.lock_live_case_parents\(\$1,\$2::uuid\[\]\)/);
+ assert.doesNotMatch(server, /select id from clients where id = \$1 and office_id = \$2 and deleted_at is null for update/i);
+ assert.doesNotMatch(server, /select id from cases where id = \$1 and office_id = \$2 and deleted_at is null for update/i);
  assert.equal((server.match(/lockLiveDocumentActor\(c, req,/g) || []).length, 3, "create, update, and delete must revalidate actor state inside their transactions");
  assert.match(server, /rollbackSucceeded && \["40001", "40P01", "55P03", "57014"\]\.includes\(error\?\.code\)/);
  assert.match(server, /dbError\(error,rollbackSucceeded\)/);
@@ -112,7 +125,7 @@ test("every document API route enforces office-scoped access predicates", () => 
  const remove = route('app.delete("/api/case-documents/:id",', 'app.use((_req, res) =>');
  assert.match(list, /d\.office_id = \$1/);
  assert.match(detail, /d\.id=\$1 and d\.office_id=\$2/);
- assert.match(create, /cases where id=\$1 and office_id=\$2/);
+ assert.match(create, /public\.lock_live_case_parents\(\$2, ARRAY\[\$1\]::uuid\[\]\)/);
  assert.ok(update.includes('sets.join(",")') && update.includes('where id=$"+(v.length-1)+" and office_id=$"+v.length+"'), "PATCH must bind its generated SQL parameters");
  assert.match(remove, /where id=\$1 and office_id=\$2 and deleted_at is null/);
 });
