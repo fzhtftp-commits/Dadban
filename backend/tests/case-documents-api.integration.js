@@ -2953,7 +2953,7 @@ try {
     if (caseBlockerOpen) await caseBlocker.query("rollback").catch(() => {});
     caseBlocker.release();
   }
-  const [caseDeleteRace, clientDeleteHearingCreateRace, clientDeleteActionCreateRace, hearingPatchRace, actionPatchRace, documentCreateRace, documentPatchRace] =
+  const [caseDeleteRace, hearingCreateRace, actionCreateRace, hearingPatchRace, actionPatchRace, documentCreateRace, documentPatchRace] =
     await Promise.all([caseDeletePromise, ...childPromises]);
   assert.equal(caseDeleteRace.status, 204, "case soft-delete should win the queued parent-row race");
   for (const [label, response, expectedError] of [
