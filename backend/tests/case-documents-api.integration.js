@@ -90,6 +90,7 @@ try {
     drop function if exists public.lock_live_client_parent(uuid,uuid) cascade;
     drop function if exists public.lock_live_case_client(uuid,uuid) cascade;
     drop function if exists public.lock_live_case_parents(uuid,uuid[]) cascade;
+    drop function if exists public.lock_live_case_reassignment(uuid,uuid,uuid) cascade;
     drop function if exists public.prevent_case_document_idempotency_delete() cascade;
     drop function if exists public.prevent_case_document_idempotency_reopen() cascade;
     drop table if exists case_document_mutation_idempotency cascade;
