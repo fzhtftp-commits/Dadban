@@ -241,7 +241,8 @@ try {
     WHERE p.oid IN (
       'public.lock_live_client_parent(uuid,uuid)'::regprocedure,
       'public.lock_live_case_client(uuid,uuid)'::regprocedure,
-      'public.lock_live_case_parents(uuid,uuid[])'::regprocedure
+      'public.lock_live_case_parents(uuid,uuid[])'::regprocedure,
+      'public.lock_live_case_reassignment(uuid,uuid,uuid)'::regprocedure
     )
     ORDER BY p.proname
   `);
