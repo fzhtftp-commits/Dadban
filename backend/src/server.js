@@ -345,13 +345,15 @@ const requireDocumentRole = (...allowedRoles) => (req, res, next) => {
 };
 
 const lockLiveDocumentActor = async (client, req, allowedRoles) => {
-  // Lock identity rows first, then check expiry with the wall clock after any lock wait.
-  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 for update of s, u", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
-  if (!result.rowCount) return { ok: false, status: 401, error: "authentication_required" };
-  const live = await client.query("select (s.revoked_at is null and s.expires_at > clock_timestamp() and u.is_active = true and u.deleted_at is null) as valid from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
-  if (!live.rowCount || !live.rows[0].valid) return { ok: false, status: 401, error: "authentication_required" };
-  if (!allowedRoles.includes(result.rows[0].role)) return { ok: false, status: 403, error: "document_role_forbidden" };
-  return { ok: true, role: result.rows[0].role };
+  // The SECURITY DEFINER helper owns the narrow row-locking privileges; the API
+  // runtime itself does not need UPDATE on users merely to acquire FOR UPDATE locks.
+  const result = await client.query(
+    "select valid, actor_role from public.lock_live_document_actor($1,$2,$3)",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId]
+  );
+  if (!result.rowCount || !result.rows[0].valid) return { ok: false, status: 401, error: "authentication_required" };
+  if (!allowedRoles.includes(result.rows[0].actor_role)) return { ok: false, status: 403, error: "document_role_forbidden" };
+  return { ok: true, role: result.rows[0].actor_role };
 };
 
 
