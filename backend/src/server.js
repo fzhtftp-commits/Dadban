@@ -504,10 +504,7 @@ const lockLiveCases = async (client, officeId, caseIds) => {
   const uniqueIds = [...new Set(caseIds.map(String))];
   if (!uniqueIds.length) return [];
   const locked = await client.query(
-    `select id from cases
-     where office_id = $1 and id = any($2::uuid[]) and deleted_at is null
-     order by id
-     for update`,
+    "select id from public.lock_live_case_parents($1,$2::uuid[])",
     [officeId, uniqueIds]
   );
   return locked.rows;
@@ -1192,7 +1189,7 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
     }
 
     const owner = await client.query(
-      "select id from clients where id = $1 and office_id = $2 and deleted_at is null for update",
+      "select id from public.lock_live_client_parent($1,$2)",
       [data.client_id, req.auth.officeId]
     );
     if (!owner.rowCount) {
@@ -1300,7 +1297,7 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
       return res.status(actor.status).json({ error: actor.error });
     }
     const currentCase = await client.query(
-      "select client_id from cases where id = $1 and office_id = $2 and deleted_at is null for update",
+      "select id, client_id from public.lock_live_case_client($1,$2)",
       [id.data, req.auth.officeId]
     );
     if (!currentCase.rowCount) {
@@ -1309,7 +1306,7 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
     }
     const relatedClientId = data.client_id ?? currentCase.rows[0].client_id;
     const owner = await client.query(
-      "select id from clients where id = $1 and office_id = $2 and deleted_at is null for update",
+      "select id from public.lock_live_client_parent($1,$2)",
       [relatedClientId, req.auth.officeId]
     );
     if (!owner.rowCount) {
@@ -1461,7 +1458,7 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
       return res.status(actor.status).json({ error: actor.error });
     }
     const related = await client.query(
-      "select id from cases where id = $1 and office_id = $2 and deleted_at is null for update",
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
       [data.case_id, req.auth.officeId]
     );
     if (!related.rowCount) {
@@ -1677,7 +1674,7 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
       return res.status(actor.status).json({ error: actor.error });
     }
     const related = await client.query(
-      "select id from cases where id = $1 and office_id = $2 and deleted_at is null for update",
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
       [data.case_id, req.auth.officeId]
     );
     if (!related.rowCount) {
@@ -1743,7 +1740,7 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
     }
     const nextCaseId = data.case_id ?? current.rows[0].case_id;
     const related = await client.query(
-      "select id from cases where id = $1 and office_id = $2 and deleted_at is null for update",
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
       [nextCaseId, req.auth.officeId]
     );
     if (!related.rowCount) {
@@ -1892,7 +1889,7 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
    if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
    const fingerprint=hashToken(JSON.stringify(d));let c;
    try{c=await acquireClient(pool);
-     await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);if (!actor.ok) { await rollbackQuietly(c, "create actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }if (!canCreateCaseDocument(actor.role, d.confidentiality)) { await rollbackQuietly(c, "create confidentiality forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null for update",[d.case_id,req.auth.officeId]);
+     await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);if (!actor.ok) { await rollbackQuietly(c, "create actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }if (!canCreateCaseDocument(actor.role, d.confidentiality)) { await rollbackQuietly(c, "create confidentiality forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }const related=await c.query("select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",[d.case_id,req.auth.officeId]);
      if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
      const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,d.confidentiality,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
      if(!q.rowCount && idempotencyKey){
@@ -1939,7 +1936,7 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
     }
     const current=await c.query("select case_id,confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
     if(!current.rowCount||!canEditCaseDocument(actor.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
-    const liveParent=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null for update",[current.rows[0].case_id,req.auth.officeId]);
+    const liveParent=await c.query("select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",[current.rows[0].case_id,req.auth.officeId]);
     if(!liveParent.rowCount){await rollbackQuietly(c,"update document whose parent case is deleted");return documentAccessDenied(res);}
     const q=await c.query("update case_documents set "+sets.join(",")+",updated_at=now() where id=$"+(v.length-1)+" and office_id=$"+v.length+" and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",v);
     if(!q.rowCount){await rollbackQuietly(c,"update missing document");return documentAccessDenied(res);}
