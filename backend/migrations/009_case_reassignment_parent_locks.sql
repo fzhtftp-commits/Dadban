@@ -27,6 +27,25 @@ BEGIN
 END
 $owner_preflight$;
 
+-- Migration 009 independently verifies the runtime boundary before granting
+-- another SECURITY DEFINER capability, even if memberships drift after 008.
+DO $runtime_preflight$
+DECLARE runtime_role record;
+BEGIN
+  FOR runtime_role IN
+    SELECT oid, rolname FROM pg_roles
+    WHERE rolname IN ('dadban_document_runtime','dadban_document_runtime_ci')
+  LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_auth_members m
+      WHERE m.member=runtime_role.oid OR m.roleid=runtime_role.oid
+    ) THEN
+      RAISE EXCEPTION 'runtime role % must not participate in role memberships', runtime_role.rolname;
+    END IF;
+  END LOOP;
+END
+$runtime_preflight$;
+
 -- Case reassignment must lock the live case first, then both its current and
 -- requested client rows in a single stable UUID order. This prevents a case
 -- from being moved away after its old client was soft-deleted and prevents
