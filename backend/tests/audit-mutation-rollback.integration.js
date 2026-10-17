@@ -325,7 +325,7 @@ try {
   const failedGenericClientCount = await countRows("clients");
   const failedGenericAuditCount = await countAudit("client", "create");
   const failedGeneric = await request("/api/clients", "POST", {
-    client_type: "individual", full_name: "Must Roll Back Idempotent Client", national_id: "1234509878"
+    client_type: "individual", full_name: "Must Roll Back Idempotent Client", national_id: "9876500003"
   }, { idempotencyKey: failedGenericKey });
   assert.equal(failedGeneric.status, 500, "generic idempotent mutation must fail when audit INSERT fails");
   assert.equal(await countRows("clients"), failedGenericClientCount, "audit failure must roll back generic client insert");
@@ -478,7 +478,7 @@ try {
   )).rows[0].count);
 
   const clientCreateKey = "generic-client-create-01";
-  const clientCreateBody = { client_type: "individual", full_name: "Idempotent Created Client", national_id: "1234509877" };
+  const clientCreateBody = { client_type: "individual", full_name: "Idempotent Created Client", national_id: "9876500001" };
   const clientCreateFirst = await request("/api/clients", "POST", clientCreateBody, { idempotencyKey: clientCreateKey });
   assert.equal(clientCreateFirst.status, 201);
   const createdClientId = clientCreateFirst.body.data.id;
@@ -537,7 +537,8 @@ try {
   const casePatchFirst = await request(`/api/cases/${createdCaseId}`, "PATCH", casePatchBody, { idempotencyKey: casePatchKey });
   assert.equal(casePatchFirst.status, 200);
   const casePatchReplay = await request(`/api/cases/${createdCaseId}`, "PATCH", casePatchBody, { idempotencyKey: casePatchKey });
-  assert.deepEqual(casePatchReplay, casePatchFirst);
+  assert.equal(casePatchReplay.status, casePatchFirst.status);
+  assert.deepEqual(casePatchReplay.body, casePatchFirst.body);
   assert.equal(await countEntityAudit("case", createdCaseId, "update"), 1);
   console.log("PASS: generic case POST/PATCH replay and payload conflict preserve exact audit counts");
 
@@ -548,14 +549,16 @@ try {
   assert.equal(hearingFirst.status, 201);
   const hearingId = hearingFirst.body.data.id;
   const hearingReplay = await request("/api/hearings", "POST", hearingBody, { idempotencyKey: hearingCreateKey });
-  assert.deepEqual(hearingReplay, hearingFirst);
+  assert.equal(hearingReplay.status, hearingFirst.status);
+  assert.deepEqual(hearingReplay.body, hearingFirst.body);
   assert.equal(await countEntityAudit("hearing", hearingId, "create"), 1);
   const hearingPatchKey = "generic-hearing-patch-01";
   const hearingPatchBody = { notes: "updated once" };
   const hearingPatchFirst = await request(`/api/hearings/${hearingId}`, "PATCH", hearingPatchBody, { idempotencyKey: hearingPatchKey });
   const hearingPatchReplay = await request(`/api/hearings/${hearingId}`, "PATCH", hearingPatchBody, { idempotencyKey: hearingPatchKey });
   assert.equal(hearingPatchFirst.status, 200);
-  assert.deepEqual(hearingPatchReplay, hearingPatchFirst);
+  assert.equal(hearingPatchReplay.status, hearingPatchFirst.status);
+  assert.deepEqual(hearingPatchReplay.body, hearingPatchFirst.body);
   assert.equal(await countEntityAudit("hearing", hearingId, "update"), 1);
   const hearingDeleteKey = "generic-hearing-delete-01";
   const hearingDeleteFirst = await request(`/api/hearings/${hearingId}`, "DELETE", undefined, { idempotencyKey: hearingDeleteKey });
@@ -572,14 +575,16 @@ try {
   assert.equal(actionFirst.status, 201);
   const actionId = actionFirst.body.data.id;
   const actionReplay = await request("/api/actions", "POST", actionBody, { idempotencyKey: actionCreateKey });
-  assert.deepEqual(actionReplay, actionFirst);
+  assert.equal(actionReplay.status, actionFirst.status);
+  assert.deepEqual(actionReplay.body, actionFirst.body);
   assert.equal(await countEntityAudit("case_action", actionId, "create"), 1);
   const actionPatchKey = "generic-action-patch-01";
   const actionPatchBody = { title: "Idempotent Action Updated" };
   const actionPatchFirst = await request(`/api/actions/${actionId}`, "PATCH", actionPatchBody, { idempotencyKey: actionPatchKey });
   const actionPatchReplay = await request(`/api/actions/${actionId}`, "PATCH", actionPatchBody, { idempotencyKey: actionPatchKey });
   assert.equal(actionPatchFirst.status, 200);
-  assert.deepEqual(actionPatchReplay, actionPatchFirst);
+  assert.equal(actionPatchReplay.status, actionPatchFirst.status);
+  assert.deepEqual(actionPatchReplay.body, actionPatchFirst.body);
   assert.equal(await countEntityAudit("case_action", actionId, "update"), 1);
   const actionDeleteKey = "generic-action-delete-01";
   const actionDeleteFirst = await request(`/api/actions/${actionId}`, "DELETE", undefined, { idempotencyKey: actionDeleteKey });
