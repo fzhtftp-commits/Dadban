@@ -197,8 +197,18 @@ try {
   ]) {
     const migrationSql = await readFile(new URL(path, import.meta.url), "utf8");
     if (path === "../migrations/014_security_definer_acl_reconciliation.sql") {
-      await pool.query("CREATE ROLE dadban_actor_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
+      const hmacProxyRole = "dadban_hmac_acl_proxy_ci";
+      const hmacProxyPreflight = await pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [hmacProxyRole]);
+      assert.equal(hmacProxyPreflight.rowCount, 0, "refusing to reuse pre-existing HMAC ACL proxy role");
+      await pool.query("CREATE ROLE dadban_actor_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT");
+      await pool.query("CREATE ROLE " + hmacProxyRole + " NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT");
       await pool.query("GRANT CREATE ON SCHEMA public TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
+      // Seed stale direct table/column grants, grant options, and a transitive
+      // role-membership path before migration 014 reconciles the private key.
+      await pool.query("GRANT SELECT ON TABLE dadban_private.api_mutation_idempotency_hmac_key TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
+      await pool.query("GRANT UPDATE (secret) ON TABLE dadban_private.api_mutation_idempotency_hmac_key TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
+      await pool.query("GRANT SELECT (secret) ON TABLE dadban_private.api_mutation_idempotency_hmac_key TO " + hmacProxyRole + " WITH GRANT OPTION");
+      await pool.query("GRANT " + hmacProxyRole + " TO dadban_actor_acl_probe_ci");
       const aclSignatures = [
         "public.lock_live_document_actor(uuid,uuid,uuid)","public.lock_live_client_parent(uuid,uuid)",
         "public.lock_live_case_client(uuid,uuid)","public.lock_live_case_parents(uuid,uuid[])",
@@ -359,10 +369,58 @@ try {
           ["dadban_actor_acl_probe_ci"]);
         assert.equal(schemaCreate.rows[0].effective_create,false,"unapproved role must not retain effective CREATE on public");
         assert.equal(schemaCreate.rows[0].explicit_create,false,"stale explicit CREATE ACL must be removed from public");
+
+        const hmacAcl = await pool.query(`
+          SELECT pg_get_userbyid(c.relowner) AS table_owner,
+            has_table_privilege('dadban_actor_acl_probe_ci',c.oid,'SELECT') AS probe_table_select,
+            has_table_privilege('dadban_actor_acl_probe_ci',c.oid,'INSERT') AS probe_table_insert,
+            has_column_privilege('dadban_actor_acl_probe_ci',c.oid,'secret','SELECT') AS probe_secret_select,
+            has_column_privilege('dadban_actor_acl_probe_ci',c.oid,'secret','UPDATE') AS probe_secret_update,
+            has_column_privilege('dadban_hmac_acl_proxy_ci',c.oid,'secret','SELECT') AS proxy_secret_select,
+            has_table_privilege('dadban_api_idempotency_owner',c.oid,'SELECT') AS definer_select,
+            EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+              WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_actor_acl_probe_ci')) AS probe_table_acl,
+            EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+              WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_hmac_acl_proxy_ci')) AS proxy_table_acl,
+            EXISTS (SELECT 1 FROM pg_attribute att CROSS JOIN LATERAL aclexplode(att.attacl) a
+              WHERE att.attrelid=c.oid AND att.attnum>0 AND NOT att.attisdropped
+                AND a.grantee IN ((SELECT oid FROM pg_roles WHERE rolname='dadban_actor_acl_probe_ci'),
+                                  (SELECT oid FROM pg_roles WHERE rolname='dadban_hmac_acl_proxy_ci'))) AS stale_column_acl,
+            EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+              WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_api_idempotency_owner')
+                AND a.privilege_type='SELECT' AND a.is_grantable) AS definer_select_grantable,
+            EXISTS (SELECT 1 FROM pg_attribute att CROSS JOIN LATERAL aclexplode(att.attacl) a
+              WHERE att.attrelid=c.oid AND att.attnum>0 AND NOT att.attisdropped
+                AND a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_api_idempotency_owner')) AS definer_column_acl,
+            EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+              WHERE a.grantee=0) AS public_table_acl
+          FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='dadban_private' AND c.relname='api_mutation_idempotency_hmac_key'
+        `);
+        assert.equal(hmacAcl.rowCount,1,"private HMAC key table must exist");
+        const hmac = hmacAcl.rows[0];
+        assert.ok(!["dadban_document_runtime_ci","dadban_document_runtime","dadban_api_idempotency_owner"].includes(hmac.table_owner),
+          "private HMAC key table must not be owned by an application runtime or SECURITY DEFINER owner");
+        assert.equal(hmac.probe_table_select,false,"stale direct table SELECT must be revoked");
+        assert.equal(hmac.probe_table_insert,false,"unapproved role must not insert key rows");
+        assert.equal(hmac.probe_secret_select,false,"stale direct column SELECT must be revoked");
+        assert.equal(hmac.probe_secret_update,false,"stale direct column UPDATE must be revoked");
+        assert.equal(hmac.proxy_secret_select,false,"column privileges through an intermediary role must be revoked");
+        assert.equal(hmac.probe_table_acl,false,"stale direct table ACL must be removed");
+        assert.equal(hmac.proxy_table_acl,false,"intermediary table ACL must be removed");
+        assert.equal(hmac.stale_column_acl,false,"stale column ACLs must be removed from both probe roles");
+        assert.equal(hmac.definer_select,true,"proof-function owner must retain required SELECT");
+        assert.equal(hmac.definer_select_grantable,false,"proof-function owner SELECT must not have GRANT OPTION");
+        assert.equal(hmac.definer_column_acl,false,"proof-function owner must not retain separate column-level grants");
+        assert.equal(hmac.public_table_acl,false,"PUBLIC must have no explicit table ACL");
+        console.log("PASS: migration 014 reconciles HMAC key table/column ACLs, transitive-role grants, and grant options");
         console.log("PASS: migration 014 removes stale EXECUTE grants, runtime grant options, PUBLIC EXECUTE, unsafe definer defaults, and stale public-schema CREATE grants");
       } finally {
+        await pool.query("REVOKE dadban_hmac_acl_proxy_ci FROM dadban_actor_acl_probe_ci").catch(()=>{});
         await pool.query("DROP OWNED BY dadban_actor_acl_probe_ci").catch(()=>{});
+        await pool.query("DROP OWNED BY dadban_hmac_acl_proxy_ci").catch(()=>{});
         await pool.query("DROP ROLE IF EXISTS dadban_actor_acl_probe_ci");
+        await pool.query("DROP ROLE IF EXISTS dadban_hmac_acl_proxy_ci");
       }
     }
 
