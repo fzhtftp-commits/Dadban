@@ -89,7 +89,6 @@ BEGIN
     ) grants
     JOIN pg_roles r ON r.oid=grants.grantee
     WHERE grants.grantee <> table_owner
-      AND r.rolname <> 'dadban_api_idempotency_owner'
   LOOP
     EXECUTE format(
       'REVOKE ALL ON TABLE dadban_private.api_mutation_idempotency_hmac_key FROM %I CASCADE',
