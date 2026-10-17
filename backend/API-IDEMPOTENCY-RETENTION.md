@@ -93,7 +93,7 @@ Migration 013 intentionally creates the protected singleton key row with `secret
 
 `UPDATE dadban_private.api_mutation_idempotency_hmac_key SET secret = decode($1, 'hex') WHERE singleton = true`
 
-The query must be executed with the 64-hex secret as a bound parameter, never interpolated into committed SQL, logs, shell history, or this document. Verify exactly one row was updated and verify only the designated non-login function owner can SELECT the key table. Do not deploy the API change until both halves are provisioned consistently. Key rotation is not implemented by migration 013; do not rotate only one side or reuse a session/CSRF/database password as this key.
+The query must be executed with the 64-hex secret as a bound parameter, never interpolated into committed SQL, logs, shell history, or this document. Verify exactly one row was updated, verify the runtime role cannot read the key table, and keep the migration/table owner as a trusted privileged principal; the non-login function owner receives only the SELECT privilege needed by the proof functions. Do not deploy the API change until both halves are provisioned consistently. Key rotation is not implemented by migration 013; do not rotate only one side or reuse a session/CSRF/database password as this key.
 
 ### Isolated regression coverage added
 
