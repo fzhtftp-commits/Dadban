@@ -181,6 +181,8 @@ try {
   await pool.query(actorLockMigration);
   const caseReassignmentLockMigration = await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8");
   await pool.query(caseReassignmentLockMigration);
+  const apiMutationIdempotencyMigration = await readFile(new URL("../migrations/010_api_mutation_idempotency.sql", import.meta.url), "utf8");
+  await pool.query(apiMutationIdempotencyMigration);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
