@@ -70,6 +70,7 @@ try {
     DROP FUNCTION IF EXISTS public.lock_live_case_parents(uuid,uuid[]) CASCADE;
     DROP FUNCTION IF EXISTS public.prevent_case_document_idempotency_delete() CASCADE;
     DROP FUNCTION IF EXISTS public.prevent_case_document_idempotency_reopen() CASCADE;
+    DROP FUNCTION IF EXISTS public.guard_api_mutation_idempotency_identity() CASCADE;
     DROP TABLE IF EXISTS public.api_mutation_idempotency CASCADE;
     DROP TABLE IF EXISTS public.case_document_mutation_idempotency CASCADE;
     DROP TABLE IF EXISTS public.case_documents CASCADE;
