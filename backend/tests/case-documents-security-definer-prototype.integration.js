@@ -4,8 +4,14 @@ const { Pool } = pg;
 const adminUrl = process.env.DATABASE_URL;
 const runtimeUrl = process.env.RUNTIME_DATABASE_URL;
 if (!adminUrl || !runtimeUrl) throw new Error("DATABASE_URL and RUNTIME_DATABASE_URL are required");
-if (!/dadban_actor_lock_definer_test/.test(new URL(adminUrl).pathname)) {
-  throw new Error("Refusing to run outside the disposable dadban_actor_lock_definer_test database");
+const adminParsed = new URL(adminUrl);
+const runtimeParsed = new URL(runtimeUrl);
+if (!["localhost", "127.0.0.1"].includes(adminParsed.hostname) ||
+    !["localhost", "127.0.0.1"].includes(runtimeParsed.hostname) ||
+    adminParsed.pathname !== "/dadban_actor_lock_definer_test" ||
+    runtimeParsed.pathname !== "/dadban_actor_lock_definer_test" ||
+    runtimeParsed.username !== "dadban_actor_runtime_ci") {
+  throw new Error("Actor-lock role test may only use the dedicated localhost /dadban_actor_lock_definer_test database and expected runtime login");
 }
 
 const admin = new Pool({ connectionString: adminUrl, max: 6 });
@@ -32,18 +38,13 @@ async function waitForLockWait(applicationName) {
 async function setup() {
   await admin.query(`
     DROP SCHEMA IF EXISTS actor_lock_test CASCADE;
-    DO $cleanup$
+    DO $role_guard$
     BEGIN
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_actor_runtime_ci') THEN
-        EXECUTE 'DROP OWNED BY dadban_actor_runtime_ci';
-      END IF;
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_actor_lock_owner_ci') THEN
-        EXECUTE 'DROP OWNED BY dadban_actor_lock_owner_ci';
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('dadban_actor_runtime_ci','dadban_actor_lock_owner_ci')) THEN
+        RAISE EXCEPTION 'Refusing to reuse pre-existing actor-lock CI roles; inspect prior test cleanup';
       END IF;
     END;
-    $cleanup$;
-    DROP ROLE IF EXISTS dadban_actor_runtime_ci;
-    DROP ROLE IF EXISTS dadban_actor_lock_owner_ci;
+    $role_guard$;
     CREATE ROLE dadban_actor_lock_owner_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
     CREATE ROLE dadban_actor_runtime_ci LOGIN PASSWORD 'ci-only-actor-runtime-password'
       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
