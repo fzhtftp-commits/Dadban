@@ -32,6 +32,10 @@ COMMIT;
 
 The parameter placeholders above are illustrative; use parameterized SQL in the maintenance client. Do not log raw request bodies or sensitive identifiers during this operation.
 
+## Runtime role and effective privileges
+
+Migration `012_api_mutation_idempotency_tombstone_guards.sql` applies the restricted table/column grants only to the known login names `dadban_document_runtime` and `dadban_document_runtime_ci`, when present. A deployment using another database login receives no implicit access to this table; it must be explicitly granted only the required `SELECT`, reservation-column `INSERT`, and completion-column `UPDATE` privileges. Do not make the runtime login the table owner or a member (directly or through nested roles) of an owner/migrator role that could assume broader privileges or disable the guard triggers. The isolated runtime-role test verifies that a differently named role fails closed and that runtime can read the tombstone markers but cannot update `response_body_purged` or `purged_at`.
+
 ## Retention and archive decision
 
 No automatic TTL, scheduled purge, or tombstone deletion is enabled by this change. No duration is selected because the approved legal/operational retention period has not been supplied. Until that policy is approved, response purging is an explicit, authorized maintenance action rather than a time-based job.
