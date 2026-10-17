@@ -19,9 +19,10 @@ before="$(psql -h localhost -U postgres -X -A -t -v ON_ERROR_STOP=1 -d dadban_te
 SELECT
  (SELECT count(*) FROM public.case_document_mutation_idempotency),
  (SELECT count(*) FROM public.audit_logs),
- (SELECT count(*) FROM pg_trigger WHERE tgrelid='public.case_document_mutation_idempotency'::regclass AND tgname IN ('case_document_mutation_idempotency_no_delete','case_document_mutation_idempotency_identity_immutable') AND NOT tgisinternal);
+ (SELECT count(*) FROM pg_trigger WHERE tgrelid='public.case_document_mutation_idempotency'::regclass AND tgname IN ('case_document_mutation_idempotency_no_delete','case_document_mutation_idempotency_identity_immutable') AND NOT tgisinternal),
+ (SELECT coalesce(string_agg(pg_get_userbyid(d.defaclrole)||':'||coalesce(n.nspname,'*')||':'||d.defaclobjtype||':'||coalesce(d.defaclacl::text,''), E'\\n' ORDER BY d.defaclrole, n.nspname, d.defaclobjtype), '') FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace);
 ")"
-echo "BACKUP SOURCE DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers=$before"
+echo "BACKUP SOURCE DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers,default_acl=$before"
 
 pg_dump -h localhost -U postgres -Fc -d dadban_test -f "$backup"
 createdb -h localhost -U postgres "$restore_db"
@@ -38,7 +39,7 @@ SELECT
 if [[ "$before" != "$after" ]]; then
   echo "FAIL: restore counts/trigger state differ: before=$before after=$after" >&2; exit 1
 fi
-echo "RESTORED DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers=$after"
+echo "RESTORED DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers,default_acl=$after"
 
 # A successful row/trigger restore is not enough: SECURITY DEFINER owners and
 # effective ACLs must survive the dump. Check all eight restricted helpers.
@@ -86,7 +87,7 @@ BEGIN
 END
 $definer_restore$;
 SQL
-echo "PASS: backup/restore preserves all eight SECURITY DEFINER owners, denies PUBLIC EXECUTE, and retains approved runtime EXECUTE"
+echo "PASS: backup/restore preserves default ACLs, all eight SECURITY DEFINER owners, denies PUBLIC EXECUTE, and retains approved runtime EXECUTE"
 
 # Migration 007 must not be re-applied over a restored DB; failure must leave
 # the restored protection/catalog intact.
