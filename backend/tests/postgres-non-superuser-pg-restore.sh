@@ -122,7 +122,7 @@ createdb -h localhost -U "$admin" "$target_db"
 psql -h localhost -U "$admin" -d dadban_test -X -v ON_ERROR_STOP=1 <<SQL
 GRANT CONNECT, CREATE ON DATABASE $target_db TO $restore;
 GRANT CREATE ON DATABASE $target_db TO $owner_a, $owner_b;
-DO \\$db_privileges\\$\$
+DO \$db_privileges\$
 BEGIN
  IF (SELECT rolsuper OR rolcreatedb OR rolcreaterole FROM pg_roles WHERE rolname IN ('$backup','$restore')) THEN
    RAISE EXCEPTION 'backup/restore role has cluster-level administration attribute';
@@ -143,7 +143,7 @@ BEGIN
    RAISE EXCEPTION 'object-owner CREATE privilege was confused with cluster CREATEDB';
  END IF;
 END
-\\$db_privileges\\$\$;
+\$db_privileges\$;
 SQL
 psql -h localhost -U "$admin" -d "$target_db" -X -v ON_ERROR_STOP=1 <<SQL
 GRANT CONNECT ON DATABASE $target_db TO $restore;
