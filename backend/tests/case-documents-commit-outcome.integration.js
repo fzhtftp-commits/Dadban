@@ -907,6 +907,71 @@ try {
   assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'", [ids.office, genericClientId])).rows[0].count), 1);
   console.log("PASS: generic POST COMMIT response loss replays the exact stored response with one resource, idempotency row, and audit");
 
+
+  // Combine the unknown-COMMIT POST outcome with logout and a fresh login.
+  // The original cookie must lose replay authority, while the same owner/office
+  // can recover the durable result without recreating the client or its audit.
+  const genericClientSessionId = (await pool.query(
+    "select id from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3",
+    [hash(token), ids.user, ids.office]
+  )).rows[0].id;
+  const logoutAfterUnknownCommit = await request("/api/auth/logout", {
+    method: "POST", sessionToken: token, csrfToken: csrf
+  });
+  assert.equal(logoutAfterUnknownCommit.status, 200, "logout after unknown POST outcome must succeed");
+  assert.deepEqual(logoutAfterUnknownCommit.body, { ok: true });
+  assert.equal((await pool.query(
+    "select count(*)::int as count from auth_sessions where id=$1 and revoked_at is not null",
+    [genericClientSessionId]
+  )).rows[0].count, 1, "logout must revoke the session used for the unknown-COMMIT POST");
+
+  const staleCookieReplay = await request("/api/clients", {
+    method: "POST", key: genericClientKey, body: genericClientBody
+  });
+  assert.equal(staleCookieReplay.status, 401, "revoked cookie must not replay an unknown-COMMIT result");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from clients where id=$1 and deleted_at is null",
+    [genericClientId]
+  )).rows[0].count, 1, "stale-cookie replay must leave exactly the committed client");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, genericClientKey]
+  )).rows[0].count, 1, "stale-cookie replay must not create another idempotency row");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'",
+    [ids.office, genericClientId]
+  )).rows[0].count), 1, "stale-cookie replay must not duplicate the create audit");
+
+  const freshOwnerAfterUnknownCommit = await login(ownerEmail, ownerPassword);
+  assert.equal(freshOwnerAfterUnknownCommit.user.id, ids.user);
+  assert.equal(freshOwnerAfterUnknownCommit.user.office_id, ids.office);
+  assert.notEqual(freshOwnerAfterUnknownCommit.token, token, "fresh login must use a different session token");
+  const freshSessionReplay = await request("/api/clients", {
+    method: "POST", key: genericClientKey, body: genericClientBody,
+    sessionToken: freshOwnerAfterUnknownCommit.token,
+    csrfToken: freshOwnerAfterUnknownCommit.csrf
+  });
+  assert.equal(freshSessionReplay.status, 201, "fresh login by the same owner/office must recover the committed POST");
+  assert.deepEqual(freshSessionReplay.body, genericStored.rows[0].response_body,
+    "fresh-session replay must return the exact durable response, not a newly created client");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from clients where id=$1 and deleted_at is null",
+    [genericClientId]
+  )).rows[0].count, 1, "fresh-session replay must preserve exactly one committed client");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, genericClientKey]
+  )).rows[0].count, 1, "fresh-session replay must reuse the one durable idempotency row");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'",
+    [ids.office, genericClientId]
+  )).rows[0].count), 1, "fresh-session replay must preserve exactly one create audit");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='auth_session' and entity_id=$2 and action='logout'",
+    [ids.office, genericClientSessionId]
+  )).rows[0].count, 1, "logout during unknown-outcome recovery must have exactly one audit row");
+  console.log("PASS: unknown-COMMIT POST + logout rejects stale-cookie replay; fresh same-owner login returns exact stored result with one client, idempotency row, create audit, and logout audit");
+
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE and generic client POST");
 } catch (error) {
   console.error(error);
