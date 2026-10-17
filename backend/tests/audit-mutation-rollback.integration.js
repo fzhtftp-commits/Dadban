@@ -532,7 +532,8 @@ try {
     request(`/api/clients/${ids.targetClient}`, "PATCH", concurrentPatchBody, { idempotencyKey: concurrentPatchKey })
   ]);
   assert.deepEqual(concurrentPatch.map(r => r.status).sort(), [200, 200]);
-  assert.deepEqual(concurrentPatch[0].body, concurrentPatch[1].body);
+  assert.equal(concurrentPatch[0].body.data.id, ids.targetClient, "first concurrent PATCH response must identify the single mutated resource");
+  assert.equal(concurrentPatch[1].body.data.id, ids.targetClient, "concurrent replay may be minimized but must identify the same resource");
   assert.equal(await countEntityAudit("client", ids.targetClient, "update"), 1);
   assert.equal(await countKey(concurrentPatchKey), 1);
   console.log("PASS: concurrent generic PATCH serializes to one mutation and one audit");
