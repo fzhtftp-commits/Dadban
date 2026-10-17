@@ -154,6 +154,54 @@ try {
     await pool.query(await readFile(new URL(path, import.meta.url), "utf8"));
   }
 
+  // Dedicated test database only: model the schema-owner/migrator trust boundary for case_documents.
+  await pool.query(`
+    DO $owner_roles$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci') THEN
+        CREATE ROLE dadban_case_documents_owner_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_migrator_ci') THEN
+        CREATE ROLE dadban_case_documents_migrator_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+      END IF;
+    END
+    $owner_roles$;
+    ALTER ROLE dadban_case_documents_owner_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+    ALTER ROLE dadban_case_documents_migrator_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+    GRANT dadban_case_documents_owner_ci TO dadban_case_documents_migrator_ci;
+    ALTER TABLE public.case_documents OWNER TO dadban_case_documents_owner_ci;
+  `);
+  const documentOwner = await pool.query(`
+    SELECT r.rolname AS owner_name, r.rolsuper, r.rolcanlogin, r.rolcreaterole,
+           pg_has_role('dadban_document_runtime_ci', r.oid, 'MEMBER') AS runtime_member_of_owner
+    FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner
+    WHERE c.oid='public.case_documents'::regclass
+  `);
+  assert.equal(documentOwner.rowCount, 1);
+  assert.equal(documentOwner.rows[0].owner_name, "dadban_case_documents_owner_ci");
+  assert.equal(documentOwner.rows[0].rolsuper, false);
+  assert.equal(documentOwner.rows[0].rolcanlogin, false);
+  assert.equal(documentOwner.rows[0].rolcreaterole, false);
+  assert.equal(documentOwner.rows[0].runtime_member_of_owner, false);
+  const runtimeOwnerPath = await pool.query(`
+    WITH RECURSIVE memberships(role_oid) AS (
+      SELECT m.roleid FROM pg_auth_members m
+      WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname='dadban_document_runtime_ci')
+      UNION
+      SELECT m.roleid FROM pg_auth_members m JOIN memberships x ON m.member=x.role_oid
+    )
+    SELECT r.rolname FROM memberships x JOIN pg_roles r ON r.oid=x.role_oid
+    WHERE r.rolname IN ('dadban_case_documents_owner_ci','dadban_case_documents_migrator_ci')
+  `);
+  assert.equal(runtimeOwnerPath.rowCount, 0, "runtime must have no direct or transitive membership in case-document owner/migrator roles");
+  const migrationCanAssumeOwner = await pool.query(`
+    SELECT pg_has_role('dadban_case_documents_migrator_ci','dadban_case_documents_owner_ci','MEMBER') AS member,
+           pg_has_role('dadban_case_documents_migrator_ci','dadban_case_documents_owner_ci','USAGE') AS can_set_role
+  `);
+  assert.equal(migrationCanAssumeOwner.rows[0].member, true);
+  console.log("CASE DOCUMENT OWNER CATALOG:", JSON.stringify(documentOwner.rows[0]));
+  console.log("PASS: case_documents owner is non-login/non-privileged; runtime has no direct or transitive owner/migrator membership; migrator membership is explicit");
+
   await pool.query("UPDATE dadban_private.api_mutation_idempotency_hmac_key SET secret=decode($1, 'hex') WHERE singleton=true", [proofSecret]);
   await pool.query(`
     GRANT CONNECT ON DATABASE dadban_runtime_role_test TO dadban_document_runtime_ci;
@@ -185,6 +233,54 @@ try {
     "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')",
     [userId,officeId,hash(token),hash(csrf)]
   );
+  const officeB = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const userB = "dddddddd-dddd-4ddd-8ddd-dddddddddd01";
+  const clientB = "dddddddd-dddd-4ddd-8ddd-dddddddddd02";
+  const caseB = "dddddddd-dddd-4ddd-8ddd-dddddddddd03";
+  const transferDoc = "dddddddd-dddd-4ddd-8ddd-dddddddddd04";
+  await pool.query("INSERT INTO offices(id,name) VALUES($1,'Transfer Target Office')", [officeB]);
+  await pool.query("INSERT INTO users(id,office_id,full_name,email,role) VALUES($1,$2,'Transfer Target User','transfer-target@example.test','owner')", [userB,officeB]);
+  await pool.query("INSERT INTO clients(id,office_id,full_name) VALUES($1,$2,'Transfer Target Client')", [clientB,officeB]);
+  await pool.query("INSERT INTO cases(id,office_id,client_id,case_number,title) VALUES($1,$2,$3,'RT-002','Transfer Target Case')", [caseB,officeB,clientB]);
+  await pool.query(`
+    INSERT INTO case_documents(id,office_id,case_id,title,document_type,confidentiality,created_by,updated_by)
+    VALUES($1,$2,$3,'Rollback ownership probe','evidence','normal',$4,$4)
+  `, [transferDoc,officeId,caseId,userId]);
+  const auditBeforeTransfer = Number((await pool.query(
+    "SELECT count(*)::int AS n FROM audit_logs WHERE entity_type='case_document' AND entity_id=$1", [transferDoc]
+  )).rows[0].n);
+  const transfer = await pool.connect();
+  try {
+    await transfer.query("BEGIN");
+    await transfer.query("SET LOCAL ROLE dadban_case_documents_migrator_ci");
+    await transfer.query("SET LOCAL ROLE dadban_case_documents_owner_ci");
+    await transfer.query(`
+      UPDATE public.case_documents
+      SET office_id=$2, case_id=$3, created_by=$4, updated_by=$4
+      WHERE id=$1
+    `, [transferDoc,officeB,caseB,userB]);
+    const moved = await transfer.query(
+      "SELECT office_id,case_id,created_by,updated_by FROM public.case_documents WHERE id=$1", [transferDoc]
+    );
+    assert.deepEqual(moved.rows[0], {office_id:officeB,case_id:caseB,created_by:userB,updated_by:userB});
+    const auditDuringTransfer = Number((await transfer.query(
+      "SELECT count(*)::int AS n FROM audit_logs WHERE entity_type='case_document' AND entity_id=$1", [transferDoc]
+    )).rows[0].n);
+    assert.equal(auditDuringTransfer, auditBeforeTransfer, "privileged direct SQL does not automatically emit application audit");
+    await transfer.query("ROLLBACK");
+  } finally {
+    transfer.release();
+  }
+  const restored = await pool.query(
+    "SELECT office_id,case_id,created_by,updated_by FROM public.case_documents WHERE id=$1", [transferDoc]
+  );
+  assert.deepEqual(restored.rows[0], {office_id:officeId,case_id:caseId,created_by:userId,updated_by:userId});
+  const auditAfterRollback = Number((await pool.query(
+    "SELECT count(*)::int AS n FROM audit_logs WHERE entity_type='case_document' AND entity_id=$1", [transferDoc]
+  )).rows[0].n);
+  assert.equal(auditAfterRollback, auditBeforeTransfer);
+  console.log("PASS: migration role can coordinate office_id/case_id/created_by/updated_by under owner authority without application audit; transaction rollback restores all values and audit count");
+
 
   const liveSessionId = (await pool.query("SELECT id FROM auth_sessions WHERE token_hash=$1", [hash(token)])).rows[0].id;
   const proofFingerprint = "a".repeat(64);
