@@ -3,7 +3,7 @@ const id=new URLSearchParams(location.search).get("id");
 const csrf=()=>sessionStorage.getItem("dadban_csrf")||"";
 const deleteIdempotencyStorageKey=`dadban:delete:case:${id||"missing"}`;
 function deleteIdempotencyKey(){
- let key=sessionStorage.getItem(deleteIdempotencyStorageKey);
+ let key=localStorage.getItem(deleteIdempotencyStorageKey);
  if(!key){key=crypto.randomUUID();sessionStorage.setItem(deleteIdempotencyStorageKey,key);}
  return key;
 }
@@ -20,7 +20,7 @@ async function removeCase(){
   const r=await fetch(`${API}/api/cases/${encodeURIComponent(id)}`,{method:"DELETE",credentials:"include",headers:{"x-csrf-token":csrf(),"idempotency-key":deleteIdempotencyKey()}});
   if(r.status===401){location.href="login.html";return}
   if(!r.ok)throw new Error();
-  sessionStorage.removeItem(deleteIdempotencyStorageKey);
+  localStorage.removeItem(deleteIdempotencyStorageKey);
   location.href="cases.html?deleted=1";
  }catch{deleteBtn.disabled=false;deleteBtn.textContent="حذف پرونده";$("caseStatus").textContent="حذف پرونده انجام نشد.";}
 }
