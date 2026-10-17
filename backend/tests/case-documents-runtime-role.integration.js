@@ -158,6 +158,8 @@ try {
     GRANT INSERT ON public.audit_logs TO dadban_document_runtime_ci;
     GRANT SELECT, INSERT ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
     GRANT UPDATE (response_status) ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
+    GRANT SELECT, INSERT ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
+    GRANT UPDATE (resource_id,response_status,response_body,completed_at) ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
   `);
 
   await pool.query("INSERT INTO offices(id,name) VALUES($1,'Runtime Role Test Office')", [officeId]);
