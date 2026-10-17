@@ -60,7 +60,7 @@ GRANT SELECT ON public.auth_sessions, public.users TO dadban_api_idempotency_own
 GRANT UPDATE (revoked_at) ON public.auth_sessions TO dadban_api_idempotency_owner;
 GRANT UPDATE (full_name) ON public.users TO dadban_api_idempotency_owner;
 GRANT SELECT ON dadban_private.api_mutation_idempotency_hmac_key TO dadban_api_idempotency_owner;
-GRANT INSERT, UPDATE ON public.api_mutation_idempotency TO dadban_api_idempotency_owner;
+GRANT SELECT, INSERT, UPDATE ON public.api_mutation_idempotency TO dadban_api_idempotency_owner;
 
 CREATE OR REPLACE FUNCTION public.reserve_api_mutation_idempotency(
   p_session_id uuid,
@@ -140,6 +140,82 @@ BEGIN
   ON CONFLICT (office_id, user_id, idempotency_key) DO NOTHING;
 
   RETURN FOUND;
+END
+$function$;
+
+CREATE OR REPLACE FUNCTION public.read_api_mutation_idempotency(
+  p_session_id uuid,
+  p_user_id uuid,
+  p_office_id uuid,
+  p_idempotency_key text,
+  p_resource_type text,
+  p_operation text,
+  p_request_fingerprint text,
+  p_proof text
+)
+RETURNS SETOF public.api_mutation_idempotency
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+DECLARE
+  v_secret bytea;
+  v_payload text;
+  v_expected text;
+BEGIN
+  IF p_idempotency_key IS NULL OR p_idempotency_key !~ '^[A-Za-z0-9._:-]{8,128}$'
+     OR p_resource_type IS NULL OR p_resource_type NOT IN ('client','case','hearing','case_action')
+     OR p_operation IS NULL OR p_operation NOT IN ('POST','PATCH','DELETE')
+     OR p_request_fingerprint IS NULL OR p_request_fingerprint !~ '^[0-9a-f]{64}$'
+     OR p_proof IS NULL OR p_proof !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'invalid API idempotency lookup arguments' USING ERRCODE = '22023';
+  END IF;
+
+  SELECT secret INTO v_secret
+  FROM dadban_private.api_mutation_idempotency_hmac_key
+  WHERE singleton = true;
+  IF v_secret IS NULL THEN
+    RAISE EXCEPTION 'API idempotency proof key is not provisioned' USING ERRCODE = '55000';
+  END IF;
+
+  v_payload := concat_ws('|',
+    'dadban-idem-v1', 'lookup', p_session_id::text, p_user_id::text,
+    p_office_id::text, p_idempotency_key, p_resource_type, p_operation,
+    p_request_fingerprint, '', '');
+  v_expected := encode(public.hmac(convert_to(v_payload, 'UTF8'), v_secret, 'sha256'), 'hex');
+  IF v_expected <> p_proof THEN
+    RAISE EXCEPTION 'invalid API idempotency proof' USING ERRCODE = '42501';
+  END IF;
+
+  PERFORM 1 FROM public.auth_sessions s
+  WHERE s.id = p_session_id AND s.user_id = p_user_id AND s.office_id = p_office_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'live authenticated session required' USING ERRCODE = '28000';
+  END IF;
+  PERFORM 1 FROM public.users u
+  WHERE u.id = p_user_id AND u.office_id = p_office_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'live authenticated session required' USING ERRCODE = '28000';
+  END IF;
+  PERFORM 1
+  FROM public.auth_sessions s
+  JOIN public.users u ON u.id = s.user_id AND u.office_id = s.office_id
+  WHERE s.id = p_session_id AND s.user_id = p_user_id AND s.office_id = p_office_id
+    AND s.revoked_at IS NULL AND s.expires_at > clock_timestamp()
+    AND u.is_active = true AND u.deleted_at IS NULL;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'live authenticated session required' USING ERRCODE = '28000';
+  END IF;
+
+  RETURN QUERY
+  SELECT r.*
+  FROM public.api_mutation_idempotency r
+  WHERE r.office_id = p_office_id
+    AND r.user_id = p_user_id
+    AND r.idempotency_key = p_idempotency_key
+  FOR UPDATE;
 END
 $function$;
 
@@ -237,6 +313,9 @@ $function$;
 
 ALTER FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)
   OWNER TO dadban_api_idempotency_owner;
+ALTER FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)
+  OWNER TO dadban_api_idempotency_owner;
+REVOKE ALL ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) FROM PUBLIC;
 ALTER FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)
   OWNER TO dadban_api_idempotency_owner;
 REVOKE ALL ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) FROM PUBLIC;
@@ -257,8 +336,8 @@ BEGIN
       EXECUTE format('REVOKE ALL ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE UPDATE (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
-      EXECUTE format('GRANT SELECT ON TABLE public.api_mutation_idempotency TO %I', runtime_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO %I', runtime_name);
+      EXECUTE format('GRANT EXECUTE ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO %I', runtime_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) TO %I', runtime_name);
       EXECUTE format('REVOKE ALL ON SCHEMA dadban_private FROM %I', runtime_name);
       EXECUTE format('REVOKE ALL ON TABLE dadban_private.api_mutation_idempotency_hmac_key FROM %I', runtime_name);
