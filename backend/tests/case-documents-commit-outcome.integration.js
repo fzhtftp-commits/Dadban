@@ -333,6 +333,36 @@ try {
   assert.equal(classRetry.status, 200);
   assert.equal(await countAudit(classificationId, "update"), 1, "confidentiality replay must not duplicate audit rows");
 
+  // A completed sensitive response must not be disclosed when a concurrent role
+  // downgrade commits while the retry is waiting for the actor authorization lock.
+  const roleDowngradeGate = await pool.connect();
+  let roleDowngradeGateOpen = false;
+  try {
+    await roleDowngradeGate.query("begin");
+    roleDowngradeGateOpen = true;
+    await roleDowngradeGate.query("update users set role='viewer' where id=$1 and office_id=$2", [ids.user, ids.office]);
+    const pendingRestrictedReplay = request(`/api/case-documents/${classificationId}`, {
+      method: "PATCH", key: classificationKey, body: { confidentiality: "confidential" }
+    });
+    await waitForActorAuthorizationLockWait();
+    await roleDowngradeGate.query("commit");
+    roleDowngradeGateOpen = false;
+    const restrictedReplay = await pendingRestrictedReplay;
+    assert.equal(restrictedReplay.status, 403, "viewer role committed while replay waited must not receive a completed PATCH response");
+    assert.deepEqual(restrictedReplay.body, { error: "document_role_forbidden" });
+    assert.equal((await pool.query("select role from users where id=$1 and office_id=$2", [ids.user, ids.office])).rows[0].role, "viewer");
+    assert.equal((await pool.query("select confidentiality from case_documents where id=$1 and office_id=$2", [classificationId, ids.office])).rows[0].confidentiality,
+      "confidential", "denied replay must preserve the committed confidentiality");
+    assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+      [ids.office, ids.user, classificationKey])).rows[0].count, 1, "role-denied replay must retain one idempotency row");
+    assert.equal(await countAudit(classificationId, "update"), 1, "role-denied replay must not duplicate audit");
+    console.log("PASS: role downgrade racing a completed confidential-document replay returns 403 without response disclosure or duplicate mutation/idempotency/audit");
+  } finally {
+    if (roleDowngradeGateOpen) await roleDowngradeGate.query("rollback").catch(() => {});
+    roleDowngradeGate.release();
+    await pool.query("update users set role='owner' where id=$1 and office_id=$2", [ids.user, ids.office]);
+  }
+
   // Case 3: a successful soft-delete whose COMMIT acknowledgement is lost must replay 204.
   const deleteId = await makeDocument("Before lost COMMIT delete");
   const deleteKey = "commit-loss-delete-01";
