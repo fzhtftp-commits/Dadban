@@ -835,7 +835,7 @@ try {
     [conflictCaseId, ids.office, conflictClientId, "CONFLICT-" + crypto.randomUUID(), ids.user]
   );
   const fingerprintConflict = await request(`/api/cases/${conflictCaseId}`, { method: "DELETE", key: sessionRetryKey,
-    sessionToken: freshOwner.token, csrfToken: freshOwner.csrf });
+    sessionToken: freshAfterLogout.token, csrfToken: freshAfterLogout.csrf });
   assert.equal(fingerprintConflict.status, 409, "same owner/key with different case resource must be rejected");
   assert.equal((await pool.query("select deleted_at from cases where id=$1 and office_id=$2", [conflictCaseId, ids.office])).rows[0].deleted_at,
     null, "fingerprint conflict must not delete the other case");
