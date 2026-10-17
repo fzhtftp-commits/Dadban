@@ -20,7 +20,7 @@ SELECT
  (SELECT count(*) FROM public.case_document_mutation_idempotency),
  (SELECT count(*) FROM public.audit_logs),
  (SELECT count(*) FROM pg_trigger WHERE tgrelid='public.case_document_mutation_idempotency'::regclass AND tgname IN ('case_document_mutation_idempotency_no_delete','case_document_mutation_idempotency_identity_immutable') AND NOT tgisinternal),
- (SELECT coalesce(string_agg(pg_get_userbyid(d.defaclrole)||':'||coalesce(n.nspname,'*')||':'||d.defaclobjtype||':'||coalesce(d.defaclacl::text,''), E'\\n' ORDER BY d.defaclrole, n.nspname, d.defaclobjtype), '') FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace);
+ (SELECT coalesce(string_agg(pg_get_userbyid(d.defaclrole)||':'||coalesce(n.nspname,'*')||':'||d.defaclobjtype::text||':'||coalesce(d.defaclacl::text,''), E'\\n' ORDER BY d.defaclrole, n.nspname, d.defaclobjtype), '') FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace);
 ")"
 echo "BACKUP SOURCE DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers,default_acl=$before"
 
