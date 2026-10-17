@@ -92,6 +92,9 @@ BEGIN
         RAISE EXCEPTION 'runtime role % must not own public.api_mutation_idempotency', runtime_name;
       END IF;
       EXECUTE format('REVOKE ALL ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
+      EXECUTE format('REVOKE SELECT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
+      EXECUTE format('REVOKE INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
+      EXECUTE format('REVOKE UPDATE (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('GRANT SELECT ON TABLE public.api_mutation_idempotency TO %I', runtime_name);
       EXECUTE format('GRANT INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint) ON TABLE public.api_mutation_idempotency TO %I', runtime_name);
       EXECUTE format('GRANT UPDATE (resource_id,response_status,response_body,completed_at) ON TABLE public.api_mutation_idempotency TO %I', runtime_name);
