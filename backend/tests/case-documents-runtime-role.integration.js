@@ -499,7 +499,6 @@ try {
       owner.rolsuper AS owner_superuser, owner.rolcanlogin AS owner_can_login,
       owner.rolcreatedb AS owner_createdb, owner.rolcreaterole AS owner_createrole,
       owner.rolinherit AS owner_inherit,
-       has_schema_privilege('dadban_api_idempotency_owner','public','CREATE') AS owner_create_public,
       has_function_privilege('dadban_document_runtime_ci', p.oid, 'EXECUTE') AS runtime_execute,
       EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
         WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE') AS public_execute,
@@ -542,6 +541,7 @@ try {
       owner.rolsuper AS owner_superuser, owner.rolcanlogin AS owner_can_login,
       owner.rolcreatedb AS owner_createdb, owner.rolcreaterole AS owner_createrole,
       owner.rolinherit AS owner_inherit,
+       has_schema_privilege('dadban_api_idempotency_owner','public','CREATE') AS owner_create_public,
       has_function_privilege('dadban_document_runtime_ci',p.oid,'EXECUTE') AS runtime_execute,
       EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f',p.proowner))) acl
         WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE') AS public_execute,
