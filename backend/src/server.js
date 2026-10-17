@@ -450,7 +450,7 @@ const completeApiMutationIdempotency = async (client, req, mutation, status, bod
   // The original live response remains unchanged; a replay returns this minimal envelope.
   const minimalBody = status === 204 ? {} : { data: { id: resourceId ?? null } };
   const result = await client.query(
-    "update public.api_mutation_idempotency set resource_id=$4,response_status=$5,response_body=$6::jsonb,response_body_purged=false,purged_at=null,completed_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is null returning idempotency_key",
+    "update public.api_mutation_idempotency set resource_id=$4,response_status=$5,response_body=$6::jsonb,completed_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is null returning idempotency_key",
     [req.auth.officeId, req.auth.userId, mutation.key, resourceId ?? null, status, JSON.stringify(minimalBody)]
   );
   if (!result.rowCount) throw new Error("API mutation idempotency completion failed");
