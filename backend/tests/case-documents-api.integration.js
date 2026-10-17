@@ -241,6 +241,15 @@ try {
       ($1,$2,$5,$4,now()+interval '1 hour',now())
   `, [ids.userA,ids.officeA,hash(expiredToken),hash(csrfA),hash(revokedToken)]);
 
+  await assert.rejects(
+    pool.query(
+      "insert into api_mutation_idempotency(office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,response_status,response_body,completed_at) values($1,$2,$3,'client','POST',$4,null,$5::jsonb,clock_timestamp())",
+      [ids.officeA, ids.userA, "invalid-incomplete-state-01", "a".repeat(64), JSON.stringify({ data: { id: ids.userA } })]
+    ),
+    error => error.code === "23514",
+    "completed idempotency row with NULL status and non-NULL body must violate the response-state CHECK"
+  );
+
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
     env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_LOCK_TIMEOUT_MS: "20000" },
