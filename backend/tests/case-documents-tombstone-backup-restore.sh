@@ -62,7 +62,13 @@ BEGIN
        IS DISTINCT FROM fn.expected_owner THEN
       RAISE EXCEPTION 'restored SECURITY DEFINER function % has unexpected owner', fn.oid;
     END IF;
-    IF has_function_privilege('PUBLIC', fn.oid, 'EXECUTE') THEN
+    IF EXISTS (
+      SELECT 1 FROM aclexplode(coalesce(
+        (SELECT p.proacl FROM pg_proc p WHERE p.oid=fn.oid),
+        acldefault('f', (SELECT p.proowner FROM pg_proc p WHERE p.oid=fn.oid))
+      )) acl
+      WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'
+    ) THEN
       RAISE EXCEPTION 'PUBLIC can execute restored SECURITY DEFINER function %', fn.oid;
     END IF;
     IF NOT has_function_privilege('dadban_document_runtime_ci', fn.oid, 'EXECUTE') THEN
