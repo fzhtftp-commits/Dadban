@@ -61,6 +61,7 @@ RESET ROLE;
 SET ROLE $owner_b;
 CREATE SEQUENCE $schema.fixture_seq START 17;
 CREATE FUNCTION $schema.fixture_fn() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS \$\$ SELECT 42 \$\$;
+REVOKE ALL ON FUNCTION $schema.fixture_fn() FROM PUBLIC;
 RESET ROLE;
 GRANT USAGE ON SCHEMA $schema TO $backup;
 GRANT SELECT ON $schema.fixture_table,$schema.fixture_view TO $backup;
@@ -79,8 +80,9 @@ BEGIN
  IF has_table_privilege('$backup','$schema.fixture_table','INSERT')
     OR has_table_privilege('$backup','$schema.fixture_table','UPDATE')
     OR has_table_privilege('$backup','$schema.fixture_table','DELETE')
-    OR has_schema_privilege('$backup','$schema','CREATE') THEN
-   RAISE EXCEPTION 'backup reader has write/create privilege';
+    OR has_schema_privilege('$backup','$schema','CREATE')
+    OR has_function_privilege('$backup','$schema.fixture_fn()','EXECUTE') THEN
+   RAISE EXCEPTION 'backup reader has write/create/function-execution privilege';
  END IF;
  IF (SELECT rolsuper OR rolcreatedb OR rolcreaterole FROM pg_roles WHERE rolname='$restore') THEN
    RAISE EXCEPTION 'restore executor has cluster administration privileges';
@@ -101,11 +103,12 @@ fi
 # Capture the cluster-global indirect membership graph before restore; pg_dump archives
 # database objects, not pg_auth_members, so restoration must not be mistaken for role provisioning.
 membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
-SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
+SELECT string_agg(format('%s->%s|admin=%s|inherit=%s|set=%s',member.rolname,granted.rolname,m.admin_option,m.inherit_option,m.set_option),',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
 WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
-if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
-  echo "FAIL: unexpected pre-restore indirect membership graph: $membership_before" >&2; exit 1
+expected_memberships="$bridge->$owner_a|admin=false|inherit=true|set=true,$bridge->$owner_b|admin=false|inherit=true|set=true,$restore->$bridge|admin=false|inherit=true|set=true"
+if [[ "$membership_before" != "$expected_memberships" ]]; then
+  echo "FAIL: unexpected pre-restore indirect membership/options (admin_option must remain false): $membership_before" >&2; exit 1
 fi
 # This is a real pg_dump under the read-only backup identity.
 PGPASSWORD=ci-only-backup-role-password pg_dump -h localhost -U "$backup" -Fc --schema="$schema" -d "$source_db" -f "$dump"
@@ -119,6 +122,28 @@ createdb -h localhost -U "$admin" "$target_db"
 psql -h localhost -U "$admin" -d dadban_test -X -v ON_ERROR_STOP=1 <<SQL
 GRANT CONNECT, CREATE ON DATABASE $target_db TO $restore;
 GRANT CREATE ON DATABASE $target_db TO $owner_a, $owner_b;
+DO \\$db_privileges\\$\$
+BEGIN
+ IF (SELECT rolsuper OR rolcreatedb OR rolcreaterole FROM pg_roles WHERE rolname IN ('$backup','$restore')) THEN
+   RAISE EXCEPTION 'backup/restore role has cluster-level administration attribute';
+ END IF;
+ IF has_database_privilege('$backup','$source_db','CREATE')
+    OR has_database_privilege('$restore','$source_db','CREATE')
+    OR has_database_privilege('$backup','$target_db','CREATE') THEN
+   RAISE EXCEPTION 'backup/restore effective database CREATE boundary is too broad';
+ END IF;
+ IF NOT has_database_privilege('$restore','$target_db','CONNECT')
+    OR NOT has_database_privilege('$restore','$target_db','CREATE')
+    OR NOT has_database_privilege('$restore','$target_db','TEMPORARY') THEN
+   RAISE EXCEPTION 'restore target database effective privilege contract is incomplete';
+ END IF;
+ IF NOT has_database_privilege('$owner_a','$target_db','CREATE')
+    OR NOT has_database_privilege('$owner_b','$target_db','CREATE')
+    OR (SELECT bool_or(rolcreatedb) FROM pg_roles WHERE rolname IN ('$owner_a','$owner_b')) THEN
+   RAISE EXCEPTION 'object-owner CREATE privilege was confused with cluster CREATEDB';
+ END IF;
+END
+\\$db_privileges\\$\$;
 SQL
 psql -h localhost -U "$admin" -d "$target_db" -X -v ON_ERROR_STOP=1 <<SQL
 GRANT CONNECT ON DATABASE $target_db TO $restore;
@@ -204,7 +229,10 @@ BEGIN
  ) OR EXISTS (
    SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n'::"char",n.nspowner))) a
    WHERE n.nspname='$schema' AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
- ) THEN RAISE EXCEPTION 'backup/restore role unexpectedly has object GRANT OPTION in database %', current_database(); END IF;
+ ) OR EXISTS (
+   SELECT 1 FROM pg_database d CROSS JOIN LATERAL aclexplode(coalesce(d.datacl,acldefault('d'::"char",d.datdba))) a
+   WHERE d.datname=current_database() AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
+ ) THEN RAISE EXCEPTION 'backup/restore role unexpectedly has object or database GRANT OPTION in database %', current_database(); END IF;
 END
 \$acl_guard\$;
 SQL
@@ -216,10 +244,10 @@ assert_no_role_grant_option "$target_db"
 # the explicit role edges still exist and SET ROLE works after restore.
 PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$target_db" -X -v ON_ERROR_STOP=1 -c "SET ROLE $owner_a; RESET ROLE; SET ROLE $owner_b; RESET ROLE" >/dev/null
 membership_after="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
-SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
+SELECT string_agg(format('%s->%s|admin=%s|inherit=%s|set=%s',member.rolname,granted.rolname,m.admin_option,m.inherit_option,m.set_option),',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
 WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
 if [[ "$membership_before" != "$membership_after" ]]; then
- echo "FAIL: indirect role membership graph changed during restore: before=$membership_before after=$membership_after" >&2; exit 1
+ echo "FAIL: indirect role membership/options changed during restore: before=$membership_before after=$membership_after" >&2; exit 1
 fi
-echo "PASS: indirect membership graph preserved; transitive SET ROLE works for restore; backup reader cannot SET ROLE and neither role has GRANT OPTION"
+echo "PASS: effective database/object ACL and GRANT OPTION checked; indirect membership admin/inherit/set options preserved with admin_option=false; transitive SET ROLE works for restore; backup reader cannot SET ROLE or execute fixture function"
