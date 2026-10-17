@@ -108,6 +108,7 @@ try {
   await pool.query(await readFile(new URL("../../database/migrations/20261014_case_actions.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/010_api_mutation_idempotency.sql", import.meta.url), "utf8"));
 
   await pool.query(
     "insert into offices(id,name) values ($1,'Audit Mutation Test Office')",
@@ -446,6 +447,131 @@ try {
     null, "logout failure must roll back session revocation");
   assert.equal(await countAudit("auth_session", "logout"), logoutAuditBefore, "failed logout must not leave an audit row");
   console.log("PASS: logout rolls back session revocation when audit INSERT fails");
+
+
+  // Generic API mutation idempotency tests run after removing the injected audit failure.
+  await pool.query("drop trigger reject_business_mutation_audit_trigger on audit_logs; drop function reject_business_mutation_audit()");
+  const countEntityAudit = async (entityType, entityId, action) => Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action=$4",
+    [ids.office, entityType, entityId, action]
+  )).rows[0].count);
+  const countKey = async key => Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, key]
+  )).rows[0].count);
+
+  const clientCreateKey = "generic-client-create-01";
+  const clientCreateBody = { client_type: "individual", full_name: "Idempotent Created Client", national_id: "1234509877" };
+  const clientCreateFirst = await request("/api/clients", "POST", clientCreateBody, { idempotencyKey: clientCreateKey });
+  assert.equal(clientCreateFirst.status, 201);
+  const createdClientId = clientCreateFirst.body.data.id;
+  const clientCreateReplay = await request("/api/clients", "POST", clientCreateBody, { idempotencyKey: clientCreateKey });
+  assert.equal(clientCreateReplay.status, 201);
+  assert.deepEqual(clientCreateReplay.body, clientCreateFirst.body, "POST replay must return the original response body");
+  assert.equal(await countRows("clients"), 3, "replayed client create must not add another client");
+  assert.equal(await countKey(clientCreateKey), 1);
+  assert.equal(await countEntityAudit("client", createdClientId, "create"), 1);
+  const clientConflict = await request("/api/clients", "POST", { ...clientCreateBody, full_name: "Conflicting Payload Client" }, { idempotencyKey: clientCreateKey });
+  assert.equal(clientConflict.status, 409, "same key with a different POST payload must conflict");
+  assert.equal(await countEntityAudit("client", createdClientId, "create"), 1, "conflict must not add audit");
+  console.log("PASS: generic client POST replays original response, conflicts on payload mismatch, and writes one audit");
+
+  const clientPatchKey = "generic-client-patch-01";
+  const clientPatchBody = { full_name: "Idempotent Client Updated" };
+  const clientPatchFirst = await request(`/api/clients/${createdClientId}`, "PATCH", clientPatchBody, { idempotencyKey: clientPatchKey });
+  assert.equal(clientPatchFirst.status, 200);
+  const clientPatchReplay = await request(`/api/clients/${createdClientId}`, "PATCH", clientPatchBody, { idempotencyKey: clientPatchKey });
+  assert.equal(clientPatchReplay.status, 200);
+  assert.deepEqual(clientPatchReplay.body, clientPatchFirst.body);
+  const clientPatchConflict = await request(`/api/clients/${createdClientId}`, "PATCH", { full_name: "Different Client Payload" }, { idempotencyKey: clientPatchKey });
+  assert.equal(clientPatchConflict.status, 409);
+  assert.equal(await countEntityAudit("client", createdClientId, "update"), 1);
+  assert.equal(await countKey(clientPatchKey), 1);
+  console.log("PASS: generic client PATCH replay and conflicting payload have exact-one audit");
+
+  const concurrentPatchKey = "generic-client-concurrent-01";
+  const concurrentPatchBody = { notes: "same concurrent payload" };
+  const concurrentPatch = await Promise.all([
+    request(`/api/clients/${ids.targetClient}`, "PATCH", concurrentPatchBody, { idempotencyKey: concurrentPatchKey }),
+    request(`/api/clients/${ids.targetClient}`, "PATCH", concurrentPatchBody, { idempotencyKey: concurrentPatchKey })
+  ]);
+  assert.deepEqual(concurrentPatch.map(r => r.status).sort(), [200, 200]);
+  assert.deepEqual(concurrentPatch[0].body, concurrentPatch[1].body);
+  assert.equal(await countEntityAudit("client", ids.targetClient, "update"), 1);
+  assert.equal(await countKey(concurrentPatchKey), 1);
+  console.log("PASS: concurrent generic PATCH serializes to one mutation and one audit");
+
+  const caseCreateKey = "generic-case-create-01";
+  const caseCreateBody = { client_id: createdClientId, case_number: "GEN-IDEM-001", title: "Idempotent Case" };
+  const caseCreateFirst = await request("/api/cases", "POST", caseCreateBody, { idempotencyKey: caseCreateKey });
+  assert.equal(caseCreateFirst.status, 201);
+  const createdCaseId = caseCreateFirst.body.data.id;
+  const caseCreateReplay = await request("/api/cases", "POST", caseCreateBody, { idempotencyKey: caseCreateKey });
+  assert.equal(caseCreateReplay.status, 201);
+  assert.deepEqual(caseCreateReplay.body, caseCreateFirst.body);
+  assert.equal(await countKey(caseCreateKey), 1);
+  assert.equal(await countEntityAudit("case", createdCaseId, "create"), 1);
+  const caseConflict = await request("/api/cases", "POST", { ...caseCreateBody, title: "Conflicting Case" }, { idempotencyKey: caseCreateKey });
+  assert.equal(caseConflict.status, 409);
+  assert.equal(await countEntityAudit("case", createdCaseId, "create"), 1);
+
+  const casePatchKey = "generic-case-patch-01";
+  const casePatchBody = { title: "Idempotent Case Updated" };
+  const casePatchFirst = await request(`/api/cases/${createdCaseId}`, "PATCH", casePatchBody, { idempotencyKey: casePatchKey });
+  assert.equal(casePatchFirst.status, 200);
+  const casePatchReplay = await request(`/api/cases/${createdCaseId}`, "PATCH", casePatchBody, { idempotencyKey: casePatchKey });
+  assert.deepEqual(casePatchReplay, casePatchFirst);
+  assert.equal(await countEntityAudit("case", createdCaseId, "update"), 1);
+  console.log("PASS: generic case POST/PATCH replay and payload conflict preserve exact audit counts");
+
+  const hearingAt = new Date(Date.now() + 7 * 86400000).toISOString();
+  const hearingCreateKey = "generic-hearing-create-01";
+  const hearingBody = { case_id: createdCaseId, hearing_at: hearingAt, hearing_type: "hearing", notes: "idempotency test" };
+  const hearingFirst = await request("/api/hearings", "POST", hearingBody, { idempotencyKey: hearingCreateKey });
+  assert.equal(hearingFirst.status, 201);
+  const hearingId = hearingFirst.body.data.id;
+  const hearingReplay = await request("/api/hearings", "POST", hearingBody, { idempotencyKey: hearingCreateKey });
+  assert.deepEqual(hearingReplay, hearingFirst);
+  assert.equal(await countEntityAudit("hearing", hearingId, "create"), 1);
+  const hearingPatchKey = "generic-hearing-patch-01";
+  const hearingPatchBody = { notes: "updated once" };
+  const hearingPatchFirst = await request(`/api/hearings/${hearingId}`, "PATCH", hearingPatchBody, { idempotencyKey: hearingPatchKey });
+  const hearingPatchReplay = await request(`/api/hearings/${hearingId}`, "PATCH", hearingPatchBody, { idempotencyKey: hearingPatchKey });
+  assert.equal(hearingPatchFirst.status, 200);
+  assert.deepEqual(hearingPatchReplay, hearingPatchFirst);
+  assert.equal(await countEntityAudit("hearing", hearingId, "update"), 1);
+  const hearingDeleteKey = "generic-hearing-delete-01";
+  const hearingDeleteFirst = await request(`/api/hearings/${hearingId}`, "DELETE", undefined, { idempotencyKey: hearingDeleteKey });
+  const hearingDeleteReplay = await request(`/api/hearings/${hearingId}`, "DELETE", undefined, { idempotencyKey: hearingDeleteKey });
+  assert.equal(hearingDeleteFirst.status, 204);
+  assert.equal(hearingDeleteReplay.status, 204);
+  assert.equal(await countEntityAudit("hearing", hearingId, "delete"), 1);
+  assert.equal(await countKey(hearingDeleteKey), 1);
+  console.log("PASS: generic hearing POST/PATCH/DELETE replay each preserves one audit row");
+
+  const actionCreateKey = "generic-action-create-01";
+  const actionBody = { case_id: createdCaseId, title: "Idempotent Action" };
+  const actionFirst = await request("/api/actions", "POST", actionBody, { idempotencyKey: actionCreateKey });
+  assert.equal(actionFirst.status, 201);
+  const actionId = actionFirst.body.data.id;
+  const actionReplay = await request("/api/actions", "POST", actionBody, { idempotencyKey: actionCreateKey });
+  assert.deepEqual(actionReplay, actionFirst);
+  assert.equal(await countEntityAudit("case_action", actionId, "create"), 1);
+  const actionPatchKey = "generic-action-patch-01";
+  const actionPatchBody = { title: "Idempotent Action Updated" };
+  const actionPatchFirst = await request(`/api/actions/${actionId}`, "PATCH", actionPatchBody, { idempotencyKey: actionPatchKey });
+  const actionPatchReplay = await request(`/api/actions/${actionId}`, "PATCH", actionPatchBody, { idempotencyKey: actionPatchKey });
+  assert.equal(actionPatchFirst.status, 200);
+  assert.deepEqual(actionPatchReplay, actionPatchFirst);
+  assert.equal(await countEntityAudit("case_action", actionId, "update"), 1);
+  const actionDeleteKey = "generic-action-delete-01";
+  const actionDeleteFirst = await request(`/api/actions/${actionId}`, "DELETE", undefined, { idempotencyKey: actionDeleteKey });
+  const actionDeleteReplay = await request(`/api/actions/${actionId}`, "DELETE", undefined, { idempotencyKey: actionDeleteKey });
+  assert.equal(actionDeleteFirst.status, 204);
+  assert.equal(actionDeleteReplay.status, 204);
+  assert.equal(await countEntityAudit("case_action", actionId, "delete"), 1);
+  assert.equal(await countKey(actionDeleteKey), 1);
+  console.log("PASS: generic action POST/PATCH/DELETE replay each preserves one audit row");
 
   assert.equal(serverOutput.includes("audit-mutation-test-session-token"), false, "server output must not expose the session token");
   assert.equal(serverOutput.includes("audit-mutation-test-csrf-token"), false, "server output must not expose the CSRF token");
