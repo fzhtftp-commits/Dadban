@@ -42,15 +42,19 @@ async function waitForServer() {
 }
 
 async function request(path, method, body, options = {}) {
+  const headers = {
+    origin,
+    cookie: `dadban_session=${token}; dadban_csrf=${csrf}`,
+    "x-csrf-token": csrf,
+    "content-type": "application/json",
+    "user-agent": options.userAgent ?? "dadban-audit-mutation-test"
+  };
+  if (method === "DELETE" && /^\/api\/(?:clients|cases)\//.test(path)) {
+    headers["idempotency-key"] = crypto.randomUUID();
+  }
   const response = await fetch(`http://${options.host ?? "127.0.0.1"}:${port}${path}`, {
     method,
-    headers: {
-      origin,
-      cookie: `dadban_session=${token}; dadban_csrf=${csrf}`,
-      "x-csrf-token": csrf,
-      "content-type": "application/json",
-      "user-agent": options.userAgent ?? "dadban-audit-mutation-test"
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
   });
