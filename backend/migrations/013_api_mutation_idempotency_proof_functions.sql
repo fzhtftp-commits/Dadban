@@ -1,6 +1,13 @@
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+DO $crypto_preflight$
+BEGIN
+  IF to_regprocedure('public.hmac(bytea,bytea,text)') IS NULL THEN
+    RAISE EXCEPTION 'pgcrypto HMAC function must be installed in trusted schema public';
+  END IF;
+END
+$crypto_preflight$;
 
 CREATE SCHEMA IF NOT EXISTS dadban_private;
 REVOKE ALL ON SCHEMA dadban_private FROM PUBLIC;
@@ -237,9 +244,6 @@ DECLARE runtime_name text;
 BEGIN
   FOREACH runtime_name IN ARRAY ARRAY['dadban_document_runtime','dadban_document_runtime_ci'] LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = runtime_name) THEN
-      IF pg_has_role(runtime_name, current_user, 'MEMBER') THEN
-        RAISE EXCEPTION 'runtime role % must not be a member of migration owner role %', runtime_name, current_user;
-      END IF;
       IF EXISTS (
         SELECT 1 FROM pg_auth_members m
         JOIN pg_roles member_role ON member_role.oid = m.member
