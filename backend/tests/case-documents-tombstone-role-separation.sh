@@ -15,65 +15,10 @@ if [[ "$role_guard" != "0" ]]; then
   exit 1
 fi
 
-cleanup_test_roles() {
-  local original_status=$?
-  trap - EXIT
-  set +e
-  psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 <<'SQL'
-DO $cleanup$
-BEGIN
-  IF to_regclass('public.case_document_mutation_idempotency') IS NOT NULL
-     AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci')
-     AND (SELECT c.relowner FROM pg_class c WHERE c.oid='public.case_document_mutation_idempotency'::regclass)
-         = (SELECT oid FROM pg_roles WHERE rolname='dadban_schema_owner_ci') THEN
-    EXECUTE 'ALTER TABLE public.case_document_mutation_idempotency OWNER TO postgres';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci')
-     AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-    EXECUTE 'REVOKE dadban_schema_owner_ci FROM dadban_migrator_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci')
-     AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-    EXECUTE 'REVOKE dadban_schema_owner_alt_ci FROM dadban_migrator_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci')
-     AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci') THEN
-    EXECUTE 'REVOKE dadban_schema_owner_alt_ci FROM dadban_schema_owner_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-    EXECUTE 'DROP OWNED BY dadban_migrator_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci') THEN
-    EXECUTE 'DROP OWNED BY dadban_schema_owner_alt_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci') THEN
-    EXECUTE 'DROP OWNED BY dadban_schema_owner_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_maintenance_ci') THEN
-    EXECUTE 'DROP OWNED BY dadban_maintenance_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-    EXECUTE 'DROP ROLE dadban_migrator_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci') THEN
-    EXECUTE 'DROP ROLE dadban_schema_owner_alt_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci') THEN
-    EXECUTE 'DROP ROLE dadban_schema_owner_ci';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_maintenance_ci') THEN
-    EXECUTE 'DROP ROLE dadban_maintenance_ci';
-  END IF;
-END
-$cleanup$;
-SQL
-  if [[ $? -ne 0 ]]; then
-    echo "FAIL: PostgreSQL test-role cleanup did not complete" >&2
-    original_status=1
-  fi
-  return "$original_status"
-}
-trap cleanup_test_roles EXIT
+# Keep these four job-local roles alive for the immediately following runtime-role
+# integration test, which independently asserts that the runtime is not a member of
+# the schema-owner or migrator roles. The dedicated PostgreSQL service is destroyed
+# with this job; final cleanup is performed by that dependent test after its assertions.
 
 psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 <<'SQL'
 DO $roles$
