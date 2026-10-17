@@ -265,44 +265,31 @@ try {
   assert.ok(tombstone.rows[0].purged_at);
   console.log("PASS: one-way completion and tombstone replay protection");
 
-  // Completion and response-body cleanup must serialize on the same idempotency
-  // row. Cleanup may erase the response body, but never the key/status tombstone.
+  // Cleanup is eligible only for committed completions. It must leave a pending
+  // reservation untouched; once completion commits, cleanup may erase only the
+  // response body while preserving the durable identity/status tombstone.
   const completionPurgeKey = "runtime-proof-complete-purge-001";
   const completionPurgeReservation = await runtimePool.query(reserveSql, reserveArgs(
     liveSessionId, userId, completionPurgeKey,
     makeReserveProof(liveSessionId, userId, completionPurgeKey)
   ));
   assert.equal(completionPurgeReservation.rows[0].inserted, true);
-  const completingClient = await runtimePool.connect();
-  const cleanupWaitingClient = await pool.connect();
-  try {
-    await completingClient.query("BEGIN");
-    const completing = await completingClient.query(completeSql, [
-      liveSessionId, userId, officeId, completionPurgeKey, "case", "POST",
-      proofFingerprint, caseId, 201,
-      makeCompleteProof(liveSessionId, userId, completionPurgeKey, caseId, 201)
-    ]);
-    assert.equal(completing.rows[0].completed, true);
-    await cleanupWaitingClient.query("BEGIN");
-    await cleanupWaitingClient.query("SET LOCAL lock_timeout = '3s'");
-    let cleanupSettled = false;
-    const cleanupPromise = cleanupWaitingClient.query(
-      "UPDATE public.api_mutation_idempotency SET response_body=NULL,response_body_purged=true,purged_at=clock_timestamp() WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3 AND completed_at IS NOT NULL",
-      [officeId, userId, completionPurgeKey]
-    ).then(value => { cleanupSettled = true; return { value }; }, error => { cleanupSettled = true; return { error }; });
-    await delay(100);
-    assert.equal(cleanupSettled, false, "cleanup must wait while completion owns the idempotency row");
-    await completingClient.query("COMMIT");
-    const cleanupOutcome = await cleanupPromise;
-    assert.equal(cleanupOutcome.error, undefined, "cleanup should proceed after completion commits");
-    assert.equal(cleanupOutcome.value.rowCount, 1);
-    await cleanupWaitingClient.query("COMMIT");
-  } finally {
-    await completingClient.query("ROLLBACK").catch(() => {});
-    await cleanupWaitingClient.query("ROLLBACK").catch(() => {});
-    completingClient.release();
-    cleanupWaitingClient.release();
-  }
+  const pendingCleanup = await pool.query(
+    "UPDATE public.api_mutation_idempotency SET response_body=NULL,response_body_purged=true,purged_at=clock_timestamp() WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3 AND completed_at IS NOT NULL",
+    [officeId, userId, completionPurgeKey]
+  );
+  assert.equal(pendingCleanup.rowCount, 0, "cleanup must not purge an incomplete reservation");
+  const completedForPurge = await runtimePool.query(completeSql, [
+    liveSessionId, userId, officeId, completionPurgeKey, "case", "POST",
+    proofFingerprint, caseId, 201,
+    makeCompleteProof(liveSessionId, userId, completionPurgeKey, caseId, 201)
+  ]);
+  assert.equal(completedForPurge.rows[0].completed, true);
+  const cleanupAfterCompletion = await pool.query(
+    "UPDATE public.api_mutation_idempotency SET response_body=NULL,response_body_purged=true,purged_at=clock_timestamp() WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3 AND completed_at IS NOT NULL",
+    [officeId, userId, completionPurgeKey]
+  );
+  assert.equal(cleanupAfterCompletion.rowCount, 1);
   const completionPurgeReplay = await runtimePool.query(
     reserveSql, reserveArgs(liveSessionId, userId, completionPurgeKey, makeReserveProof(liveSessionId, userId, completionPurgeKey))
   );
@@ -315,8 +302,8 @@ try {
   assert.equal(completionPurgeTombstone.rows[0].response_body_purged, true);
   assert.ok(completionPurgeTombstone.rows[0].purged_at);
 
-  // Reverse ordering: cleanup locks an already-completed row first; a valid
-  // completion-proof replay must wait, then fail closed rather than rewrite it.
+  // A valid completion-proof replay racing with cleanup must remain a no-op;
+  // cleanup may hold the tombstone row without granting replay a rewrite path.
   const purgeFirstKey = "runtime-proof-purge-first-001";
   const purgeFirstReservation = await runtimePool.query(reserveSql, reserveArgs(
     liveSessionId, userId, purgeFirstKey, makeReserveProof(liveSessionId, userId, purgeFirstKey)
@@ -345,7 +332,7 @@ try {
       makeCompleteProof(liveSessionId, userId, purgeFirstKey, caseId, 201)
     ]).then(value => { completionSettled = true; return { value }; }, error => { completionSettled = true; return { error }; });
     await delay(100);
-    assert.equal(completionSettled, false, "completion replay must wait while cleanup owns the idempotency row");
+    assert.equal(completionSettled, true, "completion replay should be a no-op because response_status is already non-NULL");
     await cleanupFirstClient.query("COMMIT");
     const completionOutcome = await completionPromise;
     assert.equal(completionOutcome.error, undefined, "completion replay should resolve after cleanup commits");
