@@ -55,6 +55,7 @@ const roleAccounts = [
   { role: "viewer", id: ids.userViewer, token: "test-session-role-viewer-".padEnd(48, "k"), csrf: "test-csrf-role-viewer-".padEnd(48, "l") }
 ];
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
+const proofSecret = "c".repeat(64);
 
 async function waitForServer(portToCheck = port) {
   for (let attempt = 0; attempt < 50; attempt++) {
@@ -188,6 +189,9 @@ try {
   await pool.query(apiMutationTombstoneMigration);
   const apiMutationTombstoneGuardMigration = await readFile(new URL("../migrations/012_api_mutation_idempotency_tombstone_guards.sql", import.meta.url), "utf8");
   await pool.query(apiMutationTombstoneGuardMigration);
+  const apiMutationProofMigration = await readFile(new URL("../migrations/013_api_mutation_idempotency_proof_functions.sql", import.meta.url), "utf8");
+  await pool.query(apiMutationProofMigration);
+  await pool.query("UPDATE dadban_private.api_mutation_idempotency_hmac_key SET secret=decode($1, 'hex') WHERE singleton=true", [proofSecret]);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
@@ -255,7 +259,7 @@ try {
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_LOCK_TIMEOUT_MS: "20000" },
+    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret, DB_LOCK_TIMEOUT_MS: "20000" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   server.stdout.on("data", chunk => { serverOutput += chunk.toString(); });
@@ -265,7 +269,7 @@ try {
   const outagePort = port + 1;
   outageServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(outagePort), NODE_ENV: "test", DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:1/dadban_test", CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(outagePort), NODE_ENV: "test", DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:1/dadban_test", CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret },
     stdio: ["ignore", "pipe", "pipe"]
   });
   outageServer.stdout.on("data", chunk => { outageServerOutput += chunk.toString(); });
@@ -1130,7 +1134,7 @@ try {
   // This isolated integration case uses a fresh test-only rate-limit window after earlier API scenarios.
   await pool.query("delete from public.rate_limit_counters where bucket_name='document_create'");
   const retryPort = port + 6;
-  retryServer = spawn(process.execPath, ["src/server.js"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PORT: String(retryPort), NODE_ENV: "test", RATE_LIMIT_MODE: "memory", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, DB_LOCK_TIMEOUT_MS: "20000" }, stdio: ["ignore", "pipe", "pipe"] });
+  retryServer = spawn(process.execPath, ["src/server.js"], { cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, PORT: String(retryPort), NODE_ENV: "test", RATE_LIMIT_MODE: "memory", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret, DB_LOCK_TIMEOUT_MS: "20000" }, stdio: ["ignore", "pipe", "pipe"] });
   retryServer.stdout.on("data", chunk => { retryServerOutput += chunk.toString(); });
   retryServer.stderr.on("data", chunk => { retryServerOutput += chunk.toString(); });
   await waitForServer(retryPort);
@@ -1247,7 +1251,7 @@ try {
   const auditPort = port + 5;
   auditServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(auditPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(auditPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret },
     stdio: ["ignore", "pipe", "pipe"]
   });
   auditServer.stdout.on("data", chunk => { auditServerOutput += chunk.toString(); });
@@ -1807,7 +1811,7 @@ try {
   const rolePort = port + 4;
   roleServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(rolePort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(rolePort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret },
     stdio: ["ignore", "pipe", "pipe"]
   });
   roleServer.stdout.on("data", chunk => { roleServerOutput += chunk.toString(); });
@@ -2231,7 +2235,7 @@ try {
   const rateLimitPort = port + 3;
   rateLimitServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(rateLimitPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(rateLimitPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret },
     stdio: ["ignore", "pipe", "pipe"]
   });
   rateLimitServer.stdout.on("data", chunk => { rateLimitServerOutput += chunk.toString(); });
@@ -2649,7 +2653,7 @@ try {
   const crashPort = port + 7;
   crashServer = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(crashPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, RATE_LIMIT_MODE: "memory" },
+    env: { ...process.env, PORT: String(crashPort), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret, RATE_LIMIT_MODE: "memory" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   crashServer.stdout.on("data", chunk => { crashServerOutput += chunk.toString(); });
