@@ -485,7 +485,8 @@ try {
   const createdClientId = clientCreateFirst.body.data.id;
   const clientCreateReplay = await request("/api/clients", "POST", clientCreateBody, { idempotencyKey: clientCreateKey });
   assert.equal(clientCreateReplay.status, 201);
-  assert.deepEqual(clientCreateReplay.body, clientCreateFirst.body, "POST replay must return the original response body");
+  assert.deepEqual(clientCreateReplay.body, { data: { id: createdClientId } }, "POST replay must return only the minimized stable resource identifier");
+  assert.equal(JSON.stringify(clientCreateReplay.body).includes(clientCreateBody.national_id), false, "POST replay must not expose or persist the national ID");
   assert.equal(await countRows("clients"), 3, "replayed client create must not add another client");
   assert.equal(await countKey(clientCreateKey), 1);
   assert.equal(await countEntityAudit("client", createdClientId, "create"), 1);
