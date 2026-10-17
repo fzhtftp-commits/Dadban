@@ -217,18 +217,46 @@ try {
     error => error.code === "42501",
     "a valid proof must not be replayable against a different idempotency key"
   );
-  for (const [label, args] of [
-    ["resource type", reserveArgs(liveSessionId, userId, "runtime-proof-type-bind-001", makeReserveProof(liveSessionId, userId, validKey), "client")],
-    ["operation", reserveArgs(liveSessionId, userId, "runtime-proof-operation-bind-001", makeReserveProof(liveSessionId, userId, validKey), "case", "PATCH")],
-    ["request fingerprint", reserveArgs(liveSessionId, userId, "runtime-proof-fingerprint-bind-001", makeReserveProof(liveSessionId, userId, validKey), "case", "POST", "c".repeat(64))],
-    ["office identity", reserveArgs(liveSessionId, userId, "runtime-proof-office-bind-001", makeApiProof({ action:"reserve", sessionId:liveSessionId, userId, officeId:"dddddddd-dddd-4ddd-8ddd-dddddddddddd", key:validKey, resourceType:"case", operation:"POST", fingerprint:proofFingerprint }), "case", "POST", proofFingerprint, "dddddddd-dddd-4ddd-8ddd-dddddddddddd")]
-  ]) {
-    await assert.rejects(
-      runtimePool.query(reserveSql, args),
-      error => error.code === "42501",
-      `HMAC proof must bind the ${label}`
-    );
-  }
+  const reboundTypeKey = "runtime-proof-type-bind-001";
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(
+      liveSessionId,userId,reboundTypeKey,
+      makeReserveProof(liveSessionId,userId,reboundTypeKey,"case","POST",proofFingerprint),
+      "client","POST",proofFingerprint
+    )),
+    error => error.code === "42501",
+    "HMAC proof must bind the resource type"
+  );
+  const reboundOperationKey = "runtime-proof-operation-bind-001";
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(
+      liveSessionId,userId,reboundOperationKey,
+      makeReserveProof(liveSessionId,userId,reboundOperationKey,"case","POST",proofFingerprint),
+      "case","PATCH",proofFingerprint
+    )),
+    error => error.code === "42501",
+    "HMAC proof must bind the operation"
+  );
+  const reboundFingerprintKey = "runtime-proof-fingerprint-bind-001";
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(
+      liveSessionId,userId,reboundFingerprintKey,
+      makeReserveProof(liveSessionId,userId,reboundFingerprintKey,"case","POST",proofFingerprint),
+      "case","POST","c".repeat(64)
+    )),
+    error => error.code === "42501",
+    "HMAC proof must bind the request fingerprint"
+  );
+  const reboundOfficeKey = "runtime-proof-office-bind-001";
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(
+      liveSessionId,userId,reboundOfficeKey,
+      makeReserveProof(liveSessionId,userId,reboundOfficeKey,"case","POST",proofFingerprint,officeId),
+      "case","POST",proofFingerprint,"dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    )),
+    error => error.code === "42501",
+    "HMAC proof must bind the office identity"
+  );
   console.log("PASS: reservation HMAC cannot be rebound across resource type, operation, fingerprint, or office");
 
   await assert.rejects(
