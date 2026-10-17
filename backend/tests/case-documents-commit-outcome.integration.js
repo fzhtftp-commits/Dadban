@@ -757,6 +757,18 @@ try {
   console.log("PASS: completed key reused for another case returns 409 without mutation or duplicate audit");
 
 
+  // Restore the synthetic API session for the separate backup/restore integration test,
+  // which independently verifies that a live test session survives database restoration.
+  await pool.query(
+    "update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
+    [hash(token), ids.user, ids.office]
+  );
+  assert.equal((await pool.query(
+    "select count(*)::int as count from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null and expires_at>now()",
+    [hash(token), ids.user, ids.office]
+  )).rows[0].count, 1, "restore the synthetic API session after expiry-specific assertions for downstream backup/restore tests");
+  console.log("PASS: expiry/re-login assertions completed; synthetic test API session restored for backup/restore coverage");
+
   console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; missing_key=428; cross_resource_key_reuse=409; case/client soft-delete replay is exact-once");
 
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE");
