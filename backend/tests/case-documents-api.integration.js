@@ -2318,7 +2318,7 @@ try {
   const adminAccount = roleAccounts.find(account => account.role === "admin");
   const sameOfficeOtherUser = await request("/api/clients", {
     token: adminAccount.token, csrf: adminAccount.csrf, method: "POST", idempotencyKey: genericKey,
-    body: { ...genericClientPayload, full_name: "Same Office Different User", national_id: "1234567891".replace("1234567891", "1234567800") }
+    body: { ...genericClientPayload, full_name: "Same Office Different User", national_id: "1234567891".replace("1234567891", "1234567806") }
   });
   assert.equal(sameOfficeOtherUser.status, 201, "same key under another user in the same office must not replay or conflict with user A");
   assert.notEqual(sameOfficeOtherUser.body.data.id, genericClientId);
@@ -2331,7 +2331,7 @@ try {
   const forgedScopeKey = "forged-scope-key-01";
   const forgedScopeResponse = await request("/api/clients", {
     token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: forgedScopeKey,
-    body: { ...genericClientPayload, full_name: "Forged Scope Fields", national_id: "1234567826", office_id: ids.officeB, user_id: ids.userB }
+    body: { ...genericClientPayload, full_name: "Forged Scope Fields", national_id: "1234567822", office_id: ids.officeB, user_id: ids.userB }
   });
   assert.equal(forgedScopeResponse.status, 201, "server must derive idempotency scope from authenticated context, not request body");
   const forgedScopeId = forgedScopeResponse.body.data.id;
@@ -2345,7 +2345,7 @@ try {
   )).rows[0].count), 0, "forged scope payload must not pre-reserve a key for another user/office");
   const rightfulScopeResponse = await request("/api/clients", {
     token: tokenB, csrf: csrfB, method: "POST", idempotencyKey: forgedScopeKey,
-    body: { ...genericClientPayload, full_name: "Rightful Scope Fields", national_id: "1234567826".replace("1234567826", "1234567834") }
+    body: { ...genericClientPayload, full_name: "Rightful Scope Fields", national_id: "1234567826".replace("1234567826", "1234567830") }
   });
   assert.equal(rightfulScopeResponse.status, 201, "the other office/user must be able to use the same key independently");
   assert.notEqual(rightfulScopeResponse.body.data.id, forgedScopeId);
