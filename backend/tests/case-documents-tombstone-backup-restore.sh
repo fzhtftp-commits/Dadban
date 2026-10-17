@@ -24,6 +24,41 @@ SELECT
 ")"
 echo "BACKUP SOURCE DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers,default_acl=$before"
 
+# Fingerprint every non-system relation, sequence, view, function, schema ACL,
+# explicit column ACL, owner, and effective object ACL. Compare by qualified
+# names, not OIDs, because pg_restore necessarily assigns new OIDs.
+catalog_fingerprint() {
+  local database="$1"
+  psql -h localhost -U postgres -X -A -t -v ON_ERROR_STOP=1 -d "$database" -c "
+WITH inventory(item) AS (
+  SELECT format('CLASS|%s|%s|%s|owner=%s|acl=%s', n.nspname, c.relname, c.relkind,
+    pg_get_userbyid(c.relowner),
+    coalesce(c.relacl, acldefault(CASE WHEN c.relkind='S' THEN 'S'::\"char\" ELSE 'r'::\"char\" END, c.relowner))::text)
+  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+    AND c.relkind IN ('r','p','v','m','S','f','i','I','c')
+  UNION ALL
+  SELECT format('FUNCTION|%s|%s|%s|owner=%s|acl=%s', n.nspname, p.proname,
+    pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner),
+    coalesce(p.proacl, acldefault('f'::\"char\",p.proowner))::text)
+  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+  WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+  UNION ALL
+  SELECT format('SCHEMA|%s|owner=%s|acl=%s', n.nspname, pg_get_userbyid(n.nspowner),
+    coalesce(n.nspacl,acldefault('n'::\"char\",n.nspowner))::text)
+  FROM pg_namespace n
+  WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+  UNION ALL
+  SELECT format('COLUMN|%s|%s|%s|acl=%s', n.nspname,c.relname,a.attname,a.attacl::text)
+  FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE a.attnum>0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
+    AND n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+)
+SELECT coalesce(string_agg(item, E'\\n' ORDER BY item),'') FROM inventory;
+"
+}
+catalog_before="$(catalog_fingerprint dadban_test)"
+
 pg_dump -h localhost -U postgres -Fc -d dadban_test -f "$backup"
 createdb -h localhost -U postgres "$restore_db"
 # Restore with original owners and ACLs intact. --no-owner would silently make
@@ -41,6 +76,14 @@ if [[ "$before" != "$after" ]]; then
   echo "FAIL: restore counts/trigger state differ: before=$before after=$after" >&2; exit 1
 fi
 echo "RESTORED DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers,default_acl=$after"
+
+catalog_after="$(catalog_fingerprint "$restore_db")"
+if [[ "$catalog_before" != "$catalog_after" ]]; then
+  echo "FAIL: object ownership/effective ACL inventory differs after pg_dump/pg_restore" >&2
+  diff -u <(printf '%s\\n' "$catalog_before") <(printf '%s\\n' "$catalog_after") || true
+  exit 1
+fi
+echo "PASS: pg_dump/pg_restore preserves ownership and effective ACL fingerprints for tables, views, sequences, functions, schemas, and explicit column grants"
 
 # A successful row/trigger restore is not enough: SECURITY DEFINER owners and
 # effective ACLs must survive the dump. Check all eight restricted helpers.
