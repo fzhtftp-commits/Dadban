@@ -211,6 +211,16 @@ try {
   );
   console.log("PASS: direct reservation/completion SQL is denied and invalid proof is rejected");
 
+  await denied("SELECT secret FROM dadban_private.api_mutation_idempotency_hmac_key", "reading API idempotency HMAC key material");
+  await assert.rejects(
+    runtimePool.query(completeSql, [
+      liveSessionId, userId, officeId, validKey, "case", "POST", proofFingerprint, caseId, 201, "0".repeat(64)
+    ]),
+    error => error.code === "42501",
+    "invalid completion proof must be rejected"
+  );
+  console.log("PASS: runtime cannot read the HMAC key and invalid completion proof is rejected");
+
   const completed = await runtimePool.query(completeSql, [
     liveSessionId, userId, officeId, validKey, "case", "POST", proofFingerprint, caseId, 201,
     makeCompleteProof(liveSessionId, userId, validKey, caseId, 201)
@@ -369,6 +379,40 @@ try {
     )
     ORDER BY p.proname
   `);
+  const apiProofFunctions = await pool.query(`
+    SELECT p.proname, pg_get_userbyid(p.proowner) AS function_owner,
+      p.prosecdef AS security_definer, p.proconfig,
+      owner.rolsuper AS owner_superuser, owner.rolcanlogin AS owner_can_login,
+      owner.rolcreatedb AS owner_createdb, owner.rolcreaterole AS owner_createrole,
+      owner.rolinherit AS owner_inherit,
+      has_function_privilege('dadban_document_runtime_ci',p.oid,'EXECUTE') AS runtime_execute,
+      EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f',p.proowner))) acl
+        WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE') AS public_execute,
+      (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid OR r.oid=m.member
+        WHERE r.rolname='dadban_api_idempotency_owner') AS owner_membership_count
+    FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner
+    WHERE p.oid IN (
+      'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure,
+      'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)'::regprocedure
+    )
+    ORDER BY p.proname
+  `);
+  assert.equal(apiProofFunctions.rowCount, 2, "both proof-bound API idempotency functions must exist");
+  for (const fn of apiProofFunctions.rows) {
+    assert.equal(fn.function_owner, "dadban_api_idempotency_owner");
+    assert.equal(fn.security_definer, true);
+    assert.deepEqual(fn.proconfig, ["search_path=pg_catalog, pg_temp"]);
+    assert.equal(fn.owner_superuser, false);
+    assert.equal(fn.owner_can_login, false);
+    assert.equal(fn.owner_createdb, false);
+    assert.equal(fn.owner_createrole, false);
+    assert.equal(fn.owner_inherit, false);
+    assert.equal(fn.owner_membership_count, 0);
+    assert.equal(fn.runtime_execute, true);
+    assert.equal(fn.public_execute, false);
+  }
+  console.log("PASS: proof functions use a non-login least-privilege owner and are not executable by PUBLIC");
+
   assert.equal(parentFunctionState.rowCount, 4, "all four parent lock helpers must exist");
   for (const fn of parentFunctionState.rows) {
     assert.equal(fn.function_owner, "dadban_actor_lock_owner");
