@@ -137,6 +137,9 @@ BEGIN
     OR NOT has_database_privilege('$restore','$target_db','TEMPORARY') THEN
    RAISE EXCEPTION 'restore target database effective privilege contract is incomplete';
  END IF;
+ IF (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname='$target_db') = '$restore' THEN
+   RAISE EXCEPTION 'restore executor unexpectedly owns the target database';
+ END IF;
  IF NOT has_database_privilege('$owner_a','$target_db','CREATE')
     OR NOT has_database_privilege('$owner_b','$target_db','CREATE')
     OR (SELECT bool_or(rolcreatedb) FROM pg_roles WHERE rolname IN ('$owner_a','$owner_b')) THEN
@@ -230,9 +233,14 @@ BEGIN
    SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n'::"char",n.nspowner))) a
    WHERE n.nspname='$schema' AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
  ) OR EXISTS (
+   SELECT 1 FROM pg_attribute ca JOIN pg_class cc ON cc.oid=ca.attrelid JOIN pg_namespace cn ON cn.oid=cc.relnamespace
+   CROSS JOIN LATERAL aclexplode(ca.attacl) a
+   WHERE cn.nspname='$schema' AND ca.attnum>0 AND NOT ca.attisdropped
+     AND ca.attacl IS NOT NULL AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
+ ) OR EXISTS (
    SELECT 1 FROM pg_database d CROSS JOIN LATERAL aclexplode(coalesce(d.datacl,acldefault('d'::"char",d.datdba))) a
    WHERE d.datname=current_database() AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
- ) THEN RAISE EXCEPTION 'backup/restore role unexpectedly has object or database GRANT OPTION in database %', current_database(); END IF;
+ ) THEN RAISE EXCEPTION 'backup/restore role unexpectedly has object, column, or database GRANT OPTION in database %', current_database(); END IF;
 END
 \$acl_guard\$;
 SQL
