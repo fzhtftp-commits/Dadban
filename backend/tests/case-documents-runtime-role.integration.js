@@ -192,9 +192,25 @@ try {
     "../migrations/010_api_mutation_idempotency.sql",
     "../migrations/011_api_mutation_idempotency_tombstones.sql",
     "../migrations/012_api_mutation_idempotency_tombstone_guards.sql",
-    "../migrations/013_api_mutation_idempotency_proof_functions.sql"
+    "../migrations/013_api_mutation_idempotency_proof_functions.sql",
+    "../migrations/014_security_definer_acl_reconciliation.sql"
   ]) {
     const migrationSql = await readFile(new URL(path, import.meta.url), "utf8");
+    if (path === "../migrations/014_security_definer_acl_reconciliation.sql") {
+      await pool.query("CREATE ROLE dadban_actor_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
+      const aclSignatures = [
+        "public.lock_live_document_actor(uuid,uuid,uuid)","public.lock_live_client_parent(uuid,uuid)",
+        "public.lock_live_case_client(uuid,uuid)","public.lock_live_case_parents(uuid,uuid[])",
+        "public.lock_live_case_reassignment(uuid,uuid,uuid)",
+        "public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)",
+        "public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)",
+        "public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)"
+      ];
+      for (const signature of aclSignatures) {
+        await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
+        await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_document_runtime_ci WITH GRANT OPTION");
+      }
+    }
     if (path === "../migrations/008_security_definer_document_actor_lock.sql") {
       // Seed stale schema CREATE privilege before the first successful migration.
       // Migration 008 must normalize this drift; a failed membership preflight
@@ -309,45 +325,39 @@ try {
         path + " must revoke stale CREATE on public from actor-lock owner");
       console.log("PASS: " + path + " removes stale CREATE on public from SECURITY DEFINER owner");
 
-      // CREATE OR REPLACE does not reset function ACLs. Seed a stale direct
-      // grant and runtime GRANT OPTION, replay this migration, and inspect the
-      // effective catalog ACL rather than trusting the GRANT statements alone.
-      const aclProbe = "dadban_actor_acl_probe_ci";
-      const probeExists = await pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [aclProbe]);
-      assert.equal(probeExists.rowCount, 0, "refusing to reuse pre-existing function ACL probe role");
-      await pool.query("CREATE ROLE dadban_actor_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
-      const signatures = path === "../migrations/008_security_definer_document_actor_lock.sql"
-        ? [
-            "public.lock_live_document_actor(uuid,uuid,uuid)",
-            "public.lock_live_client_parent(uuid,uuid)",
-            "public.lock_live_case_client(uuid,uuid)",
-            "public.lock_live_case_parents(uuid,uuid[])"
-          ]
-        : ["public.lock_live_case_reassignment(uuid,uuid,uuid)"];
+    }
+    if (path === "../migrations/014_security_definer_acl_reconciliation.sql") {
+      const aclSignatures = [
+        "public.lock_live_document_actor(uuid,uuid,uuid)","public.lock_live_client_parent(uuid,uuid)",
+        "public.lock_live_case_client(uuid,uuid)","public.lock_live_case_parents(uuid,uuid[])",
+        "public.lock_live_case_reassignment(uuid,uuid,uuid)",
+        "public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)",
+        "public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)",
+        "public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)"
+      ];
       try {
-        for (const signature of signatures) {
-          await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
-          await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_document_runtime_ci WITH GRANT OPTION");
-        }
-        await pool.query(migrationSql);
-        for (const signature of signatures) {
+        for (const signature of aclSignatures) {
           const state = await pool.query(
-            "SELECT has_function_privilege($1,$2,'EXECUTE') AS probe_execute, " +
-            "has_function_privilege($3,$2,'EXECUTE') AS runtime_execute, " +
-            "EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a " +
-            "JOIN pg_roles r ON r.oid=a.grantee WHERE p.oid=$2::regprocedure AND r.rolname=$3 AND a.privilege_type='EXECUTE' AND a.is_grantable) AS runtime_grant_option",
-            [aclProbe, signature, "dadban_document_runtime_ci"]
-          );
-          assert.equal(state.rows[0].probe_execute, false, signature + " must not retain stale direct EXECUTE");
-          assert.equal(state.rows[0].runtime_execute, true, signature + " must retain approved runtime EXECUTE");
-          assert.equal(state.rows[0].runtime_grant_option, false, signature + " must not let runtime delegate EXECUTE");
+            "SELECT has_function_privilege($1,$2,'EXECUTE') AS probe_execute, has_function_privilege($3,$2,'EXECUTE') AS runtime_execute, " +
+            "EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a JOIN pg_roles r ON r.oid=a.grantee WHERE p.oid=$2::regprocedure AND r.rolname=$3 AND a.privilege_type='EXECUTE' AND a.is_grantable) AS runtime_grant_option, " +
+            "EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE p.oid=$2::regprocedure AND a.grantee=0 AND a.privilege_type='EXECUTE') AS public_execute",
+            ["dadban_actor_acl_probe_ci",signature,"dadban_document_runtime_ci"]);
+          assert.equal(state.rows[0].probe_execute,false,signature+" must not retain stale direct EXECUTE");
+          assert.equal(state.rows[0].runtime_execute,true,signature+" must retain approved runtime EXECUTE");
+          assert.equal(state.rows[0].runtime_grant_option,false,signature+" must not let runtime delegate EXECUTE");
+          assert.equal(state.rows[0].public_execute,false,signature+" must not be executable by PUBLIC");
         }
-        console.log("PASS: " + path + " removes stale function EXECUTE grants and runtime grant options on migration replay");
+        const defaults = await pool.query(
+          "SELECT count(*)::int AS n FROM pg_default_acl d JOIN pg_roles r ON r.oid=d.defaclrole CROSS JOIN LATERAL aclexplode(d.defaclacl) a " +
+          "WHERE r.rolname IN ('dadban_actor_lock_owner','dadban_api_idempotency_owner') AND d.defaclobjtype='f' AND a.grantee=0 AND a.privilege_type='EXECUTE'");
+        assert.equal(defaults.rows[0].n,0,"definer owners must not have PUBLIC EXECUTE default privileges");
+        console.log("PASS: migration 014 removes stale EXECUTE grants, runtime grant options, PUBLIC EXECUTE, and unsafe definer default ACLs");
       } finally {
-        await pool.query("DROP OWNED BY dadban_actor_acl_probe_ci").catch(() => {});
+        await pool.query("DROP OWNED BY dadban_actor_acl_probe_ci").catch(()=>{});
         await pool.query("DROP ROLE IF EXISTS dadban_actor_acl_probe_ci");
       }
     }
+
   }
 
   // Dedicated test database only: model the schema-owner/migrator trust boundary for case_documents.
