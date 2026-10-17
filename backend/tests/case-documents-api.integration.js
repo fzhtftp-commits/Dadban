@@ -2383,10 +2383,16 @@ try {
     "update api_mutation_idempotency set response_body=null,response_body_purged=true,purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and completed_at is not null",
     [ids.officeA, ids.userA, purgeCreateKey]
   );
+  await pool.query("update users set role='viewer' where id=$1 and office_id=$2", [ids.userA, ids.officeA]);
+  const deniedPurgedReplay = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: purgeCreateKey, body: purgeCreatePayload
+  });
+  assert.equal(deniedPurgedReplay.status, 403, "current authorization must be checked before exposing tombstone state");
+  await pool.query("update users set role='owner' where id=$1 and office_id=$2", [ids.userA, ids.officeA]);
   const purgedCreateReplay = await request("/api/clients", {
     token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: purgeCreateKey, body: purgeCreatePayload
   });
-  assert.equal(purgedCreateReplay.status, 410, "purged POST replay must return a controlled 410");
+  assert.equal(purgedCreateReplay.status, 410, "authorized purged POST replay must return a controlled 410");
   assert.deepEqual(purgedCreateReplay.body, { error: "idempotency_result_purged" });
   assert.equal(Number((await pool.query("select count(*)::int as count from clients where office_id=$1 and id=$2", [ids.officeA, purgeClientId])).rows[0].count), 1, "purged POST replay must not create a duplicate");
   assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='create'", [ids.officeA, ids.userA, purgeClientId])).rows[0].count), 1, "purged POST replay must not duplicate audit");
