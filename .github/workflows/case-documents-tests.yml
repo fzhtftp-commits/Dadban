@@ -80,6 +80,14 @@ jobs:
         run: bash tests/case-documents-tombstone-role-separation.sh
         working-directory: backend
 
+      - name: Verify independent PostgreSQL ownership and effective ACL matrix
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGDATABASE: dadban_test
+        run: bash tests/postgres-ownership-acl-matrix.sh
+        working-directory: backend
+
       - name: Verify tombstone migration rerun fails atomically in disposable PostgreSQL
         env:
           PGPASSWORD: postgres
