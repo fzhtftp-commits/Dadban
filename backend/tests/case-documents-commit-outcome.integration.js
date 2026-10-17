@@ -699,27 +699,28 @@ try {
     "different-user replay must not add a delete audit event");
   console.log("PASS: different user in same office cannot replay or disclose completed DELETE result");
 
-  // A user in a different office must likewise receive no result disclosure.
+  // Provision a valid second-office session directly in the disposable PostgreSQL database.
+  // This isolates authorization from the public registration endpoint and its rate limit.
   const otherOfficeEmail = "commit-outcome-other-office-" + crypto.randomUUID() + "@example.test";
-  const otherOfficePassword = "CommitOutcome-office-password-2026!";
-  const registerResponse = await fetch(`http://127.0.0.1:${apiPort}/api/auth/register`, {
-    method: "POST",
-    headers: { origin, "content-type": "application/json" },
-    body: JSON.stringify({
-      full_name: "Other Office Test Owner",
-      email: otherOfficeEmail,
-      password: otherOfficePassword,
-      office_name: "Commit Outcome Isolated Office"
-    }),
-    signal: AbortSignal.timeout(10000)
-  });
-  const registerBody = await registerResponse.json();
-  assert.equal(registerResponse.status, 201, `test-only other-office registration should succeed; got HTTP ${registerResponse.status}: ${JSON.stringify(registerBody)}`);
-  const otherOfficeSessionCookie = registerResponse.headers.getSetCookie().find(value => value.startsWith("dadban_session="));
-  assert.ok(otherOfficeSessionCookie, "registration must issue a new office session");
-  const otherOfficeToken = decodeURIComponent(otherOfficeSessionCookie.split(";", 1)[0].slice("dadban_session=".length));
-  const otherOfficeCsrf = registerBody.data.csrf_token;
-  assert.notEqual(registerBody.data.user.office_id, ids.office);
+  const otherOfficeId = crypto.randomUUID();
+  const otherOfficeUserId = crypto.randomUUID();
+  const otherOfficeToken = crypto.randomBytes(32).toString("base64url");
+  const otherOfficeCsrf = crypto.randomBytes(32).toString("base64url");
+  await pool.query("insert into offices (id,name) values ($1,$2)", [otherOfficeId, "Commit Outcome Isolated Office"]);
+  await pool.query(
+    "insert into users (id,office_id,full_name,email,role) values ($1,$2,$3,$4,'owner')",
+    [otherOfficeUserId, otherOfficeId, "Other Office Test Owner", otherOfficeEmail]
+  );
+  await pool.query(
+    "insert into auth_sessions (user_id,office_id,token_hash,csrf_hash,expires_at) values ($1,$2,$3,$4,now()+interval '1 hour')",
+    [otherOfficeUserId, otherOfficeId, hash(otherOfficeToken), hash(otherOfficeCsrf)]
+  );
+  const otherOfficeSessionCheck = await pool.query(
+    "select count(*)::int as count from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null and expires_at>now()",
+    [hash(otherOfficeToken), otherOfficeUserId, otherOfficeId]
+  );
+  assert.equal(otherOfficeSessionCheck.rows[0].count, 1, "other-office test session must be valid");
+  assert.notEqual(otherOfficeId, ids.office, "test office must be distinct from the operation owner office");
   const auditBeforeOtherOfficeReplay = await countEntityAudit("case", sessionCaseId, "delete");
   const otherOfficeReplay = await request(`/api/cases/${sessionCaseId}`, {
     method: "DELETE", key: sessionRetryKey,
@@ -728,7 +729,7 @@ try {
   assert.equal(otherOfficeReplay.status, 404, "different office must not learn or replay the owner's completed DELETE");
   assert.equal((await pool.query(
     "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and idempotency_key=$2",
-    [registerBody.data.user.office_id, sessionRetryKey]
+    [otherOfficeId, sessionRetryKey]
   )).rows[0].count, 0, "different-office denied replay must not leave an idempotency reservation");
   assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), auditBeforeOtherOfficeReplay,
     "different-office replay must not add a delete audit event");
