@@ -518,7 +518,7 @@ try {
   assert.equal(clientPatchFirst.status, 200);
   const clientPatchReplay = await request(`/api/clients/${createdClientId}`, "PATCH", clientPatchBody, { idempotencyKey: clientPatchKey });
   assert.equal(clientPatchReplay.status, 200);
-  assert.deepEqual(clientPatchReplay.body, clientPatchFirst.body);
+  assert.deepEqual(clientPatchReplay.body, { data: { id: createdClientId } }, "PATCH replay must expose only the stable resource identifier");
   const clientPatchConflict = await request(`/api/clients/${createdClientId}`, "PATCH", { full_name: "Different Client Payload" }, { idempotencyKey: clientPatchKey });
   assert.equal(clientPatchConflict.status, 409);
   assert.equal(await countEntityAudit("client", createdClientId, "update"), 1);
@@ -544,7 +544,7 @@ try {
   const createdCaseId = caseCreateFirst.body.data.id;
   const caseCreateReplay = await request("/api/cases", "POST", caseCreateBody, { idempotencyKey: caseCreateKey });
   assert.equal(caseCreateReplay.status, 201);
-  assert.deepEqual(caseCreateReplay.body, caseCreateFirst.body);
+  assert.deepEqual(caseCreateReplay.body, { data: { id: createdCaseId } }, "case POST replay must expose only the stable resource identifier");
   assert.equal(await countKey(caseCreateKey), 1);
   assert.equal(await countEntityAudit("case", createdCaseId, "create"), 1);
   const caseConflict = await request("/api/cases", "POST", { ...caseCreateBody, title: "Conflicting Case" }, { idempotencyKey: caseCreateKey });
@@ -557,7 +557,7 @@ try {
   assert.equal(casePatchFirst.status, 200);
   const casePatchReplay = await request(`/api/cases/${createdCaseId}`, "PATCH", casePatchBody, { idempotencyKey: casePatchKey });
   assert.equal(casePatchReplay.status, casePatchFirst.status);
-  assert.deepEqual(casePatchReplay.body, casePatchFirst.body);
+  assert.deepEqual(casePatchReplay.body, { data: { id: createdCaseId } }, "case PATCH replay must expose only the stable resource identifier");
   assert.equal(await countEntityAudit("case", createdCaseId, "update"), 1);
   console.log("PASS: generic case POST/PATCH replay and payload conflict preserve exact audit counts");
 
@@ -569,7 +569,7 @@ try {
   const hearingId = hearingFirst.body.data.id;
   const hearingReplay = await request("/api/hearings", "POST", hearingBody, { idempotencyKey: hearingCreateKey });
   assert.equal(hearingReplay.status, hearingFirst.status);
-  assert.deepEqual(hearingReplay.body, hearingFirst.body);
+  assert.deepEqual(hearingReplay.body, { data: { id: hearingId } }, "hearing POST replay must expose only the stable resource identifier");
   assert.equal(await countEntityAudit("hearing", hearingId, "create"), 1);
   const hearingPatchKey = "generic-hearing-patch-01";
   const hearingPatchBody = { notes: "updated once" };
@@ -577,7 +577,7 @@ try {
   const hearingPatchReplay = await request(`/api/hearings/${hearingId}`, "PATCH", hearingPatchBody, { idempotencyKey: hearingPatchKey });
   assert.equal(hearingPatchFirst.status, 200);
   assert.equal(hearingPatchReplay.status, hearingPatchFirst.status);
-  assert.deepEqual(hearingPatchReplay.body, hearingPatchFirst.body);
+  assert.deepEqual(hearingPatchReplay.body, { data: { id: hearingId } }, "hearing PATCH replay must expose only the stable resource identifier");
   assert.equal(await countEntityAudit("hearing", hearingId, "update"), 1);
   const hearingDeleteKey = "generic-hearing-delete-01";
   const hearingDeleteFirst = await request(`/api/hearings/${hearingId}`, "DELETE", undefined, { idempotencyKey: hearingDeleteKey });
@@ -595,7 +595,7 @@ try {
   const actionId = actionFirst.body.data.id;
   const actionReplay = await request("/api/actions", "POST", actionBody, { idempotencyKey: actionCreateKey });
   assert.equal(actionReplay.status, actionFirst.status);
-  assert.deepEqual(actionReplay.body, actionFirst.body);
+  assert.deepEqual(actionReplay.body, { data: { id: actionId } }, "action POST replay must expose only the stable resource identifier");
   assert.equal(await countEntityAudit("case_action", actionId, "create"), 1);
   const actionPatchKey = "generic-action-patch-01";
   const actionPatchBody = { title: "Idempotent Action Updated" };
@@ -603,7 +603,7 @@ try {
   const actionPatchReplay = await request(`/api/actions/${actionId}`, "PATCH", actionPatchBody, { idempotencyKey: actionPatchKey });
   assert.equal(actionPatchFirst.status, 200);
   assert.equal(actionPatchReplay.status, actionPatchFirst.status);
-  assert.deepEqual(actionPatchReplay.body, actionPatchFirst.body);
+  assert.deepEqual(actionPatchReplay.body, { data: { id: actionId } }, "action PATCH replay must expose only the stable resource identifier");
   assert.equal(await countEntityAudit("case_action", actionId, "update"), 1);
   const actionDeleteKey = "generic-action-delete-01";
   const actionDeleteFirst = await request(`/api/actions/${actionId}`, "DELETE", undefined, { idempotencyKey: actionDeleteKey });
