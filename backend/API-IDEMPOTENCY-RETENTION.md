@@ -81,3 +81,23 @@ Run the tests as the actual runtime login (not the migration/table owner) agains
 
 **Status:** this section is a reviewed design proposal, not an implementation or proof of remediation. No schema, API runtime, Render deployment, production database, or `main` branch was changed by this follow-up. Do not mark the issue resolved until the API/schema implementation and all applicable isolated PostgreSQL tests pass on the same SHA.
 
+## Implementation update — proof-bound API idempotency (2026-10-17)
+
+Migration `013_api_mutation_idempotency_proof_functions.sql` and `backend/src/server.js` now route generic API idempotency reservations/completions through the narrowly scoped `reserve_api_mutation_idempotency` and `complete_api_mutation_idempotency` SECURITY DEFINER functions. The functions have a dedicated `NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT` owner, fixed `search_path = pg_catalog, pg_temp`, fully qualified table references, and no PUBLIC EXECUTE. Known runtime roles receive SELECT plus EXECUTE on these two functions, but no direct INSERT/UPDATE on `api_mutation_idempotency`. The function owner has only the table and row-lock privileges needed by this protocol and is checked for role memberships.
+
+Each proof is an HMAC-SHA256 over a versioned, delimiter-separated canonical tuple containing transition name, live session ID, user ID, office ID, key, resource type, operation, request fingerprint, and (for completion) resource ID/status. The database independently verifies the HMAC against a secret in `dadban_private.api_mutation_idempotency_hmac_key`, locks the session and user in deterministic order, rechecks that the session is not revoked or expired and that the user is active/not deleted, then performs the one allowed transition. The completion function derives the minimal replay body inside PostgreSQL instead of accepting caller-supplied JSON. Direct SQL alone cannot mint a valid proof unless the caller also compromises the application-held HMAC secret.
+
+### Required secret provisioning (not performed in this repository change)
+
+Migration 013 intentionally creates the protected singleton key row with `secret = NULL`; this fails closed until provisioned. A deployment operator must use a secret manager to generate a random 32-byte key represented as exactly 64 lowercase hexadecimal characters, set the same value as `API_MUTATION_IDEMPOTENCY_HMAC_KEY` for the API process, and provision the database value through a parameterized query executed by the authorized schema/migration owner:
+
+`UPDATE dadban_private.api_mutation_idempotency_hmac_key SET secret = decode($1, 'hex') WHERE singleton = true`
+
+The query must be executed with the 64-hex secret as a bound parameter, never interpolated into committed SQL, logs, shell history, or this document. Verify exactly one row was updated and verify only the designated non-login function owner can SELECT the key table. Do not deploy the API change until both halves are provisioned consistently. Key rotation is not implemented by migration 013; do not rotate only one side or reuse a session/CSRF/database password as this key.
+
+### Isolated regression coverage added
+
+`backend/tests/case-documents-runtime-role.integration.js` now applies migration 013 only to its guarded localhost disposable database and tests direct INSERT/UPDATE denial, secret-table read denial, invalid reservation/completion proofs, valid one-time completion, completion rewrite rejection, tombstone irreversibility/replay retention, revoked and expired sessions, an old revoked session after re-login, and a session/user mismatch. It also inspects function ownership, SECURITY DEFINER/search_path, PUBLIC EXECUTE, runtime grants, and owner role membership. `backend/tests/audit-mutation-rollback.integration.js` applies migration 013 and provisions only its dedicated disposable database; failed audit writes assert the generic idempotency reservation rolls back with the mutation, while its existing successful replay checks continue to exercise the HTTP API.
+
+**Verification status:** these are code and test changes on the audit branch only. They are not considered fixed until both GitHub Actions runs on the exact resulting SHA finish successfully and the isolated PostgreSQL suite passes. No production key has been provisioned, and no production database, Render service, or `main` branch was touched.
+
