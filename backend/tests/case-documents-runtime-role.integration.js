@@ -159,7 +159,9 @@ try {
     GRANT INSERT ON public.audit_logs TO dadban_document_runtime_ci;
     GRANT SELECT, INSERT ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
     GRANT UPDATE (response_status) ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
-    GRANT SELECT, INSERT ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
+    GRANT SELECT ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
+    GRANT INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint)
+      ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
     GRANT UPDATE (resource_id,response_status,response_body,completed_at) ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
   `);
 
