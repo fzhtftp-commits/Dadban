@@ -429,7 +429,7 @@ const beginApiMutationIdempotency = async (client, req, key, resourceType, opera
   if (!key) return { kind: "new", key: null };
   const fingerprint = apiMutationFingerprint(resourceType, operation, entityId, payload);
   const inserted = await client.query(
-    "insert into public.api_mutation_idempotency(office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,completed_at) values($1,$2,$3,$4,$5,$6,null,null,null,null) on conflict (office_id,user_id,idempotency_key) do nothing returning idempotency_key",
+    "insert into public.api_mutation_idempotency(office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint) values($1,$2,$3,$4,$5,$6) on conflict (office_id,user_id,idempotency_key) do nothing returning idempotency_key",
     [req.auth.officeId, req.auth.userId, key, resourceType, operation, fingerprint]
   );
   if (inserted.rowCount) return { kind: "new", key, fingerprint };
