@@ -2314,6 +2314,43 @@ try {
     [ids.officeB, ids.userB, genericKey]
   )).rows[0].count), 1, "office B must persist its own idempotency row");
 
+  // Isolate the user dimension: another authenticated user in the same office may use the same key independently.
+  const adminAccount = roleAccounts.find(account => account.role === "admin");
+  const sameOfficeOtherUser = await request("/api/clients", {
+    token: adminAccount.token, csrf: adminAccount.csrf, method: "POST", idempotencyKey: genericKey,
+    body: { ...genericClientPayload, full_name: "Same Office Different User", national_id: "1234567891".replace("1234567891", "1234567800") }
+  });
+  assert.equal(sameOfficeOtherUser.status, 201, "same key under another user in the same office must not replay or conflict with user A");
+  assert.notEqual(sameOfficeOtherUser.body.data.id, genericClientId);
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userAdmin, genericKey]
+  )).rows[0].count), 1, "same-office other user must own a distinct idempotency row");
+
+  // A caller cannot choose idempotency scope by smuggling office_id/user_id in a business payload.
+  const forgedScopeKey = "forged-scope-key-01";
+  const forgedScopeResponse = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: forgedScopeKey,
+    body: { ...genericClientPayload, full_name: "Forged Scope Fields", national_id: "1234567826", office_id: ids.officeB, user_id: ids.userB }
+  });
+  assert.equal(forgedScopeResponse.status, 201, "server must derive idempotency scope from authenticated context, not request body");
+  const forgedScopeId = forgedScopeResponse.body.data.id;
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, forgedScopeKey]
+  )).rows[0].count), 1, "forged scope payload must reserve only the authenticated user/office key");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeB, ids.userB, forgedScopeKey]
+  )).rows[0].count), 0, "forged scope payload must not pre-reserve a key for another user/office");
+  const rightfulScopeResponse = await request("/api/clients", {
+    token: tokenB, csrf: csrfB, method: "POST", idempotencyKey: forgedScopeKey,
+    body: { ...genericClientPayload, full_name: "Rightful Scope Fields", national_id: "1234567826".replace("1234567826", "1234567834") }
+  });
+  assert.equal(rightfulScopeResponse.status, 201, "the other office/user must be able to use the same key independently");
+  assert.notEqual(rightfulScopeResponse.body.data.id, forgedScopeId);
+  console.log("PASS: idempotency scope is authenticated-user/office bound; same-office user isolation and forged request scope are rejected");
+
   // Authorization must be evaluated before replaying a previously successful result.
   await pool.query("update users set role='viewer' where id=$1 and office_id=$2", [ids.userA, ids.officeA]);
   const deniedGenericReplay = await request("/api/clients", {
