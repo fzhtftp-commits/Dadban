@@ -29,6 +29,10 @@ BEGIN
      AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_ci') THEN
     EXECUTE 'REVOKE dadban_document_runtime_ci FROM dadban_api_idempotency_member_probe_ci';
   END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_api_idempotency_member_probe_ci')
+     AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_api_idempotency_acl_probe_ci') THEN
+    EXECUTE 'REVOKE dadban_api_idempotency_acl_probe_ci FROM dadban_api_idempotency_member_probe_ci';
+  END IF;
 END
 $cleanup$;
 DROP ROLE IF EXISTS dadban_api_idempotency_acl_probe_ci;
@@ -43,6 +47,8 @@ psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test -f migrations
 
 psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test <<'SQL'
 CREATE ROLE dadban_api_idempotency_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+CREATE ROLE dadban_api_idempotency_member_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+GRANT dadban_api_idempotency_acl_probe_ci TO dadban_api_idempotency_member_probe_ci;
 GRANT EXECUTE ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO dadban_api_idempotency_acl_probe_ci;
 GRANT EXECUTE ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO dadban_api_idempotency_acl_probe_ci;
 GRANT EXECUTE ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) TO dadban_api_idempotency_acl_probe_ci;
@@ -61,6 +67,14 @@ BEGIN
        'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)','EXECUTE') THEN
     RAISE EXCEPTION 'unexpected role retained EXECUTE after migration rerun';
   END IF;
+  IF has_function_privilege('dadban_api_idempotency_member_probe_ci',
+       'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)','EXECUTE')
+     OR has_function_privilege('dadban_api_idempotency_member_probe_ci',
+       'public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)','EXECUTE')
+     OR has_function_privilege('dadban_api_idempotency_member_probe_ci',
+       'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)','EXECUTE') THEN
+    RAISE EXCEPTION 'intermediary role membership retained effective EXECUTE after migration rerun';
+  END IF;
   IF NOT has_function_privilege('dadban_document_runtime_ci',
        'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)','EXECUTE')
      OR NOT has_function_privilege('dadban_document_runtime_ci',
@@ -72,10 +86,9 @@ BEGIN
 END
 $assert_acl$;
 SQL
-echo "PASS: migration rerun removes stale function EXECUTE grants and preserves intended runtime grants"
+echo "PASS: migration rerun removes stale direct and inherited function EXECUTE grants and preserves intended runtime grants"
 
 # A role granted membership in the runtime role must be rejected in either membership direction.
-psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test -c   "CREATE ROLE dadban_api_idempotency_member_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT"
 psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test -c   "GRANT dadban_document_runtime_ci TO dadban_api_idempotency_member_probe_ci"
 if psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test -f migrations/013_api_mutation_idempotency_proof_functions.sql; then
   echo "Migration unexpectedly accepted a role granted membership in the runtime role" >&2
