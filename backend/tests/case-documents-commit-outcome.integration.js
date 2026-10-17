@@ -615,7 +615,7 @@ try {
     "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
     [ids.office, ids.user, sessionRetryKey]
   )).rows[0].count, 1, "session expiry must not erase the durable operation identity");
-  assert.equal(await countEntityAudit("case", raceCaseId, "delete"), 1, "session-expiry retry must not duplicate audit");
+  assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), 1, "session-expiry retry must not duplicate audit");
   console.log("PASS: expired session gets 401; after same-user reauthentication, same-key replay returns 204 without duplicate audit");
 
   console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; missing_key=428; cross_resource_key_reuse=409; case/client soft-delete replay is exact-once");
