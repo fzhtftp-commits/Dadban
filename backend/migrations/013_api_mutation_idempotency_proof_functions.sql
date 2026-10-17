@@ -342,6 +342,42 @@ REVOKE CREATE ON SCHEMA public FROM dadban_api_idempotency_owner;
 REVOKE ALL ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) FROM PUBLIC;
 
+-- CREATE OR REPLACE preserves pre-existing function ACLs. Reset every explicit
+-- EXECUTE grant to non-owner/non-runtime roles before granting the intended runtime.
+-- This also removes stale grants left by an earlier deployment or manual drift.
+DO $function_acl_hardening$
+DECLARE
+  fn record;
+  grantee record;
+BEGIN
+  FOR fn IN
+    SELECT p.oid, p.proname, pg_get_function_identity_arguments(p.oid) AS identity_args,
+           p.proowner
+    FROM pg_proc p
+    WHERE p.oid IN (
+      'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure,
+      'public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure,
+      'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)'::regprocedure
+    )
+  LOOP
+    FOR grantee IN
+      SELECT DISTINCT r.rolname
+      FROM aclexplode(coalesce(
+        (SELECT p.proacl FROM pg_proc p WHERE p.oid=fn.oid),
+        acldefault('f', fn.proowner)
+      )) acl
+      JOIN pg_roles r ON r.oid=acl.grantee
+      WHERE acl.privilege_type='EXECUTE'
+        AND r.oid <> fn.proowner
+        AND r.rolname NOT IN ('dadban_document_runtime','dadban_document_runtime_ci')
+    LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I',
+        fn.oid::regprocedure, grantee.rolname);
+    END LOOP;
+  END LOOP;
+END
+$function_acl_hardening$;
+
 DO $runtime_grants$
 DECLARE runtime_name text;
 BEGIN
@@ -349,10 +385,10 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = runtime_name) THEN
       IF EXISTS (
         SELECT 1 FROM pg_auth_members m
-        JOIN pg_roles member_role ON member_role.oid = m.member
+        JOIN pg_roles member_role ON member_role.oid = m.member OR member_role.oid = m.roleid
         WHERE member_role.rolname = runtime_name
       ) THEN
-        RAISE EXCEPTION 'runtime role % must not be a member of another role', runtime_name;
+        RAISE EXCEPTION 'runtime role % must not participate in role memberships', runtime_name;
       END IF;
       EXECUTE format('REVOKE ALL ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE SELECT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
