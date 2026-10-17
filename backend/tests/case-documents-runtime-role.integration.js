@@ -324,6 +324,10 @@ try {
   await denied("UPDATE public.case_document_mutation_idempotency SET purged_at=NULL", "UPDATE tombstone marker");
   await denied("TRUNCATE public.case_document_mutation_idempotency", "TRUNCATE idempotency table");
   await denied("ALTER TABLE public.case_document_mutation_idempotency DISABLE TRIGGER ALL", "disable tombstone triggers");
+  await denied("DELETE FROM public.api_mutation_idempotency", "DELETE generic idempotency identity");
+  await denied("UPDATE public.api_mutation_idempotency SET response_body_purged=false", "UPDATE generic tombstone marker");
+  await denied("TRUNCATE public.api_mutation_idempotency", "TRUNCATE generic idempotency table");
+  await denied("ALTER TABLE public.api_mutation_idempotency DISABLE TRIGGER ALL", "disable generic tombstone triggers");
 
   const counts = await pool.query(`
     SELECT
