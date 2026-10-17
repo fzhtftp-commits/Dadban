@@ -196,11 +196,18 @@ try {
       has_table_privilege('dadban_document_runtime_ci','public.audit_logs','DELETE') AS can_delete_audit,
       has_table_privilege('dadban_document_runtime_ci','public.case_document_mutation_idempotency','DELETE') AS can_delete_idem,
       has_table_privilege('dadban_document_runtime_ci','public.case_document_mutation_idempotency','TRUNCATE') AS can_truncate_idem,
-      has_column_privilege('dadban_document_runtime_ci','public.case_document_mutation_idempotency','purged_at','UPDATE') AS can_update_purged_at
+      has_column_privilege('dadban_document_runtime_ci','public.case_document_mutation_idempotency','purged_at','UPDATE') AS can_update_purged_at,
+      has_table_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','UPDATE') AS can_update_api_idem_table,
+      has_table_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','DELETE') AS can_delete_api_idem,
+      has_table_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','TRUNCATE') AS can_truncate_api_idem,
+      has_table_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','TRIGGER') AS can_manage_api_idem_triggers,
+      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','response_status','UPDATE') AS can_complete_api_idem,
+      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','response_body_purged','UPDATE') AS can_update_api_purged_flag,
+      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','purged_at','UPDATE') AS can_update_api_purged_at
     FROM pg_roles r WHERE r.rolname='dadban_document_runtime_ci'
   `);
   const role = roleState.rows[0];
-  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_update_full_name","can_update_user_role","can_update_user_active","can_update_user_deleted","can_update_clients","can_update_cases","can_update_client_deleted","can_update_case_deleted","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at"]) {
+  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_update_full_name","can_update_user_role","can_update_user_active","can_update_user_deleted","can_update_clients","can_update_cases","can_update_client_deleted","can_update_case_deleted","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at","can_update_api_idem_table","can_delete_api_idem","can_truncate_api_idem","can_manage_api_idem_triggers","can_update_api_purged_flag","can_update_api_purged_at"]) {
     assert.equal(role[attr], false, `runtime role must not have ${attr}`);
   }
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
