@@ -115,6 +115,7 @@ try {
   await pool.query(await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/010_api_mutation_idempotency.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/011_api_mutation_idempotency_tombstones.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/012_api_mutation_idempotency_tombstone_guards.sql", import.meta.url), "utf8"));
 
   await pool.query(
     "insert into offices(id,name) values ($1,'Audit Mutation Test Office')",
