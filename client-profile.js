@@ -6,15 +6,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const editButton = document.getElementById("editClient");
   const deleteButton = document.getElementById("deleteClient");
   const csrfToken = () => sessionStorage.getItem("dadban_csrf") || "";
-  const deleteIdempotencyStorageKey = `dadban:delete:client:${id || "missing"}`;
-  const deleteIdempotencyKey = () => {
-    let key = localStorage.getItem(deleteIdempotencyStorageKey);
-    if (!key) {
-      key = crypto.randomUUID();
-      localStorage.setItem(deleteIdempotencyStorageKey, key);
-    }
-    return key;
-  };
+  // A resource-scoped deterministic key is identical in every tab and survives reloads/session reauthentication.
+  // DELETE is one-way soft-delete, so each client has one logical delete operation.
+  const deleteIdempotencyKey = () => `dadban-delete-client-${id}`;
 
   const faDigits = d => "۰۱۲۳۴۵۶۷۸۹"[d];
   const statusLabel = {active:"فعال",pending:"در انتظار",closed:"بسته",archived:"بایگانی"};
@@ -120,7 +114,6 @@ document.addEventListener("DOMContentLoaded", async () => {
           if (deleteResponse.status === 401) { window.location.href = "login.html"; return; }
           if (deleteResponse.status === 403) throw new Error("درخواست حذف از نظر امنیتی تأیید نشد. صفحه را تازه‌سازی کنید.");
           if (!deleteResponse.ok) throw new Error(deleteData?.error || "حذف موکل انجام نشد.");
-          localStorage.removeItem(deleteIdempotencyStorageKey);
           window.location.href = "clients.html?deleted=1";
         } catch (error) {
           message.textContent = error.message || "خطا در ارتباط با سرور.";
