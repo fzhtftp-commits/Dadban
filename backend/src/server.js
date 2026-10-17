@@ -1068,6 +1068,7 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
   if (!id.success) return res.status(400).json({ error: "invalid_client_id" });
   const keyResult = parseDocumentMutationIdempotencyKey(req);
   if (!keyResult.ok) return res.status(400).json({ error: "invalid_idempotency_key" });
+  if (!keyResult.key) return res.status(428).json({ error: "idempotency_key_required" });
   const key = keyResult.key;
   const fingerprint = documentMutationFingerprint("DELETE", id.data, { resource: "client" });
   const client = await acquireClient(pool);
@@ -1363,6 +1364,7 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
   if (!id.success) return res.status(400).json({ error: "invalid_case_id" });
   const keyResult = parseDocumentMutationIdempotencyKey(req);
   if (!keyResult.ok) return res.status(400).json({ error: "invalid_idempotency_key" });
+  if (!keyResult.key) return res.status(428).json({ error: "idempotency_key_required" });
   const key = keyResult.key;
   const fingerprint = documentMutationFingerprint("DELETE", id.data, { resource: "case" });
 
