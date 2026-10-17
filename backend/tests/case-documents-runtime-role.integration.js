@@ -1053,6 +1053,53 @@ try {
     server.kill("SIGTERM");
     await new Promise(resolve => server.once("exit", resolve));
   }
+  // These owner/migrator roles are cluster-wide PostgreSQL objects, unlike
+  // the disposable database. Restore ownership, revoke membership/grants,
+  // and drop the test-only roles before the workflow drops the test database.
+  try {
+    await pool.query(`
+      DO $cleanup$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci')
+           AND to_regclass('public.case_documents') IS NOT NULL
+           AND (SELECT c.relowner FROM pg_class c WHERE c.oid='public.case_documents'::regclass)
+               = (SELECT oid FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci') THEN
+          ALTER TABLE public.case_documents OWNER TO postgres;
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci')
+           AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_migrator_ci') THEN
+          REVOKE dadban_case_documents_owner_ci FROM dadban_case_documents_migrator_ci;
+        END IF;
+      END
+      $cleanup$
+    `);
+    await pool.query(`
+      DO $cleanup$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_migrator_ci') THEN
+          EXECUTE 'DROP OWNED BY dadban_case_documents_migrator_ci';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci') THEN
+          EXECUTE 'DROP OWNED BY dadban_case_documents_owner_ci';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_migrator_ci') THEN
+          EXECUTE 'DROP ROLE dadban_case_documents_migrator_ci';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci') THEN
+          EXECUTE 'DROP ROLE dadban_case_documents_owner_ci';
+        END IF;
+      END
+      $cleanup$
+    `);
+    const leftoverRoles = await pool.query(
+      "SELECT rolname FROM pg_roles WHERE rolname IN ('dadban_case_documents_owner_ci','dadban_case_documents_migrator_ci')"
+    );
+    assert.equal(leftoverRoles.rowCount, 0, "test-only case-document owner/migrator roles must not leak into the CI PostgreSQL cluster");
+    console.log("PASS: isolated owner/migrator cleanup restores table ownership, revokes membership/grants, and leaves no test-only roles");
+  } catch (cleanupError) {
+    console.error("FAIL: isolated owner/migrator cleanup did not complete", cleanupError);
+    process.exitCode = 1;
+  }
   await runtimePool.end();
   await pool.end();
 }
