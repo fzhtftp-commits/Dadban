@@ -8,6 +8,7 @@
 \ir ../migrations/006_case_document_mutation_idempotency.sql
 \ir ../migrations/007_case_document_mutation_tombstones.sql
 \ir ../migrations/010_api_mutation_idempotency.sql
+\ir ../migrations/011_api_mutation_idempotency_tombstones.sql
 
 DO $catalog$
 DECLARE cols text[]; status_check text; constraint_names text[];
@@ -336,7 +337,7 @@ BEGIN
   IF cols IS DISTINCT FROM ARRAY[
     'office_id','user_id','idempotency_key','resource_type','operation',
     'request_fingerprint','resource_id','response_status','response_body',
-    'completed_at','created_at'
+    'completed_at','created_at','response_body_purged','purged_at'
   ]::text[] THEN
     RAISE EXCEPTION 'Unexpected generic API idempotency columns: %', cols;
   END IF;
@@ -354,6 +355,8 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conrelid='public.api_mutation_idempotency'::regclass
       AND conname='api_mutation_idempotency_response_state_check' AND contype='c'
-  ) THEN RAISE EXCEPTION 'Missing atomic response completion state check'; END IF;
+      AND pg_get_constraintdef(oid) LIKE '%response_body_purged%'
+      AND pg_get_constraintdef(oid) LIKE '%purged_at%'
+  ) THEN RAISE EXCEPTION 'Missing response purge/tombstone state check'; END IF;
 END
 $api_mutation_idempotency_catalog$;
