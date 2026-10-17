@@ -263,7 +263,8 @@ try {
       "SELECT office_id,case_id,created_by,updated_by FROM public.case_documents WHERE id=$1", [transferDoc]
     );
     assert.deepEqual(moved.rows[0], {office_id:officeB,case_id:caseB,created_by:userB,updated_by:userB});
-    const auditDuringTransfer = Number((await transfer.query(
+    // Observe audit from the admin connection: the runtime/migrator path must not gain audit read privileges just for this assertion.
+    const auditDuringTransfer = Number((await pool.query(
       "SELECT count(*)::int AS n FROM audit_logs WHERE entity_type='case_document' AND entity_id=$1", [transferDoc]
     )).rows[0].n);
     assert.equal(auditDuringTransfer, auditBeforeTransfer, "privileged direct SQL does not automatically emit application audit");
