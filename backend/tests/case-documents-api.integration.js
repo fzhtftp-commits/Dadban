@@ -76,6 +76,11 @@ async function request(path, { token, csrf, method = "GET", body, originHeader =
     headers["content-type"] = "application/json";
   }
   if (idempotencyKey !== undefined) headers["idempotency-key"] = idempotencyKey;
+  else if (method === "DELETE" && /^\/api\/(?:clients|cases)\//.test(path)) {
+    // Parent soft-delete authorization/race tests should reach the intended
+    // authorization and locking branch, not fail early on the required key.
+    headers["idempotency-key"] = crypto.randomUUID();
+  }
   const response = await fetch(`http://${hostToUse}:${portToUse}${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
