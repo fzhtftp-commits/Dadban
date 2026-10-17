@@ -21,7 +21,8 @@ ALTER TABLE public.api_mutation_idempotency
     )
     OR
     (
-      response_status BETWEEN 200 AND 499
+      response_status IS NOT NULL
+      AND response_status BETWEEN 200 AND 499
       AND completed_at IS NOT NULL
       AND (
         (
