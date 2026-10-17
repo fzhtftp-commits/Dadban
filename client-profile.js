@@ -8,10 +8,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const csrfToken = () => sessionStorage.getItem("dadban_csrf") || "";
   const deleteIdempotencyStorageKey = `dadban:delete:client:${id || "missing"}`;
   const deleteIdempotencyKey = () => {
-    let key = sessionStorage.getItem(deleteIdempotencyStorageKey);
+    let key = localStorage.getItem(deleteIdempotencyStorageKey);
     if (!key) {
       key = crypto.randomUUID();
-      sessionStorage.setItem(deleteIdempotencyStorageKey, key);
+      localStorage.setItem(deleteIdempotencyStorageKey, key);
     }
     return key;
   };
@@ -120,7 +120,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           if (deleteResponse.status === 401) { window.location.href = "login.html"; return; }
           if (deleteResponse.status === 403) throw new Error("درخواست حذف از نظر امنیتی تأیید نشد. صفحه را تازه‌سازی کنید.");
           if (!deleteResponse.ok) throw new Error(deleteData?.error || "حذف موکل انجام نشد.");
-          sessionStorage.removeItem(deleteIdempotencyStorageKey);
+          localStorage.removeItem(deleteIdempotencyStorageKey);
           window.location.href = "clients.html?deleted=1";
         } catch (error) {
           message.textContent = error.message || "خطا در ارتباط با سرور.";
