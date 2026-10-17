@@ -257,6 +257,49 @@ try {
     error => error.code === "42501",
     "HMAC proof must bind the office identity"
   );
+
+  // Lookup and completion are separate proof domains; each must independently
+  // bind every mutation identity field instead of relying on reservation checks.
+  const lookupBindingCases = [
+    ["resource type", "runtime-proof-lookup-type-001", "client", "POST", proofFingerprint, officeId],
+    ["operation", "runtime-proof-lookup-operation-001", "case", "PATCH", proofFingerprint, officeId],
+    ["request fingerprint", "runtime-proof-lookup-fingerprint-001", "case", "POST", "d".repeat(64), officeId],
+    ["office identity", "runtime-proof-lookup-office-001", "case", "POST", proofFingerprint, "dddddddd-dddd-4ddd-8ddd-dddddddddddd"]
+  ];
+  for (const [label, key, changedType, changedOperation, changedFingerprint, changedOffice] of lookupBindingCases) {
+    await runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, key, makeReserveProof(liveSessionId, userId, key)));
+    await assert.rejects(
+      runtimePool.query(lookupSql, [
+        liveSessionId, userId, changedOffice, key, changedType, changedOperation, changedFingerprint,
+        makeApiProof({ action:"lookup", sessionId:liveSessionId, key, resourceType:"case", operation:"POST", fingerprint:proofFingerprint, officeId })
+      ]),
+      error => error.code === "42501",
+      `lookup HMAC proof must bind the ${label}`
+    );
+  }
+  console.log("PASS: lookup HMAC cannot be rebound across resource type, operation, fingerprint, or office");
+
+  const completionBindingCases = [
+    ["resource type", "runtime-proof-complete-type-001", "client", "POST", proofFingerprint, officeId, caseId, 201],
+    ["operation", "runtime-proof-complete-operation-001", "case", "PATCH", proofFingerprint, officeId, caseId, 201],
+    ["request fingerprint", "runtime-proof-complete-fingerprint-001", "case", "POST", "e".repeat(64), officeId, caseId, 201],
+    ["office identity", "runtime-proof-complete-office-001", "case", "POST", proofFingerprint, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", caseId, 201],
+    ["resource id", "runtime-proof-complete-resource-001", "case", "POST", proofFingerprint, officeId, "cccccccc-cccc-4ccc-8ccc-cccccccccc03", 201],
+    ["response status", "runtime-proof-complete-status-001", "case", "POST", proofFingerprint, officeId, caseId, 202]
+  ];
+  for (const [label, key, changedType, changedOperation, changedFingerprint, changedOffice, changedResourceId, changedStatus] of completionBindingCases) {
+    await runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, key, makeReserveProof(liveSessionId, userId, key)));
+    await assert.rejects(
+      runtimePool.query(completeSql, [
+        liveSessionId, userId, changedOffice, key, changedType, changedOperation, changedFingerprint, changedResourceId, changedStatus,
+        makeCompleteProof(liveSessionId, userId, key, caseId, 201)
+      ]),
+      error => error.code === "42501",
+      `completion HMAC proof must bind the ${label}`
+    );
+  }
+  console.log("PASS: completion HMAC cannot be rebound across mutation identity, resource id, or response status");
+
   console.log("PASS: reservation HMAC cannot be rebound across resource type, operation, fingerprint, or office");
 
   await assert.rejects(
