@@ -1,6 +1,12 @@
 const API="https://dadban-backend.onrender.com";
 const id=new URLSearchParams(location.search).get("id");
 const csrf=()=>sessionStorage.getItem("dadban_csrf")||"";
+const deleteIdempotencyStorageKey=`dadban:delete:case:${id||"missing"}`;
+function deleteIdempotencyKey(){
+ let key=sessionStorage.getItem(deleteIdempotencyStorageKey);
+ if(!key){key=crypto.randomUUID();sessionStorage.setItem(deleteIdempotencyStorageKey,key);}
+ return key;
+}
 const $=x=>document.getElementById(x);
 const statusLabel={active:"فعال",pending:"در انتظار",closed:"بسته",archived:"بایگانی"};
 const priorityLabel={low:"کم",normal:"عادی",high:"بالا",urgent:"فوری"};
@@ -11,9 +17,10 @@ async function removeCase(){
  if(!confirm("آیا از حذف این پرونده مطمئن هستید؟\n\nاین عملیات حذف نرم است و اطلاعات برای سوابق امنیتی نگهداری می‌شود."))return;
  deleteBtn.disabled=true; deleteBtn.textContent="در حال حذف...";
  try{
-  const r=await fetch(`${API}/api/cases/${encodeURIComponent(id)}`,{method:"DELETE",credentials:"include",headers:{"x-csrf-token":csrf()}});
+  const r=await fetch(`${API}/api/cases/${encodeURIComponent(id)}`,{method:"DELETE",credentials:"include",headers:{"x-csrf-token":csrf(),"idempotency-key":deleteIdempotencyKey()}});
   if(r.status===401){location.href="login.html";return}
   if(!r.ok)throw new Error();
+  sessionStorage.removeItem(deleteIdempotencyStorageKey);
   location.href="cases.html?deleted=1";
  }catch{deleteBtn.disabled=false;deleteBtn.textContent="حذف پرونده";$("caseStatus").textContent="حذف پرونده انجام نشد.";}
 }
