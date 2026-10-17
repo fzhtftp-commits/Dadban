@@ -446,9 +446,10 @@ const beginApiMutationIdempotency = async (client, req, key, resourceType, opera
     [req.auth.sessionId, req.auth.userId, req.auth.officeId, key, resourceType, operation, fingerprint, proof]
   );
   if (reservation.rows[0].inserted) return { kind: "new", key, fingerprint, resourceType, operation };
+  const lookupProof = apiMutationProof({ action: "lookup", req, key, resourceType, operation, fingerprint });
   const existing = await client.query(
-    "select resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,completed_at from public.api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
-    [req.auth.officeId, req.auth.userId, key]
+    "select * from public.read_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8)",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId, key, resourceType, operation, fingerprint, lookupProof]
   );
   if (!existing.rowCount) throw new Error("API mutation idempotency record disappeared");
   const row = existing.rows[0];
