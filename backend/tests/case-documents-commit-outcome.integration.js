@@ -83,6 +83,14 @@ async function countAudit(documentId, action) {
   return result.rows[0].count;
 }
 
+async function countEntityAudit(entityType, entityId, action) {
+  const result = await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type=$2 and entity_id=$3 and action=$4",
+    [ids.office, entityType, entityId, action]
+  );
+  return result.rows[0].count;
+}
+
 try {
   // A TCP proxy drops the PostgreSQL response only after forwarding COMMIT to the
   // disposable PostgreSQL service. The application must treat the result as unknown,
@@ -278,8 +286,60 @@ try {
     [ids.office, ids.user, deleteKey])).rows[0].count, 1, "DELETE must retain one durable idempotency row");
   assert.equal(await countAudit(deleteId, "delete"), 1, "DELETE retry must not duplicate audit rows");
 
+  // Case 4: soft-deleting a case must be replayable when COMMIT succeeded but
+  // its acknowledgement was lost. Use the same durable key on retry.
+  const caseKey = "commit-loss-case-delete-01";
+  armed = true;
+  const firstCaseDelete = await request(`/api/cases/${ids.case}`, {
+    method: "DELETE", key: caseKey
+  });
+  assert.equal(droppedCommitResponses, 4, "proxy must drop PostgreSQL COMMIT response for case DELETE");
+  assert.equal(firstCaseDelete.status, 500, "case DELETE must report unknown outcome, not confirmed rollback");
+  assert.deepEqual(firstCaseDelete.body, { error: "database_error" });
+  await waitForCompletedKey(caseKey, 204);
+  const caseAfterDelete = await pool.query("select deleted_at from cases where id=$1 and office_id=$2", [ids.case, ids.office]);
+  assert.equal(caseAfterDelete.rowCount, 1);
+  assert.ok(caseAfterDelete.rows[0].deleted_at, "case soft-delete must be committed despite lost acknowledgement");
+  assert.equal(await countEntityAudit("case", ids.case, "delete"), 1, "case DELETE must append exactly one audit row");
+  const caseDeleteRetry = await request(`/api/cases/${ids.case}`, { method: "DELETE", key: caseKey });
+  assert.equal(caseDeleteRetry.status, 204, "same-key case DELETE retry must replay success, not return 404");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, caseKey])).rows[0].count, 1);
+  assert.equal(await countEntityAudit("case", ids.case, "delete"), 1, "case DELETE retry must not duplicate audit rows");
+
+  // Case 5: repeat the lost-acknowledgement proof for the case's client after
+  // the case is tombstoned. Both operation kinds share the durable key table but
+  // their resource discriminator prevents a cross-resource key collision.
+  const clientRef = await pool.query("select client_id from cases where id=$1 and office_id=$2", [ids.case, ids.office]);
+  assert.equal(clientRef.rowCount, 1, "test case must retain its client identity");
+  const clientId = clientRef.rows[0].client_id;
+  const clientKey = "commit-loss-client-delete-01";
+  armed = true;
+  const firstClientDelete = await request(`/api/clients/${clientId}`, {
+    method: "DELETE", key: clientKey
+  });
+  assert.equal(droppedCommitResponses, 5, "proxy must drop PostgreSQL COMMIT response for client DELETE");
+  assert.equal(firstClientDelete.status, 500, "client DELETE must report unknown outcome, not confirmed rollback");
+  assert.deepEqual(firstClientDelete.body, { error: "database_error" });
+  await waitForCompletedKey(clientKey, 204);
+  const clientAfterDelete = await pool.query("select deleted_at from clients where id=$1 and office_id=$2", [clientId, ids.office]);
+  assert.equal(clientAfterDelete.rowCount, 1);
+  assert.ok(clientAfterDelete.rows[0].deleted_at, "client soft-delete must be committed despite lost acknowledgement");
+  assert.equal(await countEntityAudit("client", clientId, "delete"), 1, "client DELETE must append exactly one audit row");
+  const clientDeleteRetry = await request(`/api/clients/${clientId}`, { method: "DELETE", key: clientKey });
+  assert.equal(clientDeleteRetry.status, 204, "same-key client DELETE retry must replay success, not return 404");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, clientKey])).rows[0].count, 1);
+  assert.equal(await countEntityAudit("client", clientId, "delete"), 1, "client DELETE retry must not duplicate audit rows");
+
+  const deletionTotals = await pool.query(
+    "select (select count(*)::int from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key in ($3,$4)) as idempotency_rows, (select count(*)::int from audit_logs where office_id=$1 and ((entity_type='case' and entity_id=$5 and action='delete') or (entity_type='client' and entity_id=$6 and action='delete'))) as audit_rows",
+    [ids.office, ids.user, caseKey, clientKey, ids.case, clientId]
+  );
+  assert.equal(deletionTotals.rows[0].idempotency_rows, 2, "case and client DELETE must each retain one durable idempotency record");
+  assert.equal(deletionTotals.rows[0].audit_rows, 2, "case and client DELETE must each retain exactly one audit event");
+  console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; case/client soft-delete replay is exact-once");
+
   // Verify that the discarded connection was not reused as healthy by making a fresh
-  // request on the same server/pool after all three fault-injected COMMITs.
+  // request on the same server/pool after all five fault-injected COMMITs.
   const health = await fetch(`http://127.0.0.1:${apiPort}/health/db`);
   assert.equal(health.status, 200, "pool must recover after discarding broken COMMIT connections");
 
