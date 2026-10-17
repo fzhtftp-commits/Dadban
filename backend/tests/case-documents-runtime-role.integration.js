@@ -196,6 +196,19 @@ try {
   ]) {
     const migrationSql = await readFile(new URL(path, import.meta.url), "utf8");
     if (path === "../migrations/008_security_definer_document_actor_lock.sql") {
+      // Seed stale schema CREATE privilege before the first successful migration.
+      // Migration 008 must normalize this drift; a failed membership preflight
+      // must still roll back atomically.
+      await pool.query(`
+        DO $owner$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_actor_lock_owner') THEN
+            CREATE ROLE dadban_actor_lock_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+          END IF;
+        END
+        $owner$;
+        GRANT CREATE ON SCHEMA public TO dadban_actor_lock_owner;
+      `);
       // A runtime membership could allow SET ROLE or inherit privileges. Migration
       // 008 must reject it before creating any SECURITY DEFINER actor-lock helper.
       const probeRole = "dadban_actor_runtime_membership_probe_ci";
@@ -225,6 +238,9 @@ try {
       }
     }
     if (path === "../migrations/009_case_reassignment_parent_locks.sql") {
+      // Seed stale CREATE privilege after migration 008; migration 009 must
+      // independently normalize owner ACL drift.
+      await pool.query("GRANT CREATE ON SCHEMA public TO dadban_actor_lock_owner");
       // Replaying migration 009 with a compromised definer-owner membership must
       // fail before function creation/ownership transfer and roll back atomically.
       const probeRole = "dadban_actor_lock_membership_probe_ci";
@@ -283,27 +299,15 @@ try {
     }
     await pool.query(migrationSql);
 
-    // The migrations must normalize stale schema CREATE grants on the isolated
-    // SECURITY DEFINER owner, including drift introduced after an earlier run.
-    if (path === "../migrations/008_security_definer_document_actor_lock.sql") {
-      await pool.query("GRANT CREATE ON SCHEMA public TO dadban_actor_lock_owner");
-      await pool.query(migrationSql);
+    // Assert the successful migration revoked stale CREATE on the shared schema.
+    if (path === "../migrations/008_security_definer_document_actor_lock.sql" ||
+        path === "../migrations/009_case_reassignment_parent_locks.sql") {
       const createStillGranted = await pool.query(
         "SELECT has_schema_privilege('dadban_actor_lock_owner','public','CREATE') AS allowed"
       );
       assert.equal(createStillGranted.rows[0].allowed, false,
-        "migration 008 must revoke stale CREATE on public from actor-lock owner");
-      console.log("PASS: migration 008 removes stale CREATE on public from SECURITY DEFINER owner");
-    }
-    if (path === "../migrations/009_case_reassignment_parent_locks.sql") {
-      await pool.query("GRANT CREATE ON SCHEMA public TO dadban_actor_lock_owner");
-      await pool.query(migrationSql);
-      const createStillGranted = await pool.query(
-        "SELECT has_schema_privilege('dadban_actor_lock_owner','public','CREATE') AS allowed"
-      );
-      assert.equal(createStillGranted.rows[0].allowed, false,
-        "migration 009 must revoke stale CREATE on public from actor-lock owner");
-      console.log("PASS: migration 009 removes stale CREATE on public from SECURITY DEFINER owner");
+        path + " must revoke stale CREATE on public from actor-lock owner");
+      console.log("PASS: " + path + " removes stale CREATE on public from SECURITY DEFINER owner");
     }
   }
 
