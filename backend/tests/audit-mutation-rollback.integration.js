@@ -18,6 +18,7 @@ const origin = "http://localhost:5500";
 const token = "audit-mutation-test-session-token".padEnd(48, "x");
 const csrf = "audit-mutation-test-csrf-token".padEnd(48, "y");
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
+const proofSecret = "a".repeat(64);
 const ids = {
   office: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   user: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa01",
@@ -42,6 +43,7 @@ async function waitForServer() {
 }
 
 async function request(path, method, body, options = {}) {
+  let idempotencyKey = options.idempotencyKey;
   const headers = {
     origin,
     cookie: `dadban_session=${token}; dadban_csrf=${csrf}`,
@@ -49,9 +51,10 @@ async function request(path, method, body, options = {}) {
     "content-type": "application/json",
     "user-agent": options.userAgent ?? "dadban-audit-mutation-test"
   };
-  if (options.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey;
+  if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
   if (method === "DELETE" && /^\/api\/(?:clients|cases)\//.test(path)) {
-    headers["idempotency-key"] = crypto.randomUUID();
+    idempotencyKey = idempotencyKey || crypto.randomUUID();
+    headers["idempotency-key"] = idempotencyKey;
   }
   const response = await fetch(`http://${options.host ?? "127.0.0.1"}:${port}${path}`, {
     method,
@@ -59,7 +62,7 @@ async function request(path, method, body, options = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(10000)
   });
-  return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: response.status === 204 ? null : await response.json() };
+  return { status: response.status, headers: Object.fromEntries(response.headers.entries()), body: response.status === 204 ? null : await response.json(), idempotencyKey };
 }
 
 async function countRows(table) {
@@ -84,6 +87,13 @@ async function expectAuditFailure({ label, method, path, body, table, entityType
   )).rows[0].count);
   const response = await request(path, method, body);
   assert.equal(response.status, 500, label + ": audit INSERT failure must return 500; got " + response.status);
+  if (response.idempotencyKey) {
+    const reservationCount = Number((await pool.query(
+      "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+      [ids.office, ids.user, response.idempotencyKey]
+    )).rows[0].count);
+    assert.equal(reservationCount, 0, label + ": failed audit write must roll back its idempotency reservation");
+  }
   assert.deepEqual(response.body, { error: "database_error" }, label + ": response must be sanitized");
   assert.equal(await countAudit(entityType, action), auditBefore, label + ": failed operation must not leave an audit row");
   if (auditEntityId !== undefined) {
@@ -116,6 +126,8 @@ try {
   await pool.query(await readFile(new URL("../migrations/010_api_mutation_idempotency.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/011_api_mutation_idempotency_tombstones.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/012_api_mutation_idempotency_tombstone_guards.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/013_api_mutation_idempotency_proof_functions.sql", import.meta.url), "utf8"));
+  await pool.query("UPDATE dadban_private.api_mutation_idempotency_hmac_key SET secret=decode($1, 'hex') WHERE singleton=true", [proofSecret]);
 
   await pool.query(
     "insert into offices(id,name) values ($1,'Audit Mutation Test Office')",
@@ -179,7 +191,7 @@ try {
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin },
+    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: databaseUrl, CORS_ORIGIN: origin, API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret },
     stdio: ["ignore", "pipe", "pipe"]
   });
   server.stdout.on("data", chunk => { serverOutput += chunk.toString(); });
