@@ -478,6 +478,12 @@ try {
   // Case 4: soft-deleting a case must be replayable when COMMIT succeeded but
   // its acknowledgement was lost. Use the same durable key on retry.
   const caseKey = "commit-loss-case-delete-01";
+  const missingCaseKey = await request(`/api/cases/${ids.case}`, { method: "DELETE" });
+  assert.equal(missingCaseKey.status, 428, "case DELETE without Idempotency-Key must return explicit precondition-required");
+  assert.deepEqual(missingCaseKey.body, { error: "idempotency_key_required" });
+  assert.equal((await pool.query("select deleted_at from cases where id=$1 and office_id=$2", [ids.case, ids.office])).rows[0].deleted_at, null, "missing case key must not soft-delete");
+  assert.equal(await countEntityAudit("case", ids.case, "delete"), 0, "missing case key must not emit audit");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, caseKey])).rows[0].count, 0, "missing case key must not reserve idempotency record");
   armed = true;
   const firstCaseDelete = await request(`/api/cases/${ids.case}`, {
     method: "DELETE", key: caseKey
@@ -502,6 +508,12 @@ try {
   assert.equal(clientRef.rowCount, 1, "test case must retain its client identity");
   const clientId = clientRef.rows[0].client_id;
   const clientKey = "commit-loss-client-delete-01";
+  const missingClientKey = await request(`/api/clients/${clientId}`, { method: "DELETE" });
+  assert.equal(missingClientKey.status, 428, "client DELETE without Idempotency-Key must return explicit precondition-required");
+  assert.deepEqual(missingClientKey.body, { error: "idempotency_key_required" });
+  assert.equal((await pool.query("select deleted_at from clients where id=$1 and office_id=$2", [clientId, ids.office])).rows[0].deleted_at, null, "missing client key must not soft-delete");
+  assert.equal(await countEntityAudit("client", clientId, "delete"), 0, "missing client key must not emit audit");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, clientKey])).rows[0].count, 0, "missing client key must not reserve idempotency record");
   armed = true;
   const firstClientDelete = await request(`/api/clients/${clientId}`, {
     method: "DELETE", key: clientKey
@@ -525,7 +537,14 @@ try {
   );
   assert.equal(deletionTotals.rows[0].idempotency_rows, 2, "case and client DELETE must each retain one durable idempotency record");
   assert.equal(deletionTotals.rows[0].audit_rows, 2, "case and client DELETE must each retain exactly one audit event");
-  console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; case/client soft-delete replay is exact-once");
+
+  const crossResourceKeyReuse = await request(`/api/cases/${ids.case}`, { method: "DELETE", key: clientKey });
+  assert.equal(crossResourceKeyReuse.status, 409, "reusing the client DELETE key for case DELETE must conflict");
+  assert.deepEqual(crossResourceKeyReuse.body, { error: "idempotency_key_reused" });
+  assert.equal(await countEntityAudit("case", ids.case, "delete"), 1, "cross-resource key reuse must not duplicate case audit");
+  assert.equal(await countEntityAudit("client", clientId, "delete"), 1, "cross-resource key reuse must not duplicate client audit");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key in ($3,$4)", [ids.office, ids.user, caseKey, clientKey])).rows[0].count, 2, "cross-resource key reuse must not create another idempotency row");
+  console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; missing_key=428; cross_resource_key_reuse=409; case/client soft-delete replay is exact-once");
 
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE");
 } catch (error) {
