@@ -308,6 +308,45 @@ try {
       assert.equal(createStillGranted.rows[0].allowed, false,
         path + " must revoke stale CREATE on public from actor-lock owner");
       console.log("PASS: " + path + " removes stale CREATE on public from SECURITY DEFINER owner");
+
+      // CREATE OR REPLACE does not reset function ACLs. Seed a stale direct
+      // grant and runtime GRANT OPTION, replay this migration, and inspect the
+      // effective catalog ACL rather than trusting the GRANT statements alone.
+      const aclProbe = "dadban_actor_acl_probe_ci";
+      const probeExists = await pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [aclProbe]);
+      assert.equal(probeExists.rowCount, 0, "refusing to reuse pre-existing function ACL probe role");
+      await pool.query("CREATE ROLE dadban_actor_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
+      const signatures = path === "../migrations/008_security_definer_document_actor_lock.sql"
+        ? [
+            "public.lock_live_document_actor(uuid,uuid,uuid)",
+            "public.lock_live_client_parent(uuid,uuid)",
+            "public.lock_live_case_client(uuid,uuid)",
+            "public.lock_live_case_parents(uuid,uuid[])"
+          ]
+        : ["public.lock_live_case_reassignment(uuid,uuid,uuid)"];
+      try {
+        for (const signature of signatures) {
+          await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
+          await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_document_runtime_ci WITH GRANT OPTION");
+        }
+        await pool.query(migrationSql);
+        for (const signature of signatures) {
+          const state = await pool.query(
+            "SELECT has_function_privilege($1,$2,'EXECUTE') AS probe_execute, " +
+            "has_function_privilege($3,$2,'EXECUTE') AS runtime_execute, " +
+            "EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a " +
+            "JOIN pg_roles r ON r.oid=a.grantee WHERE p.oid=$2::regprocedure AND r.rolname=$3 AND a.privilege_type='EXECUTE' AND a.is_grantable) AS runtime_grant_option",
+            [aclProbe, signature, "dadban_document_runtime_ci"]
+          );
+          assert.equal(state.rows[0].probe_execute, false, signature + " must not retain stale direct EXECUTE");
+          assert.equal(state.rows[0].runtime_execute, true, signature + " must retain approved runtime EXECUTE");
+          assert.equal(state.rows[0].runtime_grant_option, false, signature + " must not let runtime delegate EXECUTE");
+        }
+        console.log("PASS: " + path + " removes stale function EXECUTE grants and runtime grant options on migration replay");
+      } finally {
+        await pool.query("DROP OWNED BY dadban_actor_acl_probe_ci").catch(() => {});
+        await pool.query("DROP ROLE IF EXISTS dadban_actor_acl_probe_ci");
+      }
     }
   }
 
