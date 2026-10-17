@@ -376,6 +376,95 @@ try {
   }
 
 
+
+  // A completed assistant PATCH response must be re-authorized against the current
+  // confidentiality level. The same actor may read "confidential", but not "restricted".
+  const confidentialityReplayId = await makeDocument("Confidentiality downgrade replay boundary");
+  await pool.query("update case_documents set confidentiality='confidential' where id=$1 and office_id=$2",
+    [confidentialityReplayId, ids.office]);
+  const assistantId = crypto.randomUUID();
+  const assistantEmail = "commit-outcome-assistant-" + crypto.randomUUID() + "@example.test";
+  const assistantToken = crypto.randomBytes(32).toString("base64url");
+  const assistantCsrf = crypto.randomBytes(32).toString("base64url");
+  await pool.query(
+    "insert into users(id,office_id,full_name,email,role) values($1,$2,'Confidential replay assistant',$3,'assistant')",
+    [assistantId, ids.office, assistantEmail]
+  );
+  await pool.query(
+    "insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values($1,$2,$3,$4,now()+interval '1 hour')",
+    [assistantId, ids.office, hash(assistantToken), hash(assistantCsrf)]
+  );
+  const assistantKey = "confidentiality-downgrade-replay-01";
+  const assistantFirstPatch = await request(`/api/case-documents/${confidentialityReplayId}`, {
+    method: "PATCH", key: assistantKey, body: { title: "Assistant committed title" },
+    sessionToken: assistantToken, csrfToken: assistantCsrf
+  });
+  assert.equal(assistantFirstPatch.status, 200);
+  assert.equal(assistantFirstPatch.body.data.confidentiality, "confidential");
+  const ownerRestrictedKey = "owner-restricts-document-01";
+  const ownerRestriction = await request(`/api/case-documents/${confidentialityReplayId}`, {
+    method: "PATCH", key: ownerRestrictedKey, body: { confidentiality: "restricted" }
+  });
+  assert.equal(ownerRestriction.status, 200);
+  assert.equal(ownerRestriction.body.data.confidentiality, "restricted");
+  const assistantReplayAfterRestriction = await request(`/api/case-documents/${confidentialityReplayId}`, {
+    method: "PATCH", key: assistantKey, body: { title: "Assistant committed title" },
+    sessionToken: assistantToken, csrfToken: assistantCsrf
+  });
+  assert.equal(assistantReplayAfterRestriction.status, 403,
+    "assistant replay must not return a stored confidential response after document becomes restricted");
+  assert.deepEqual(assistantReplayAfterRestriction.body, { error: "document_role_forbidden" });
+  assert.equal((await pool.query("select confidentiality,title from case_documents where id=$1 and office_id=$2",
+    [confidentialityReplayId, ids.office])).rows[0].confidentiality, "restricted");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, assistantId, assistantKey])).rows[0].count, 1, "denied confidentiality replay must retain one assistant idempotency row");
+  assert.equal(await countAudit(confidentialityReplayId, "update"), 2,
+    "assistant PATCH and owner confidentiality change must produce exactly two audit rows");
+  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action='update' and actor_user_id=$3",
+    [ids.office, confidentialityReplayId, assistantId])).rows[0].count, 1,
+    "denied replay must not duplicate assistant audit");
+  console.log("PASS: confidentiality downgrade from confidential to restricted denies completed assistant replay with 403 and no duplicate mutation/key/audit");
+
+  // A client soft-delete is also a parent-access revocation for child documents.
+  const deletedClientId = crypto.randomUUID();
+  const deletedClientCaseId = crypto.randomUUID();
+  const deletedClientDocId = crypto.randomUUID();
+  const deletedClientNationalId = String(1000000000 + Math.floor(Math.random() * 8999999999));
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Replay parent client',$3,$4,$4)",
+    [deletedClientId, ids.office, deletedClientNationalId, ids.user]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Replay parent client case',$5,$5)",
+    [deletedClientCaseId, ids.office, deletedClientId, "CLIENT-PARENT-" + crypto.randomUUID(), ids.user]
+  );
+  await pool.query(
+    "insert into case_documents(id,office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'Replay after client delete','evidence','normal',$4,$4)",
+    [deletedClientDocId, ids.office, deletedClientCaseId, ids.user]
+  );
+  const clientParentPatchKey = "client-parent-delete-patch-01";
+  const clientParentPatch = await request(`/api/case-documents/${deletedClientDocId}`, {
+    method: "PATCH", key: clientParentPatchKey, body: { title: "Committed before client deletion" }
+  });
+  assert.equal(clientParentPatch.status, 200);
+  assert.equal(await countAudit(deletedClientDocId, "update"), 1);
+  const clientDeleteKey = "client-parent-delete-01";
+  const clientDelete = await request(`/api/clients/${deletedClientId}`, { method: "DELETE", key: clientDeleteKey });
+  assert.equal(clientDelete.status, 204);
+  const clientParentReplay = await request(`/api/case-documents/${deletedClientDocId}`, {
+    method: "PATCH", key: clientParentPatchKey, body: { title: "Committed before client deletion" }
+  });
+  assert.equal(clientParentReplay.status, 404, "child replay must not disclose document data after client soft-delete");
+  assert.deepEqual(clientParentReplay.body, { error: "document_not_found" });
+  assert.ok((await pool.query("select deleted_at from clients where id=$1 and office_id=$2",
+    [deletedClientId, ids.office])).rows[0].deleted_at, "client soft-delete must be committed");
+  assert.equal(await countAudit(deletedClientDocId, "update"), 1, "client-deleted replay must not duplicate document audit");
+  assert.equal(await countEntityAudit("client", deletedClientId, "delete"), 1, "client DELETE must have exactly one audit row");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key in ($3,$4)",
+    [ids.office, ids.user, clientParentPatchKey, clientDeleteKey])).rows[0].count, 2,
+    "client DELETE and child PATCH must each retain one durable idempotency identity");
+  console.log("PASS: PATCH replay after client-parent soft-delete returns 404 without document disclosure or duplicate mutation/key/audit");
+
   // Opposite lock order: replay gets the actor lock first, then waits on the document row.
   // A role downgrade queues behind that actor lock; the authorized replay may finish first.
   const replayDocGate = await pool.connect();
