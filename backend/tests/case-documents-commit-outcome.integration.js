@@ -109,6 +109,18 @@ async function waitForActorAuthorizationLockWait() {
   throw new Error("API replay did not reach the actor authorization row-lock wait");
 }
 
+async function waitForDocumentReplayRowLockWait() {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const result = await pool.query(
+      "select count(*)::int as count from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid() and wait_event_type='Lock' and lower(query) like '%for update of d%'"
+    );
+    if (result.rows[0].count > 0) return;
+    await delay(25);
+  }
+  throw new Error("API replay did not reach the document row-lock wait");
+}
+
 async function countAudit(documentId, action) {
   const result = await pool.query(
     "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action=$3",
@@ -363,6 +375,77 @@ try {
     await pool.query("update users set role='owner' where id=$1 and office_id=$2", [ids.user, ids.office]);
   }
 
+
+  // Opposite lock order: replay gets the actor lock first, then waits on the document row.
+  // A role downgrade queues behind that actor lock; the authorized replay may finish first.
+  const replayDocGate = await pool.connect();
+  const roleDowngradeAfterReplay = await pool.connect();
+  let replayDocGateOpen = false;
+  let roleDowngradeAfterReplayOpen = false;
+  let roleDowngradeQuery;
+  try {
+    await replayDocGate.query("begin");
+    replayDocGateOpen = true;
+    await replayDocGate.query("select id from case_documents where id=$1 and office_id=$2 for update", [classificationId, ids.office]);
+    const allowedReplayBeforeDowngrade = request(`/api/case-documents/${classificationId}`, {
+      method: "PATCH", key: classificationKey, body: { confidentiality: "confidential" }
+    });
+    await waitForDocumentReplayRowLockWait();
+    await roleDowngradeAfterReplay.query("begin");
+    roleDowngradeAfterReplayOpen = true;
+    roleDowngradeQuery = roleDowngradeAfterReplay.query(
+      "update users set role='viewer' where id=$1 and office_id=$2", [ids.user, ids.office]
+    );
+    const downgradeDeadline = Date.now() + 8000;
+    let downgradeWaiting = false;
+    while (Date.now() < downgradeDeadline) {
+      const waiting = await pool.query(
+        "select count(*)::int as count from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid() and wait_event_type='Lock' and lower(query) like '%update users set role=''viewer''%'"
+      );
+      if (waiting.rows[0].count > 0) { downgradeWaiting = true; break; }
+      await delay(25);
+    }
+    assert.ok(downgradeWaiting, "role downgrade must wait behind replay's actor lock in replay-first ordering");
+    await replayDocGate.query("commit");
+    replayDocGateOpen = false;
+    const allowedReplay = await allowedReplayBeforeDowngrade;
+    assert.equal(allowedReplay.status, 200, "replay holding the actor lock may finish before the queued downgrade");
+    assert.equal(allowedReplay.body.data.confidentiality, "confidential");
+    await roleDowngradeQuery;
+    await roleDowngradeAfterReplay.query("commit");
+    roleDowngradeAfterReplayOpen = false;
+    assert.equal((await pool.query("select role from users where id=$1 and office_id=$2", [ids.user, ids.office])).rows[0].role, "viewer");
+    assert.equal(await countAudit(classificationId, "update"), 1, "replay-first role race must not duplicate audit");
+    assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+      [ids.office, ids.user, classificationKey])).rows[0].count, 1, "replay-first role race must retain one idempotency identity");
+    console.log("PASS: replay-first role downgrade race serializes on actor lock; authorized replay completes before downgrade with one mutation/key/audit");
+  } finally {
+    if (replayDocGateOpen) await replayDocGate.query("rollback").catch(() => {});
+    if (roleDowngradeAfterReplayOpen) await roleDowngradeAfterReplay.query("rollback").catch(() => {});
+    replayDocGate.release();
+    roleDowngradeAfterReplay.release();
+    await pool.query("update users set role='owner' where id=$1 and office_id=$2", [ids.user, ids.office]);
+  }
+
+  // A completed PATCH replay must not disclose the result after the document itself
+  // has been soft-deleted; the old key remains reserved and the audit is not repeated.
+  const classificationDeleteKey = "classification-delete-after-replay";
+  const classificationDelete = await request(`/api/case-documents/${classificationId}`, {
+    method: "DELETE", key: classificationDeleteKey
+  });
+  assert.equal(classificationDelete.status, 204, "document soft-delete should succeed");
+  assert.equal(await countAudit(classificationId, "delete"), 1);
+  const patchReplayAfterDocumentDelete = await request(`/api/case-documents/${classificationId}`, {
+    method: "PATCH", key: classificationKey, body: { confidentiality: "confidential" }
+  });
+  assert.equal(patchReplayAfterDocumentDelete.status, 404, "PATCH replay must not disclose document data after soft-delete");
+  assert.deepEqual(patchReplayAfterDocumentDelete.body, { error: "document_not_found" });
+  assert.equal(await countAudit(classificationId, "update"), 1, "post-delete replay must not repeat update audit");
+  assert.equal(await countAudit(classificationId, "delete"), 1, "post-delete replay must not repeat delete audit");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key in ($3,$4)",
+    [ids.office, ids.user, classificationKey, classificationDeleteKey])).rows[0].count, 2, "both operation identities must remain durable");
+  console.log("PASS: PATCH replay after document soft-delete returns 404 without sensitive response disclosure or duplicate mutation/idempotency/audit");
+
   // Case 3: a successful soft-delete whose COMMIT acknowledgement is lost must replay 204.
   const deleteId = await makeDocument("Before lost COMMIT delete");
   const deleteKey = "commit-loss-delete-01";
@@ -585,6 +668,16 @@ try {
   assert.equal(await countEntityAudit("case", ids.case, "delete"), 0, "missing case key must not emit audit");
   assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, caseKey])).rows[0].count, 0, "missing case key must not reserve idempotency record");
   armed = true;
+
+  // Seed a completed document PATCH before soft-deleting its parent case.
+  const parentDeletedReplayId = await makeDocument("Replay must be hidden after parent case soft-delete");
+  const parentDeletedReplayKey = "parent-delete-patch-replay-01";
+  const parentDeletedReplayFirst = await request(`/api/case-documents/${parentDeletedReplayId}`, {
+    method: "PATCH", key: parentDeletedReplayKey, body: { title: "Committed before parent deletion" }
+  });
+  assert.equal(parentDeletedReplayFirst.status, 200);
+  assert.equal(await countAudit(parentDeletedReplayId, "update"), 1);
+
   const firstCaseDelete = await request(`/api/cases/${ids.case}`, {
     method: "DELETE", key: caseKey
   });
@@ -597,6 +690,16 @@ try {
   assert.ok(caseAfterDelete.rows[0].deleted_at, "case soft-delete must be committed despite lost acknowledgement");
   assert.equal(await countEntityAudit("case", ids.case, "delete"), 1, "case DELETE must append exactly one audit row");
   const caseDeleteRetry = await request(`/api/cases/${ids.case}`, { method: "DELETE", key: caseKey });
+  const patchReplayAfterParentDelete = await request(`/api/case-documents/${parentDeletedReplayId}`, {
+    method: "PATCH", key: parentDeletedReplayKey, body: { title: "Committed before parent deletion" }
+  });
+  assert.equal(patchReplayAfterParentDelete.status, 404, "PATCH replay must not disclose document data after parent case soft-delete");
+  assert.deepEqual(patchReplayAfterParentDelete.body, { error: "document_not_found" });
+  assert.equal(await countAudit(parentDeletedReplayId, "update"), 1, "parent-deleted replay must not duplicate update audit");
+  assert.equal(await countEntityAudit("case", ids.case, "delete"), 1, "case delete replay must not duplicate parent audit");
+  assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, parentDeletedReplayKey])).rows[0].count, 1, "parent-deleted PATCH must retain exactly one idempotency identity");
+  console.log("PASS: PATCH replay after parent-case soft-delete returns 404 without document disclosure or duplicate mutation/key/audit");
   assert.equal(caseDeleteRetry.status, 204, "same-key case DELETE retry must replay success, not return 404");
   assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, caseKey])).rows[0].count, 1);
   assert.equal(await countEntityAudit("case", ids.case, "delete"), 1, "case DELETE retry must not duplicate audit rows");
