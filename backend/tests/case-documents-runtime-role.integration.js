@@ -208,7 +208,9 @@ try {
       has_table_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','TRIGGER') AS can_manage_api_idem_triggers,
       has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','response_status','UPDATE') AS can_complete_api_idem,
       has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','response_body_purged','UPDATE') AS can_update_api_purged_flag,
-      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','purged_at','UPDATE') AS can_update_api_purged_at
+      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','purged_at','UPDATE') AS can_update_api_purged_at,
+      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','response_body_purged','SELECT') AS can_select_api_purged_flag,
+      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','purged_at','SELECT') AS can_select_api_purged_at
     FROM pg_roles r WHERE r.rolname='dadban_document_runtime_ci'
   `);
   const role = roleState.rows[0];
@@ -218,6 +220,8 @@ try {
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
   assert.notEqual(role.api_idem_owner, "dadban_document_runtime_ci", "runtime must not own the generic API idempotency table");
   assert.equal(role.can_complete_api_idem, true, "runtime must complete a pending generic idempotency row");
+  assert.equal(role.can_select_api_purged_flag, true, "runtime may read the tombstone marker for replay decisions");
+  assert.equal(role.can_select_api_purged_at, true, "runtime may read the purge timestamp for replay decisions");
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
   assert.deepEqual(runtimeIdentity.rows[0], { role:"dadban_document_runtime_ci", rolsuper:false, rolcreatedb:false, rolcreaterole:false });
   assert.equal(role.can_update_full_name, false, "runtime must not have UPDATE(full_name); row locking is delegated to the SECURITY DEFINER helper");
