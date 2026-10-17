@@ -858,7 +858,51 @@ try {
 
   console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; missing_key=428; cross_resource_key_reuse=409; case/client soft-delete replay is exact-once");
 
-  console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE");
+
+  // GENERIC CLIENT POST COMMIT RESPONSE LOSS: the resource, audit, and replay
+  // response must commit atomically even when the PostgreSQL acknowledgement is dropped.
+  const genericClientKey = "generic-client-commit-loss-01";
+  const genericClientBody = {
+    client_type: "individual",
+    full_name: "Generic Commit-Loss Client",
+    national_id: "1234567801"
+  };
+  armed = true;
+  const genericClientFirst = await request("/api/clients", {
+    method: "POST", key: genericClientKey, body: genericClientBody
+  });
+  assert.equal(droppedCommitResponses, 6, "proxy must drop COMMIT response for generic client POST");
+  assert.equal(genericClientFirst.status, 500, "lost generic COMMIT acknowledgement must remain an unknown outcome");
+  assert.deepEqual(genericClientFirst.body, { error: "database_error" });
+  const genericStored = await pool.query(
+    "select resource_type,operation,request_fingerprint,resource_id,response_status,response_body,completed_at from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, genericClientKey]
+  );
+  assert.equal(genericStored.rowCount, 1, "generic POST must commit one idempotency row");
+  assert.equal(genericStored.rows[0].resource_type, "client");
+  assert.equal(genericStored.rows[0].operation, "POST");
+  assert.equal(genericStored.rows[0].response_status, 201);
+  assert.ok(genericStored.rows[0].completed_at);
+  assert.equal(genericStored.rows[0].response_body.data.id, genericStored.rows[0].resource_id);
+  const genericClientId = genericStored.rows[0].resource_id;
+  assert.equal(Number((await pool.query("select count(*)::int as count from clients where id=$1 and deleted_at is null", [genericClientId])).rows[0].count), 1);
+  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'", [ids.office, genericClientId])).rows[0].count), 1,
+    "generic POST audit must commit exactly once");
+  const genericClientReplay = await request("/api/clients", {
+    method: "POST", key: genericClientKey, body: genericClientBody
+  });
+  assert.equal(genericClientReplay.status, 201, "retry must replay original successful POST response");
+  assert.deepEqual(genericClientReplay.body, genericStored.rows[0].response_body);
+  assert.equal(Number((await pool.query("select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, genericClientKey])).rows[0].count), 1);
+  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'", [ids.office, genericClientId])).rows[0].count), 1);
+  const genericConflict = await request("/api/clients", {
+    method: "POST", key: genericClientKey, body: { ...genericClientBody, full_name: "Different Commit-Loss Payload" }
+  });
+  assert.equal(genericConflict.status, 409, "same key with a different generic POST payload must conflict");
+  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'", [ids.office, genericClientId])).rows[0].count), 1);
+  console.log("PASS: generic POST COMMIT response loss replays the exact stored response with one resource, idempotency row, and audit");
+
+  console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE and generic client POST");
 } catch (error) {
   console.error(error);
   if (serverOutput) console.error(serverOutput);
