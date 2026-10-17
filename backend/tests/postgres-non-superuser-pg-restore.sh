@@ -52,7 +52,7 @@ psql -h localhost -U "$admin" -d "$source_db" -X -v ON_ERROR_STOP=1 <<SQL
 GRANT CONNECT ON DATABASE $source_db TO $backup;
 GRANT CONNECT ON DATABASE $source_db TO $restore;
 CREATE SCHEMA $schema AUTHORIZATION $owner_a;
-GRANT CREATE ON SCHEMA $schema TO $owner_b;
+GRANT USAGE, CREATE ON SCHEMA $schema TO $owner_b;
 SET ROLE $owner_a;
 CREATE TABLE $schema.fixture_table(id bigint PRIMARY KEY, payload text NOT NULL);
 INSERT INTO $schema.fixture_table VALUES (1,'restore-fixture');
