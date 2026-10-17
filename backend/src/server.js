@@ -34,6 +34,8 @@ const pool = databaseUrl
       max: 10,
       connectionTimeoutMillis: 10000,
       statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 15000),
+      // Bound row/table lock waits separately from total statement execution time.
+      options: `-c lock_timeout=${Number(process.env.DB_LOCK_TIMEOUT_MS || 5000)}`,
       ssl: databaseUrl.includes("localhost")
         ? false
         : { ca: supabaseCa, rejectUnauthorized: true }
@@ -345,15 +347,32 @@ const requireDocumentRole = (...allowedRoles) => (req, res, next) => {
 };
 
 const lockLiveDocumentActor = async (client, req, allowedRoles) => {
-  // Lock identity rows first, then check expiry with the wall clock after any lock wait.
-  const result = await client.query("select s.id, u.role from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3 for update of s, u", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
-  if (!result.rowCount) return { ok: false, status: 401, error: "authentication_required" };
-  const live = await client.query("select (s.revoked_at is null and s.expires_at > clock_timestamp() and u.is_active = true and u.deleted_at is null) as valid from auth_sessions s join users u on u.id = s.user_id and u.office_id = s.office_id where s.id = $1 and s.user_id = $2 and s.office_id = $3", [req.auth.sessionId, req.auth.userId, req.auth.officeId]);
-  if (!live.rowCount || !live.rows[0].valid) return { ok: false, status: 401, error: "authentication_required" };
-  if (!allowedRoles.includes(result.rows[0].role)) return { ok: false, status: 403, error: "document_role_forbidden" };
-  return { ok: true, role: result.rows[0].role };
+  // The SECURITY DEFINER helper owns the narrow row-locking privileges; the API
+  // runtime itself does not need UPDATE on users merely to acquire FOR UPDATE locks.
+  const result = await client.query(
+    "select valid, actor_role from public.lock_live_document_actor($1,$2,$3)",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId]
+  );
+  if (!result.rowCount || !result.rows[0].valid) return { ok: false, status: 401, error: "authentication_required" };
+  if (!allowedRoles.includes(result.rows[0].actor_role)) return { ok: false, status: 403, error: "document_role_forbidden" };
+  return { ok: true, role: result.rows[0].actor_role };
 };
 
+
+const lockLiveMutationActor = async (client, req) => {
+  // General business writes are limited to staff roles. Resolve the live role
+  // only after acquiring session/user row locks inside the same transaction.
+  const actor = await lockLiveDocumentActor(client, req, ["owner", "admin", "lawyer", "assistant"]);
+  if (!actor.ok) {
+    return actor.status === 403
+      ? { ...actor, error: "mutation_role_forbidden" }
+      : actor;
+  }
+  // Keep audit metadata aligned with the role serialized by PostgreSQL, not
+  // the potentially stale role captured by requireAuth before this transaction.
+  req.auth.role = actor.role;
+  return actor;
+};
 
 const parseDocumentMutationIdempotencyKey = (req) => {
   const key = req.get("idempotency-key");
@@ -372,12 +391,13 @@ const beginDocumentMutationIdempotency = async (client, req, key, operation, ent
   );
   if (inserted.rowCount) return { kind: "new" };
   const existing = await client.query(
-    "select operation,entity_id,request_fingerprint,response_status from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
+    "select operation,entity_id,request_fingerprint,response_status,purged_at from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
     [req.auth.officeId, req.auth.userId, key]
   );
   if (!existing.rowCount) throw new Error("Document mutation idempotency record disappeared");
   const row = existing.rows[0];
   if (row.operation !== operation || String(row.entity_id) !== String(entityId).toLowerCase() || row.request_fingerprint !== fingerprint) return { kind: "conflict" };
+  if (row.purged_at !== null) return { kind: "gone" };
   if (row.response_status === null) return { kind: "incomplete" };
   return { kind: "replay", status: row.response_status };
 };
@@ -388,6 +408,72 @@ const completeDocumentMutationIdempotency = async (client, req, key, status) => 
     [req.auth.officeId, req.auth.userId, key, status]
   );
   if (!result.rowCount) throw new Error("Document mutation idempotency completion failed");
+};
+
+
+const parseApiMutationIdempotencyKey = (req) => {
+  const key = req.get("idempotency-key");
+  if (key === undefined) return { ok: true, key: null };
+  return /^[A-Za-z0-9._:-]{8,128}$/.test(key) ? { ok: true, key } : { ok: false, key: null };
+};
+const canonicalizeApiMutationValue = (value) => {
+  if (Array.isArray(value)) return value.map(canonicalizeApiMutationValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalizeApiMutationValue(value[key])]));
+  }
+  return value;
+};
+const apiMutationFingerprint = (resourceType, operation, entityId, payload) =>
+  hashToken(JSON.stringify({ resourceType, operation, entityId: entityId ? String(entityId).toLowerCase() : null, payload: canonicalizeApiMutationValue(payload ?? null) }));
+const apiMutationProof = ({ action, req, key, resourceType, operation, fingerprint, resourceId = null, status = null }) => {
+  const secret = process.env.API_MUTATION_IDEMPOTENCY_HMAC_KEY || "";
+  if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error("API mutation idempotency proof key is not configured");
+  const payload = [
+    "dadban-idem-v1", action, String(req.auth.sessionId).toLowerCase(),
+    String(req.auth.userId).toLowerCase(), String(req.auth.officeId).toLowerCase(),
+    key, resourceType, operation, fingerprint,
+    resourceId == null ? "" : String(resourceId).toLowerCase(),
+    status == null ? "" : String(status)
+  ].join("|");
+  return crypto.createHmac("sha256", Buffer.from(secret, "hex")).update(payload, "utf8").digest("hex");
+};
+const beginApiMutationIdempotency = async (client, req, key, resourceType, operation, entityId, payload) => {
+  if (!key) return { kind: "new", key: null };
+  const fingerprint = apiMutationFingerprint(resourceType, operation, entityId, payload);
+  const proof = apiMutationProof({ action: "reserve", req, key, resourceType, operation, fingerprint });
+  const reservation = await client.query(
+    "select public.reserve_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8) as inserted",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId, key, resourceType, operation, fingerprint, proof]
+  );
+  if (reservation.rows[0].inserted) return { kind: "new", key, fingerprint, resourceType, operation };
+  const lookupProof = apiMutationProof({ action: "lookup", req, key, resourceType, operation, fingerprint });
+  const existing = await client.query(
+    "select * from public.read_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8)",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId, key, resourceType, operation, fingerprint, lookupProof]
+  );
+  if (!existing.rowCount) throw new Error("API mutation idempotency record disappeared");
+  const row = existing.rows[0];
+  if (row.resource_type !== resourceType || row.operation !== operation || row.request_fingerprint !== fingerprint) return { kind: "conflict" };
+  if (row.response_body_purged) return { kind: "replay", status: 410, body: { error: "idempotency_result_purged" }, resourceId: row.resource_id };
+  if (row.response_status === null || row.completed_at === null || row.response_body === null) return { kind: "incomplete" };
+  return { kind: "replay", status: row.response_status, body: row.response_body, resourceId: row.resource_id };
+};
+const completeApiMutationIdempotency = async (client, req, mutation, status, body, resourceId) => {
+  if (!mutation || mutation.kind !== "new" || !mutation.key) return;
+  const proof = apiMutationProof({
+    action: "complete", req, key: mutation.key, resourceType: mutation.resourceType,
+    operation: mutation.operation, fingerprint: mutation.fingerprint, resourceId, status
+  });
+  const result = await client.query(
+    "select public.complete_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) as completed",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId, mutation.key, mutation.resourceType,
+      mutation.operation, mutation.fingerprint, resourceId, status, proof]
+  );
+  if (!result.rows[0]?.completed) throw new Error("API mutation idempotency completion failed");
+};
+const respondApiMutationReplay = (res, mutation) => {
+  if (mutation.status === 204) return res.status(204).end();
+  return res.status(mutation.status).json(mutation.body);
 };
 
 const requireCsrf = (req, res, next) => {
@@ -477,6 +563,25 @@ const syncCaseNextHearing = async (client, officeId, caseId) => {
     [caseId, officeId]
   );
 };
+
+// Reassigned hearings touch both the old and new case rows. Acquire every
+// parent lock in UUID order before changing the child row or either summary.
+const lockLiveCases = async (client, officeId, caseIds) => {
+  const uniqueIds = [...new Set(caseIds.map(String))];
+  if (!uniqueIds.length) return [];
+  const locked = await client.query(
+    "select id from public.lock_live_case_parents($1,$2::uuid[])",
+    [officeId, uniqueIds]
+  );
+  return locked.rows;
+};
+
+const syncCaseNextHearings = async (client, officeId, caseIds) => {
+  const locked = await lockLiveCases(client, officeId, caseIds);
+  for (const row of locked) {
+    await syncCaseNextHearing(client, officeId, row.id);
+  }
+};
 const writeAuditLog = async (client, auth, action, entityType, entityId, req, metadata = null) => {
   await client.query(
     `
@@ -541,7 +646,7 @@ app.post("/api/auth/register", requireTrustedOrigin, registerRateLimit, async (r
   }
 
   const { full_name, email, password, office_name } = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
@@ -595,12 +700,12 @@ app.post("/api/auth/register", requireTrustedOrigin, registerRateLimit, async (r
       }
     });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Registration failed");
     logSafeError("Registration failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -609,7 +714,7 @@ app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, re
   if (!parsed.success) return res.status(400).json({ error: "invalid_login" });
 
   const { email, password } = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   let transactionStarted = false;
 
   try {
@@ -680,7 +785,7 @@ app.post("/api/auth/login", requireTrustedOrigin, loginRateLimit, async (req, re
     logSafeError("Login failed", error);
     return res.status(500).json({ error: "authentication_error" });
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -699,7 +804,7 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
     const revoked = await client.query(
@@ -713,12 +818,12 @@ app.post("/api/auth/logout", requireAuth, requireTrustedOrigin, requireCsrf, asy
     setClearAuthCookies(res);
     return res.json({ ok: true });
   } catch (error) {
-    try { await client.query("rollback"); } catch {}
+    const rollbackSucceeded = await rollbackQuietly(client, "Logout failed");
     logSafeError("Logout failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -864,10 +969,33 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
   if (!parsed.success) return res.status(400).json({ error: "invalid_client" });
 
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "client", "POST", null, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
     const result = await client.query(
       `
         insert into clients (
@@ -889,15 +1017,16 @@ app.post("/api/clients", requireAuth, requireTrustedOrigin, requireCsrf, async (
 
     const created = result.rows[0];
     await writeAuditLog(client, req.auth, "create", "client", created.id, req, { client_type: created.client_type });
+    await completeApiMutationIdempotency(client, req, apiMutation, 201, { data: created }, created.id);
     await client.query("commit");
     return res.status(201).json({ data: created });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create client failed");
     logSafeError("Create client failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -981,10 +1110,33 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
   values.push(req.auth.userId);
   fields.push(`updated_by = $${values.length}`);
 
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "client", "PATCH", id.data, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
     const result = await client.query(
       `
         update clients
@@ -1002,26 +1154,57 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
 
     const updated = result.rows[0];
     await writeAuditLog(client, req.auth, "update", "client", updated.id, req, { fields: Object.keys(data) });
+    await completeApiMutationIdempotency(client, req, apiMutation, 200, { data: updated }, updated.id);
     await client.query("commit");
     return res.json({ data: updated });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update client failed");
     logSafeError("Update client failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
 app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_client_id" });
-
-  const client = await pool.connect();
+  const keyResult = parseDocumentMutationIdempotencyKey(req);
+  if (!keyResult.ok) return res.status(400).json({ error: "invalid_idempotency_key" });
+  if (!keyResult.key) return res.status(428).json({ error: "idempotency_key_required" });
+  const key = keyResult.key;
+  const fingerprint = documentMutationFingerprint("DELETE", id.data, { resource: "client" });
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const idem = await beginDocumentMutationIdempotency(client, req, key, "DELETE", id.data, fingerprint);
+    if (idem.kind === "conflict") {
+      await rollbackQuietly(client, "client DELETE idempotency conflict");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (idem.kind === "incomplete") {
+      await rollbackQuietly(client, "incomplete client DELETE idempotency record");
+      return res.status(503).json({ error: "database_retryable" });
+    }
+    if (idem.kind === "gone") {
+      await rollbackQuietly(client, "purged client DELETE idempotency replay");
+      return res.status(410).json({ error: "idempotency_result_purged" });
+    }
+    if (idem.kind === "replay") {
+      if (idem.status !== 204) {
+        await rollbackQuietly(client, "invalid client DELETE replay status");
+        return res.status(500).json({ error: "database_error" });
+      }
+      await client.query("commit");
+      return res.status(204).send();
+    }
     const result = await client.query(
       `
         update clients
@@ -1031,22 +1214,21 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       `,
       [id.data, req.auth.officeId, req.auth.userId]
     );
-
     if (!result.rowCount) {
-      await client.query("rollback");
+      await rollbackQuietly(client, "delete missing client");
       return res.status(404).json({ error: "client_not_found" });
     }
-
     await writeAuditLog(client, req.auth, "delete", "client", result.rows[0].id, req);
+    await completeDocumentMutationIdempotency(client, req, key, 204);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete client failed");
     logSafeError("Delete client failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1124,13 +1306,36 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
   if (!parsed.success) return res.status(400).json({ error: "invalid_case" });
 
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
 
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "case", "POST", null, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
 
     const owner = await client.query(
-      "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
+      "select id from public.lock_live_client_parent($1,$2)",
       [data.client_id, req.auth.officeId]
     );
     if (!owner.rowCount) {
@@ -1159,15 +1364,16 @@ app.post("/api/cases", requireAuth, requireTrustedOrigin, requireCsrf, async (re
 
     const created = result.rows[0];
     await writeAuditLog(client, req.auth, "create", "case", created.id, req);
+    await completeApiMutationIdempotency(client, req, apiMutation, 201, { data: created }, created.id);
     await client.query("commit");
     return res.status(201).json({ data: created });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create case failed");
     logSafeError("Create case failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1218,14 +1424,6 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   const fields = [];
   const values = [id.data, req.auth.officeId];
 
-  if (Object.prototype.hasOwnProperty.call(data, "client_id")) {
-    const owner = await pool.query(
-      "select id from clients where id = $1 and office_id = $2 and deleted_at is null",
-      [data.client_id, req.auth.officeId]
-    );
-    if (!owner.rowCount) return res.status(400).json({ error: "invalid_related_client" });
-  }
-
   for (const field of allowedFields) {
     if (Object.prototype.hasOwnProperty.call(data, field)) {
       values.push(data[field] ?? null);
@@ -1237,9 +1435,44 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
   values.push(req.auth.userId);
   fields.push(`updated_by = $${values.length}`);
 
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "case", "PATCH", id.data, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
+    const currentCase = await client.query(
+      "select id, old_client_id, target_client_id, parents_live from public.lock_live_case_reassignment($1,$2,$3)",
+      [id.data, req.auth.officeId, data.client_id ?? null]
+    );
+    if (!currentCase.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "case_not_found" });
+    }
+    if (!currentCase.rows[0].parents_live) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_related_client" });
+    }
     const result = await client.query(
       `
         update cases
@@ -1255,25 +1488,57 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
     }
     const updated = result.rows[0];
     await writeAuditLog(client, req.auth, "update", "case", updated.id, req, { fields: Object.keys(data) });
+    await completeApiMutationIdempotency(client, req, apiMutation, 200, { data: updated }, updated.id);
     await client.query("commit");
     return res.json({ data: updated });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update case failed");
     logSafeError("Update case failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
 app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_case_id" });
+  const keyResult = parseDocumentMutationIdempotencyKey(req);
+  if (!keyResult.ok) return res.status(400).json({ error: "invalid_idempotency_key" });
+  if (!keyResult.key) return res.status(428).json({ error: "idempotency_key_required" });
+  const key = keyResult.key;
+  const fingerprint = documentMutationFingerprint("DELETE", id.data, { resource: "case" });
 
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const idem = await beginDocumentMutationIdempotency(client, req, key, "DELETE", id.data, fingerprint);
+    if (idem.kind === "conflict") {
+      await rollbackQuietly(client, "case DELETE idempotency conflict");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (idem.kind === "incomplete") {
+      await rollbackQuietly(client, "incomplete case DELETE idempotency record");
+      return res.status(503).json({ error: "database_retryable" });
+    }
+    if (idem.kind === "gone") {
+      await rollbackQuietly(client, "purged case DELETE idempotency replay");
+      return res.status(410).json({ error: "idempotency_result_purged" });
+    }
+    if (idem.kind === "replay") {
+      if (idem.status !== 204) {
+        await rollbackQuietly(client, "invalid case DELETE replay status");
+        return res.status(500).json({ error: "database_error" });
+      }
+      await client.query("commit");
+      return res.status(204).send();
+    }
     const result = await client.query(
       `
         update cases
@@ -1284,19 +1549,20 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
       [id.data, req.auth.officeId, req.auth.userId]
     );
     if (!result.rowCount) {
-      await client.query("rollback");
+      await rollbackQuietly(client, "delete missing case");
       return res.status(404).json({ error: "case_not_found" });
     }
     await writeAuditLog(client, req.auth, "delete", "case", result.rows[0].id, req);
+    await completeDocumentMutationIdempotency(client, req, key, 204);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete case failed");
     logSafeError("Delete case failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1317,7 +1583,7 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "invalid_date_range" });
   }
   const values = [req.auth.officeId];
-  const conditions = ["h.office_id = $1", "h.deleted_at is null", "c.office_id = h.office_id", "c.deleted_at is null"];
+  const conditions = ["h.office_id = $1", "h.deleted_at is null", "c.office_id = h.office_id", "c.deleted_at is null", "cl.deleted_at is null"];
   if (from) { values.push(from); conditions.push(`h.hearing_at >= $${values.length}`); }
   if (to) { values.push(to); conditions.push(`h.hearing_at <= $${values.length}`); }
   if (status) { values.push(status); conditions.push(`h.status = $${values.length}`); }
@@ -1331,7 +1597,7 @@ app.get("/api/hearings", requireAuth, async (req, res) => {
              cl.company_name as client_company_name
       from hearings h
       join cases c on c.id = h.case_id and c.office_id = h.office_id
-      left join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       where ${conditions.join(" and ")}
       order by h.hearing_at asc
       limit $${values.length - 1} offset $${values.length}
@@ -1355,7 +1621,7 @@ app.get("/api/hearings/:id", requireAuth, async (req, res) => {
              cl.company_name as client_company_name
       from hearings h
       join cases c on c.id = h.case_id and c.office_id = h.office_id and c.deleted_at is null
-      left join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       where h.id = $1 and h.office_id = $2 and h.deleted_at is null
     `, [id.data, req.auth.officeId]);
     if (!result.rowCount) return res.status(404).json({ error: "hearing_not_found" });
@@ -1371,11 +1637,34 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
   const parsed = hearingCreateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_hearing" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "hearing", "POST", null, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
     const related = await client.query(
-      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
       [data.case_id, req.auth.officeId]
     );
     if (!related.rowCount) {
@@ -1394,15 +1683,16 @@ app.post("/api/hearings", requireAuth, requireTrustedOrigin, requireCsrf, async 
     const hearing = result.rows[0];
     await syncCaseNextHearing(client, req.auth.officeId, hearing.case_id);
     await writeAuditLog(client, req.auth, "create", "hearing", hearing.id, req);
+    await completeApiMutationIdempotency(client, req, apiMutation, 201, { data: hearing }, hearing.id);
     await client.query("commit");
     return res.status(201).json({ data: hearing });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create hearing failed");
     logSafeError("Create hearing failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1412,9 +1702,32 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
   if (!id.success) return res.status(400).json({ error: "invalid_hearing_id" });
   if (!parsed.success) return res.status(400).json({ error: "invalid_hearing" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "hearing", "PATCH", id.data, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
     const current = await client.query(
       "select id, case_id from hearings where id = $1 and office_id = $2 and deleted_at is null for update",
       [id.data, req.auth.officeId]
@@ -1425,11 +1738,11 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     }
     const previousCaseId = current.rows[0].case_id;
     const nextCaseId = data.case_id ?? previousCaseId;
-    const related = await client.query(
-      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
-      [nextCaseId, req.auth.officeId]
-    );
-    if (!related.rowCount) {
+    const lockedCases = await lockLiveCases(client, req.auth.officeId, [previousCaseId, nextCaseId]);
+    if (!lockedCases.some(row => row.id === previousCaseId) ||
+        !lockedCases.some(row => row.id === nextCaseId)) {
+      // A child attached to a soft-deleted case/client is hidden and must not
+      // be mutated merely because PATCH attempts to move it to a live case.
       await client.query("rollback");
       return res.status(400).json({ error: "invalid_related_case" });
     }
@@ -1450,29 +1763,66 @@ app.patch("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       `update hearings set ${sets.join(", ")} where id = $${values.length - 1} and office_id = $${values.length} and deleted_at is null returning *`,
       values
     );
-    await syncCaseNextHearing(client, req.auth.officeId, previousCaseId);
-    if (nextCaseId !== previousCaseId) {
-      await syncCaseNextHearing(client, req.auth.officeId, nextCaseId);
-    }
+    await syncCaseNextHearings(client, req.auth.officeId, [previousCaseId, nextCaseId]);
     await writeAuditLog(client, req.auth, "update", "hearing", id.data, req, { fields: Object.keys(data) });
+    await completeApiMutationIdempotency(client, req, apiMutation, 200, { data: result.rows[0] }, result.rows[0].id);
     await client.query("commit");
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update hearing failed");
     logSafeError("Update hearing failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
 app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_hearing_id" });
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "hearing", "DELETE", id.data, null);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
+    const current = await client.query(
+      "select id, case_id from hearings where id = $1 and office_id = $2 and deleted_at is null for update",
+      [id.data, req.auth.officeId]
+    );
+    if (!current.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "hearing_not_found" });
+    }
+    const liveParent = await client.query(
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
+      [current.rows[0].case_id, req.auth.officeId]
+    );
+    if (!liveParent.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "hearing_not_found" });
+    }
     const result = await client.query(
       "update hearings set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id, case_id",
       [id.data, req.auth.officeId, req.auth.userId]
@@ -1483,15 +1833,16 @@ app.delete("/api/hearings/:id", requireAuth, requireTrustedOrigin, requireCsrf, 
     }
     await syncCaseNextHearing(client, req.auth.officeId, result.rows[0].case_id);
     await writeAuditLog(client, req.auth, "delete", "hearing", id.data, req);
+    await completeApiMutationIdempotency(client, req, apiMutation, 204, {}, id.data);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete hearing failed");
     logSafeError("Delete hearing failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1526,7 +1877,7 @@ app.get("/api/actions", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "invalid_action_date_range" });
   }
   const values = [req.auth.officeId];
-  const conditions = ["a.office_id = $1", "a.deleted_at is null", "c.deleted_at is null"];
+  const conditions = ["a.office_id = $1", "a.deleted_at is null", "c.deleted_at is null", "cl.deleted_at is null"];
   if (case_id) { values.push(case_id); conditions.push(`a.case_id = $${values.length}`); }
   if (status) { values.push(status); conditions.push(`a.status = $${values.length}`); }
   if (due_before) { values.push(due_before); conditions.push(`a.due_at <= $${values.length}`); }
@@ -1541,6 +1892,7 @@ app.get("/api/actions", requireAuth, async (req, res) => {
              u.full_name as assignee_name
       from case_actions a
       join cases c on c.id = a.case_id and c.office_id = a.office_id
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       left join users u on u.id = a.assigned_to and u.office_id = a.office_id and u.deleted_at is null
       where ${conditions.join(" and ")}
       order by (a.due_at is null), a.due_at asc, a.created_at desc
@@ -1562,6 +1914,7 @@ app.get("/api/actions/:id", requireAuth, async (req, res) => {
       select a.*, c.case_number, c.title as case_title, u.full_name as assignee_name
       from case_actions a
       join cases c on c.id = a.case_id and c.office_id = a.office_id and c.deleted_at is null
+      join clients cl on cl.id = c.client_id and cl.office_id = c.office_id and cl.deleted_at is null
       left join users u on u.id = a.assigned_to and u.office_id = a.office_id and u.deleted_at is null
       where a.id = $1 and a.office_id = $2 and a.deleted_at is null
     `, [id.data, req.auth.officeId]);
@@ -1578,11 +1931,34 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
   const parsed = actionCreateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "invalid_action" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "case_action", "POST", null, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
     const related = await client.query(
-      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
       [data.case_id, req.auth.officeId]
     );
     if (!related.rowCount) {
@@ -1612,15 +1988,16 @@ app.post("/api/actions", requireAuth, requireTrustedOrigin, requireCsrf, async (
     await writeAuditLog(client, req.auth, "create", "case_action", action.id, req, {
       status: action.status
     });
+    await completeApiMutationIdempotency(client, req, apiMutation, 201, { data: action }, action.id);
     await client.query("commit");
     return res.status(201).json({ data: action });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Create case action failed");
     logSafeError("Create case action failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1630,9 +2007,32 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
   if (!id.success) return res.status(400).json({ error: "invalid_action_id" });
   if (!parsed.success) return res.status(400).json({ error: "invalid_action_update" });
   const data = parsed.data;
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "case_action", "PATCH", id.data, data);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
     const current = await client.query(
       "select id, case_id, status from case_actions where id = $1 and office_id = $2 and deleted_at is null for update",
       [id.data, req.auth.officeId]
@@ -1641,12 +2041,14 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
       await client.query("rollback");
       return res.status(404).json({ error: "action_not_found" });
     }
-    const nextCaseId = data.case_id ?? current.rows[0].case_id;
+    const previousCaseId = current.rows[0].case_id;
+    const nextCaseId = data.case_id ?? previousCaseId;
     const related = await client.query(
-      "select id from cases where id = $1 and office_id = $2 and deleted_at is null",
-      [nextCaseId, req.auth.officeId]
+      "select id from public.lock_live_case_parents($1,$2::uuid[])",
+      [req.auth.officeId, [...new Set([previousCaseId, nextCaseId])]]
     );
-    if (!related.rowCount) {
+    if (!related.rows.some(row => row.id === previousCaseId) ||
+        !related.rows.some(row => row.id === nextCaseId)) {
       await client.query("rollback");
       return res.status(400).json({ error: "invalid_related_case" });
     }
@@ -1683,24 +2085,64 @@ app.patch("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
       values
     );
     await writeAuditLog(client, req.auth, "update", "case_action", id.data, req, { fields: Object.keys(data) });
+    await completeApiMutationIdempotency(client, req, apiMutation, 200, { data: result.rows[0] }, result.rows[0].id);
     await client.query("commit");
     return res.json({ data: result.rows[0] });
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Update case action failed");
     logSafeError("Update case action failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
 app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_action_id" });
-  const client = await pool.connect();
+  const client = await acquireClient(pool);
   try {
     await client.query("begin");
+    const actor = await lockLiveMutationActor(client, req);
+    if (!actor.ok) {
+      await client.query("rollback");
+      return res.status(actor.status).json({ error: actor.error });
+    }
+    const apiKeyResult = parseApiMutationIdempotencyKey(req);
+    if (!apiKeyResult.ok) {
+      await client.query("rollback");
+      return res.status(400).json({ error: "invalid_idempotency_key" });
+    }
+    const apiMutation = await beginApiMutationIdempotency(client, req, apiKeyResult.key, "case_action", "DELETE", id.data, null);
+    if (apiMutation.kind === "conflict") {
+      await client.query("rollback");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (apiMutation.kind === "incomplete") {
+      await client.query("rollback");
+      return res.status(503).json({ error: "idempotency_result_incomplete" });
+    }
+    if (apiMutation.kind === "replay") {
+      await client.query("rollback");
+      return respondApiMutationReplay(res, apiMutation);
+    }
+    const current = await client.query(
+      "select id, case_id from case_actions where id = $1 and office_id = $2 and deleted_at is null for update",
+      [id.data, req.auth.officeId]
+    );
+    if (!current.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "action_not_found" });
+    }
+    const liveParent = await client.query(
+      "select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",
+      [current.rows[0].case_id, req.auth.officeId]
+    );
+    if (!liveParent.rowCount) {
+      await client.query("rollback");
+      return res.status(404).json({ error: "action_not_found" });
+    }
     const result = await client.query(
       "update case_actions set deleted_at = now(), updated_by = $3, updated_at = now() where id = $1 and office_id = $2 and deleted_at is null returning id",
       [id.data, req.auth.officeId, req.auth.userId]
@@ -1710,15 +2152,16 @@ app.delete("/api/actions/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       return res.status(404).json({ error: "action_not_found" });
     }
     await writeAuditLog(client, req.auth, "delete", "case_action", id.data, req);
+    await completeApiMutationIdempotency(client, req, apiMutation, 204, {}, id.data);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
-    await client.query("rollback");
+    const rollbackSucceeded = await rollbackQuietly(client, "Delete case action failed");
     logSafeError("Delete case action failed", error);
-    const failure = dbError(error);
+    const failure = dbError(error, rollbackSucceeded);
     return res.status(failure.status).json(failure.body);
   } finally {
-    client.release();
+    releaseClient(client);
   }
 });
 
@@ -1764,18 +2207,18 @@ app.get("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin"
   const cid = req.query.case_id ? parseUuid.safeParse(req.query.case_id) : null;
   if (cid && !cid.success) return res.status(400).json({error:"invalid_case_id"});
   const values=[req.auth.officeId,req.auth.userId];
-  const where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null",
+  const where=["d.office_id = $1","d.deleted_at is null","c.deleted_at is null","cl.deleted_at is null",
     "((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))"];
   if(cid){values.push(cid.data);where.push(`d.case_id = $${values.length}`);}
   try {
-    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$2 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
+    const result=await pool.query(`select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join clients cl on cl.id=c.client_id and cl.office_id=c.office_id and cl.deleted_at is null join users u on u.id=$2 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where ${where.join(" and ")} order by d.created_at desc limit 200`,values);
     return res.json({data:result.rows});
   } catch(error){logSafeError("List case documents failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
 });
 app.get("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "admin", "lawyer", "assistant", "viewer"), async (req,res) => {
   const id=parseUuid.safeParse(req.params.id);if(!id.success)return res.status(400).json({error:"invalid_document_id"});
   try {
-    const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id join users u on u.id=$3 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null and ((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))",[id.data,req.auth.officeId,req.auth.userId]);
+    const q=await pool.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at,c.case_number,c.title as case_title from case_documents d join cases c on c.id=d.case_id and c.office_id=d.office_id and c.deleted_at is null join clients cl on cl.id=c.client_id and cl.office_id=c.office_id and cl.deleted_at is null join users u on u.id=$3 and u.office_id=d.office_id and u.is_active=true and u.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null and c.deleted_at is null and ((u.role in ('owner','admin','lawyer')) or (u.role='assistant' and d.confidentiality in ('normal','confidential')) or (u.role='viewer' and d.confidentiality='normal'))",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount) return documentAccessDenied(res);
     return res.json({data:q.rows[0]});
   }catch(error){logSafeError("Get case document failed",error);const f=dbError(error);return res.status(f.status).json(f.body);}
@@ -1787,7 +2230,7 @@ app.post("/api/case-documents", requireAuth, requireDocumentRole("owner", "admin
    if(idempotencyKey!==undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey))return res.status(400).json({error:"invalid_idempotency_key"});
    const fingerprint=hashToken(JSON.stringify(d));let c;
    try{c=await acquireClient(pool);
-     await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);if (!actor.ok) { await rollbackQuietly(c, "create actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }if (!canCreateCaseDocument(actor.role, d.confidentiality)) { await rollbackQuietly(c, "create confidentiality forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }const related=await c.query("select id from cases where id=$1 and office_id=$2 and deleted_at is null",[d.case_id,req.auth.officeId]);
+     await c.query("begin");const actor = await lockLiveDocumentActor(c, req, ["owner", "admin", "lawyer", "assistant"]);if (!actor.ok) { await rollbackQuietly(c, "create actor no longer authorized"); return res.status(actor.status).json({ error: actor.error }); }if (!canCreateCaseDocument(actor.role, d.confidentiality)) { await rollbackQuietly(c, "create confidentiality forbidden"); return res.status(403).json({ error: "document_confidentiality_forbidden" }); }const related=await c.query("select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",[d.case_id,req.auth.officeId]);
      if(!related.rowCount){await rollbackQuietly(c,"create missing related case");return res.status(400).json({error:"invalid_related_case"});}
      const q=await c.query("insert into case_documents(office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,idempotency_key,request_fingerprint,created_by,updated_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14) on conflict (office_id,created_by,idempotency_key) where idempotency_key is not null do nothing returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",[req.auth.officeId,d.case_id,d.title,d.document_type,d.description??null,d.original_filename??null,d.mime_type??null,d.size_bytes??null,d.document_date??null,d.reference_number??null,d.confidentiality,idempotencyKey??null,idempotencyKey?fingerprint:null,req.auth.userId]);
      if(!q.rowCount && idempotencyKey){
@@ -1825,14 +2268,17 @@ app.patch("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", "
     const idem=await beginDocumentMutationIdempotency(c,req,key,"PATCH",id.data,fingerprint);
     if(idem.kind==="conflict"){await rollbackQuietly(c,"document PATCH idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
     if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document PATCH idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="gone"){await rollbackQuietly(c,"purged document PATCH idempotency replay");return res.status(410).json({error:"idempotency_result_purged"});}
     if(idem.kind==="replay"){
       if(idem.status!==200){await rollbackQuietly(c,"invalid document PATCH replay status");return res.status(500).json({error:"database_error"});}
-      const replay=await c.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at from case_documents d join cases cs on cs.id=d.case_id and cs.office_id=d.office_id where d.id=$1 and d.office_id=$2 and d.deleted_at is null and cs.deleted_at is null for update of d",[id.data,req.auth.officeId]);
+      const replay=await c.query("select d.id,d.office_id,d.case_id,d.title,d.document_type,d.description,d.original_filename,d.mime_type,d.size_bytes,d.document_date,d.reference_number,d.confidentiality,d.storage_status,d.created_at,d.updated_at from case_documents d join cases cs on cs.id=d.case_id and cs.office_id=d.office_id and cs.deleted_at is null join clients cl on cl.id=cs.client_id and cl.office_id=cs.office_id and cl.deleted_at is null where d.id=$1 and d.office_id=$2 and d.deleted_at is null for update of d",[id.data,req.auth.officeId]);
       if(!replay.rowCount||!canReadCaseDocument(actor.role,replay.rows[0].confidentiality)){await rollbackQuietly(c,"document PATCH replay access denied");return documentAccessDenied(res);}
       await c.query("commit");return res.status(200).json({data:replay.rows[0]});
     }
-    const current=await c.query("select confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
+    const current=await c.query("select case_id,confidentiality from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
     if(!current.rowCount||!canEditCaseDocument(actor.role,current.rows[0].confidentiality)){await rollbackQuietly(c,"update inaccessible document");return documentAccessDenied(res);}
+    const liveParent=await c.query("select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",[current.rows[0].case_id,req.auth.officeId]);
+    if(!liveParent.rowCount){await rollbackQuietly(c,"update document whose parent case is deleted");return documentAccessDenied(res);}
     const q=await c.query("update case_documents set "+sets.join(",")+",updated_at=now() where id=$"+(v.length-1)+" and office_id=$"+v.length+" and deleted_at is null returning id,office_id,case_id,title,document_type,description,original_filename,mime_type,size_bytes,document_date,reference_number,confidentiality,storage_status,created_at,updated_at",v);
     if(!q.rowCount){await rollbackQuietly(c,"update missing document");return documentAccessDenied(res);}
     const auditMetadata={fields:Object.keys(p.data)};
@@ -1857,10 +2303,15 @@ app.delete("/api/case-documents/:id", requireAuth, requireDocumentRole("owner", 
     const idem=await beginDocumentMutationIdempotency(c,req,key,"DELETE",id.data,fingerprint);
     if(idem.kind==="conflict"){await rollbackQuietly(c,"document DELETE idempotency conflict");return res.status(409).json({error:"idempotency_key_reused"});}
     if(idem.kind==="incomplete"){await rollbackQuietly(c,"incomplete document DELETE idempotency record");return res.status(503).json({error:"database_retryable"});}
+    if(idem.kind==="gone"){await rollbackQuietly(c,"purged document DELETE idempotency replay");return res.status(410).json({error:"idempotency_result_purged"});}
     if(idem.kind==="replay"){
       if(idem.status!==204){await rollbackQuietly(c,"invalid document DELETE replay status");return res.status(500).json({error:"database_error"});}
       await c.query("commit");return res.status(204).send();
     }
+    const current=await c.query("select case_id from case_documents where id=$1 and office_id=$2 and deleted_at is null for update",[id.data,req.auth.officeId]);
+    if(!current.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
+    const liveParent=await c.query("select id from public.lock_live_case_parents($2, ARRAY[$1]::uuid[])",[current.rows[0].case_id,req.auth.officeId]);
+    if(!liveParent.rowCount){await rollbackQuietly(c,"delete document whose parent case is deleted");return res.status(404).json({error:"document_not_found"});}
     const q=await c.query("update case_documents set deleted_at=now(),updated_by=$3,updated_at=now() where id=$1 and office_id=$2 and deleted_at is null returning id",[id.data,req.auth.officeId,req.auth.userId]);
     if(!q.rowCount){await rollbackQuietly(c,"delete missing document");return res.status(404).json({error:"document_not_found"});}
     await writeAuditLog(c,req.auth,"delete","case_document",id.data,req);

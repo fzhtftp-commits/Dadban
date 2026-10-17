@@ -11,7 +11,9 @@ const initialCaseId = new URLSearchParams(window.location.search).get("case_id")
 const message = (text, type = "") => { const el=$("pageMessage"); el.textContent=text; el.className="calendar-message"+(type?" "+type:""); el.hidden=!text; };
 const toLocalInput = (value) => { if(!value)return ""; const d=new Date(value); if(Number.isNaN(d.getTime()))return ""; const offset=d.getTimezoneOffset()*60000; return new Date(d.getTime()-offset).toISOString().slice(0,16); };
 async function request(url, options={}) {
- const response = await fetch(url,{credentials:"include",...options});
+ const mutation = window.dadbanWithMutationKey(url, options);
+ const response = await fetch(url,{credentials:"include",...mutation.options});
+ if (response.ok && mutation.key) window.dadbanMutationSucceeded(url, mutation.options.method, mutation.options.body, mutation.key);
  if(response.status===401){location.href="login.html";throw new Error("نشست شما منقضی شده است؛ دوباره وارد شوید.");}
  if(response.status===204)return null;
  const data=await response.json().catch(()=>({}));

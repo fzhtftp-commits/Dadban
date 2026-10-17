@@ -3,9 +3,11 @@ on:
   push:
     branches:
       - feature/unified-case-documents-metadata-only-2026-10
+      - security/commit-unknown-outcome-tests-2026-10
   pull_request:
     branches:
       - feature/case-actions
+      - feature/unified-case-documents-metadata-only-2026-10
   workflow_dispatch:
 permissions:
   contents: read
@@ -50,6 +52,54 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-migration-upgrade.sql
+        working-directory: backend
+
+      - name: Verify tombstone runtime role privileges in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-tombstone-privileges.sql
+        working-directory: backend
+
+      - name: Verify SECURITY DEFINER function ACL reset and runtime membership guards
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGDATABASE: dadban_test
+        run: bash tests/api-idempotency-function-acl-hardening.sh
+        working-directory: backend
+
+      - name: Verify runtime cannot disable tombstone triggers or truncate identity rows
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-tombstone-ddl-privileges.sh
+        working-directory: backend
+
+      - name: Verify schema owner, migration, maintenance, and runtime separation
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-tombstone-role-separation.sh
+        working-directory: backend
+
+      - name: Verify independent PostgreSQL ownership and effective ACL matrix
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGDATABASE: dadban_test
+        run: bash tests/postgres-ownership-acl-matrix.sh
+        working-directory: backend
+
+      - name: Verify isolated backup reader versus restore executor role boundary
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGDATABASE: dadban_test
+        run: bash tests/postgres-backup-restore-role-boundary.sh
+        working-directory: backend
+
+      - name: Verify tombstone migration rerun fails atomically in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-tombstone-rerun.sh
         working-directory: backend
 
       - name: Verify shared rate-limit concurrency and failure behavior in disposable PostgreSQL
@@ -102,10 +152,52 @@ jobs:
           bash tests/audit-logs-security.sh
         working-directory: backend
 
+      - name: Verify isolated SECURITY DEFINER actor lock prototype and concurrent revocation/role/disable changes
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_actor_lock_definer_test
+          RUNTIME_DATABASE_URL: postgres://dadban_actor_runtime_ci:ci-only-actor-runtime-password@localhost:5432/dadban_actor_lock_definer_test
+        run: |
+          createdb -h localhost -U postgres dadban_actor_lock_definer_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_actor_lock_definer_test' EXIT
+          node tests/case-documents-security-definer-prototype.integration.js
+        working-directory: backend
+
       - name: Verify two-office API isolation over HTTP
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
         run: node tests/case-documents-api.integration.js
+        working-directory: backend
+
+      - name: Verify case document API least-privilege runtime role
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_runtime_role_test
+          API_DATABASE_URL: postgres://dadban_document_runtime_ci:ci-only-runtime-password@localhost:5432/dadban_runtime_role_test
+        run: |
+          createdb -h localhost -U postgres dadban_runtime_role_test
+          trap 'dropdb -h localhost -U postgres --if-exists dadban_runtime_role_test' EXIT
+          node tests/case-documents-runtime-role.integration.js
+        working-directory: backend
+
+      - name: Verify lost PostgreSQL COMMIT responses and exact-once document audit
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dadban_test
+        run: node tests/case-documents-commit-outcome.integration.js
+        working-directory: backend
+
+      - name: Verify real pg_dump and pg_restore with non-superuser role separation
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGDATABASE: dadban_test
+        run: bash tests/postgres-non-superuser-pg-restore.sh
+        working-directory: backend
+
+      - name: Verify PostgreSQL tombstone backup/restore and post-restore migration safety
+        env:
+          PGPASSWORD: postgres
+        run: bash tests/case-documents-tombstone-backup-restore.sh
         working-directory: backend
 
       - name: Verify audit INSERT failure rolls back client, case, hearing, and action mutations
@@ -117,4 +209,3 @@ jobs:
           trap 'dropdb -h localhost -U postgres --if-exists dadban_audit_mutations_test' EXIT
           node tests/audit-mutation-rollback.integration.js
         working-directory: backend
-

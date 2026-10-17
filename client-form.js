@@ -197,12 +197,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     submitButton.textContent = editMode ? "در حال ذخیره..." : "در حال ثبت...";
 
     try {
-      const response = await fetch(editMode ? `${API}/api/clients/${encodeURIComponent(clientId)}` : `${API}/api/clients`, {
+      const mutationUrl = editMode ? `${API}/api/clients/${encodeURIComponent(clientId)}` : `${API}/api/clients`;
+      const mutationOptions = {
         method: editMode ? "PATCH" : "POST",
         credentials: "include",
         headers: {"Content-Type":"application/json","x-csrf-token":csrf},
         body: JSON.stringify(payload)
-      });
+      };
+      const mutation = window.dadbanWithMutationKey(mutationUrl, mutationOptions);
+      const response = await fetch(mutationUrl, mutation.options);
+      if (response.ok && mutation.key) window.dadbanMutationSucceeded(mutationUrl, mutation.options.method, mutation.options.body, mutation.key);
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) { window.location.href = "login.html"; return; }
       if (response.status === 403) throw new Error("درخواست امنیتی رد شد؛ صفحه را تازه‌سازی و دوباره وارد شوید.");

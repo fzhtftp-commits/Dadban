@@ -13,7 +13,9 @@ let assignees = [];
 let actions = [];
 const message = (text,type="") => { const el=$("actionMessage"); el.textContent=text; el.className="action-message"+(type?" "+type:""); el.hidden=!text; };
 async function request(url, options={}) {
- const response=await fetch(url,{credentials:"include",...options});
+ const mutation = window.dadbanWithMutationKey(url, options);
+ const response=await fetch(url,{credentials:"include",...mutation.options});
+ if(response.ok && mutation.key) window.dadbanMutationSucceeded(url, mutation.options.method, mutation.options.body, mutation.key);
  if(response.status===401){location.href="login.html";throw new Error("نشست شما منقضی شده است؛ دوباره وارد شوید.");}
  if(response.status===204)return null;
  const data=await response.json().catch(()=>({}));

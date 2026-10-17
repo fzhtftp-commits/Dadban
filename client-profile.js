@@ -6,6 +6,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const editButton = document.getElementById("editClient");
   const deleteButton = document.getElementById("deleteClient");
   const csrfToken = () => sessionStorage.getItem("dadban_csrf") || "";
+  // A resource-scoped deterministic key is identical in every tab and survives reloads/session reauthentication.
+  // DELETE is one-way soft-delete, so each client has one logical delete operation.
+  const deleteIdempotencyKey = () => `dadban-delete-client-${id}`;
+
   const faDigits = d => "۰۱۲۳۴۵۶۷۸۹"[d];
   const statusLabel = {active:"فعال",pending:"در انتظار",closed:"بسته",archived:"بایگانی"};
   const priorityLabel = {low:"کم",normal:"عادی",high:"بالا",urgent:"فوری"};
@@ -104,7 +108,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           const deleteResponse = await fetch(`${API}/api/clients/${encodeURIComponent(id)}`, {
             method: "DELETE",
             credentials: "include",
-            headers: { "x-csrf-token": token }
+            headers: { "x-csrf-token": token, "idempotency-key": deleteIdempotencyKey() }
           });
           const deleteData = await deleteResponse.json().catch(() => ({}));
           if (deleteResponse.status === 401) { window.location.href = "login.html"; return; }

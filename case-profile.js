@@ -1,6 +1,9 @@
 const API="https://dadban-backend.onrender.com";
 const id=new URLSearchParams(location.search).get("id");
 const csrf=()=>sessionStorage.getItem("dadban_csrf")||"";
+// Deterministic resource-scoped key is shared by all tabs/reloads and survives session reauthentication.
+// A case has one logical soft-delete operation.
+const deleteIdempotencyKey=()=>`dadban-delete-case-${id}`;
 const $=x=>document.getElementById(x);
 const statusLabel={active:"فعال",pending:"در انتظار",closed:"بسته",archived:"بایگانی"};
 const priorityLabel={low:"کم",normal:"عادی",high:"بالا",urgent:"فوری"};
@@ -11,7 +14,7 @@ async function removeCase(){
  if(!confirm("آیا از حذف این پرونده مطمئن هستید؟\n\nاین عملیات حذف نرم است و اطلاعات برای سوابق امنیتی نگهداری می‌شود."))return;
  deleteBtn.disabled=true; deleteBtn.textContent="در حال حذف...";
  try{
-  const r=await fetch(`${API}/api/cases/${encodeURIComponent(id)}`,{method:"DELETE",credentials:"include",headers:{"x-csrf-token":csrf()}});
+  const r=await fetch(`${API}/api/cases/${encodeURIComponent(id)}`,{method:"DELETE",credentials:"include",headers:{"x-csrf-token":csrf(),"idempotency-key":deleteIdempotencyKey()}});
   if(r.status===401){location.href="login.html";return}
   if(!r.ok)throw new Error();
   location.href="cases.html?deleted=1";

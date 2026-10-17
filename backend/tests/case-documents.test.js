@@ -4,9 +4,22 @@ import { readFile } from "node:fs/promises";
 const migration = await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8");
 const sharedRateLimitMigration = await readFile(new URL("../migrations/005_shared_rate_limits.sql", import.meta.url), "utf8");
 const mutationIdempotencyMigration = await readFile(new URL("../migrations/006_case_document_mutation_idempotency.sql", import.meta.url), "utf8");
+const actorLockMigration = await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8");
+const caseReassignmentLockMigration = await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8");
 const sharedRateLimiter = await readFile(new URL("../src/shared-rate-limiter.js", import.meta.url), "utf8");
 const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 const transactionHelper = await readFile(new URL("../src/document-transaction.js", import.meta.url), "utf8");
+const clientProfile = await readFile(new URL("../../client-profile.js", import.meta.url), "utf8");
+const caseProfile = await readFile(new URL("../../case-profile.js", import.meta.url), "utf8");
+test("client and case DELETE use deterministic resource-scoped keys across tabs, reloads, and sessions", () => {
+ assert.match(clientProfile, /dadban-delete-client-\$\{id\}/);
+ assert.match(caseProfile, /dadban-delete-case-\$\{id\}/);
+ assert.match(clientProfile, /"idempotency-key": deleteIdempotencyKey\(\)/);
+ assert.match(caseProfile, /"idempotency-key":deleteIdempotencyKey\(\)/);
+ assert.doesNotMatch(clientProfile, /(?:localStorage|sessionStorage)\.(?:getItem|setItem|removeItem)\(deleteIdempotencyStorageKey/);
+ assert.doesNotMatch(caseProfile, /(?:localStorage|sessionStorage)\.(?:getItem|setItem|removeItem)\(deleteIdempotencyStorageKey/);
+});
+
 test("schema is strictly metadata-only and enforces office-scoped foreign keys", () => {
  assert.match(migration, /storage_status/);
  assert.doesNotMatch(migration, /storage_key/i);
@@ -43,16 +56,61 @@ test("PATCH and DELETE idempotency keys are persisted without duplicating docume
  assert.match(server, /idempotency_key_reused/);
 });
 
-test("document write transactions revalidate and lock the live session and user", () => {
+test("document write transactions revalidate and lock the live session and user through the least-privilege definer helper", () => {
  assert.match(server, /const lockLiveDocumentActor = async/);
- assert.match(server, /for update of s, u/);
- assert.match(server, /s\.expires_at > clock_timestamp\(\) and u\.is_active = true and u\.deleted_at is null/);
- assert.match(server, /Lock identity rows first, then check expiry with the wall clock after any lock wait/);
+ assert.match(server, /public\.lock_live_document_actor\(\$1,\$2,\$3\)/);
+ assert.match(actorLockMigration, /SECURITY DEFINER/);
+ assert.match(actorLockMigration, /FOR UPDATE OF s,u/);
+ assert.match(actorLockMigration, /SET search_path = pg_catalog, pg_temp/);
+ assert.match(actorLockMigration, /NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT/);
+ assert.match(actorLockMigration, /s\.expires_at > clock_timestamp\(\)[\s\S]*u\.is_active[\s\S]*u\.deleted_at IS NULL/);
+ assert.match(actorLockMigration, /REVOKE ALL ON FUNCTION public\.lock_live_document_actor\(uuid,uuid,uuid\) FROM PUBLIC/);
+ assert.match(actorLockMigration, /must not participate in role memberships/);
+ assert.doesNotMatch(actorLockMigration, /TO postgres/);
+ assert.ok(actorLockMigration.includes("GRANT EXECUTE ON FUNCTION public.lock_live_document_actor(uuid,uuid,uuid) TO dadban_document_runtime_ci"));
+ for (const fn of [
+   "lock_live_client_parent(uuid,uuid)",
+   "lock_live_case_client(uuid,uuid)",
+   "lock_live_case_parents(uuid,uuid[])"
+ ]) {
+   assert.ok(actorLockMigration.includes(`CREATE FUNCTION public.${fn.split("(")[0]}`), `missing SECURITY DEFINER parent lock ${fn}`);
+   assert.ok(actorLockMigration.includes(`GRANT EXECUTE ON FUNCTION public.${fn} TO dadban_document_runtime_ci`), `runtime must only execute parent lock ${fn}`);
+ }
+ assert.match(server, /public\.lock_live_client_parent\(\$1,\$2\)/);
+ assert.match(server, /public\.lock_live_case_reassignment\(\$1,\$2,\$3\)/);
+ assert.match(caseReassignmentLockMigration, /ORDER BY cl\.id[\s\S]*FOR UPDATE/);
+ assert.match(caseReassignmentLockMigration, /parents_live boolean/);
+ assert.match(caseReassignmentLockMigration, /REVOKE ALL ON FUNCTION public\.lock_live_case_reassignment\(uuid,uuid,uuid\) FROM PUBLIC/);
+ assert.ok(caseReassignmentLockMigration.includes("GRANT EXECUTE ON FUNCTION public.lock_live_case_reassignment(uuid,uuid,uuid) TO dadban_document_runtime_ci"));
+ assert.match(server, /public\.lock_live_case_parents\(\$1,\$2::uuid\[\]\)/);
+ assert.doesNotMatch(server, /select id from clients where id = \$1 and office_id = \$2 and deleted_at is null for update/i);
+ assert.doesNotMatch(server, /select id from cases where id = \$1 and office_id = \$2 and deleted_at is null for update/i);
  assert.equal((server.match(/lockLiveDocumentActor\(c, req,/g) || []).length, 3, "create, update, and delete must revalidate actor state inside their transactions");
  assert.match(server, /rollbackSucceeded && \["40001", "40P01", "55P03", "57014"\]\.includes\(error\?\.code\)/);
  assert.match(server, /dbError\(error,rollbackSucceeded\)/);
 });
 
+test("all client, case, hearing, and action writes revalidate the live actor and writable role in-transaction", () => {
+ const routes = [
+   'app.post("/api/clients",', 'app.patch("/api/clients/:id",', 'app.delete("/api/clients/:id",',
+   'app.post("/api/cases",', 'app.patch("/api/cases/:id",', 'app.delete("/api/cases/:id",',
+   'app.post("/api/hearings",', 'app.patch("/api/hearings/:id",', 'app.delete("/api/hearings/:id",',
+   'app.post("/api/actions",', 'app.patch("/api/actions/:id",', 'app.delete("/api/actions/:id",'
+ ];
+ for (const start of routes) {
+   const from = server.indexOf(start);
+   assert.notEqual(from, -1, `missing write route: ${start}`);
+   const next = server.indexOf("\napp.", from + start.length);
+   const route = server.slice(from, next < 0 ? server.length : next);
+   const begin = route.indexOf('await client.query("begin");');
+   const actor = route.indexOf("lockLiveMutationActor(client, req)");
+   assert.ok(begin >= 0 && actor > begin, `${start} must revalidate actor after BEGIN and before any business write`);
+ }
+ assert.match(server, /const lockLiveMutationActor = async/);
+ assert.match(server, /\["owner", "admin", "lawyer", "assistant"\]/);
+ assert.match(server, /mutation_role_forbidden/);
+});
+ 
 test("confidentiality policy is enforced by API and audit", () => {
  assert.match(server, /const canReadCaseDocument = \(role, level\) =>/);
  assert.ok(server.includes("u.role='assistant' and d.confidentiality in ('normal','confidential')"));
@@ -83,7 +141,7 @@ test("every document API route enforces office-scoped access predicates", () => 
  const remove = route('app.delete("/api/case-documents/:id",', 'app.use((_req, res) =>');
  assert.match(list, /d\.office_id = \$1/);
  assert.match(detail, /d\.id=\$1 and d\.office_id=\$2/);
- assert.match(create, /cases where id=\$1 and office_id=\$2/);
+ assert.match(create, /public\.lock_live_case_parents\(\$2, ARRAY\[\$1\]::uuid\[\]\)/);
  assert.ok(update.includes('sets.join(",")') && update.includes('where id=$"+(v.length-1)+" and office_id=$"+v.length+"'), "PATCH must bind its generated SQL parameters");
  assert.match(remove, /where id=\$1 and office_id=\$2 and deleted_at is null/);
 });
@@ -113,9 +171,9 @@ test("unhandled and oversized request errors return sanitized JSON", () => {
 test("server error logging records only safe error metadata", () => {
  assert.match(server, /const logSafeError = \(context, error\) =>/);
  assert.match(server, /console\.error\(context, safe\)/);
- assert.doesNotMatch(server, /console\.error\([^\\n]*,\s*error\s*\)/);
+ assert.doesNotMatch(server, /console\.error\([^\n]*,\s*error\s*\)/);
  assert.match(transactionHelper, /rollbackError\?\.code/);
- assert.doesNotMatch(transactionHelper, /console\.error\([^\\n]*,\s*rollbackError\s*\)/);
+ assert.doesNotMatch(transactionHelper, /console\.error\([^\n]*,\s*rollbackError\s*\)/);
 });
 
 test("document migration has office-scoped partial indexes for active-document listing", () => {

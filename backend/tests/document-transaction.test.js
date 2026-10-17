@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { acquireClient, rollbackQuietly, releaseClient } from "../src/document-transaction.js";
 
 test("successful rollback leaves client reusable until final release", async () => {
@@ -36,12 +37,9 @@ test("reused pool client can be released once per checkout", async () => {
 
 test("connection acquisition errors propagate without attempting to release a nonexistent client", async () => {
   const connectionError = Object.assign(new Error("simulated connection outage"), { code: "ECONNREFUSED" });
-  let releaseCalls = 0;
   const pool = { async connect() { throw connectionError; } };
   await assert.rejects(acquireClient(pool), error => error === connectionError);
-  const nonexistentClient = null;
-  releaseClient(nonexistentClient);
-  assert.equal(releaseCalls, 0);
+  releaseClient(null);
 });
 
 test("rollback failure discards client and never throws to the request handler", async () => {
@@ -65,11 +63,34 @@ test("rollback failure discards client and never throws to the request handler",
   assert.equal(releaseCalls, 1, "finally cleanup must not double-release discarded client");
 });
 
+test("connection-level error during COMMIT is observed and the broken client is discarded", async () => {
+  const client = new EventEmitter();
+  let queryCalls = 0;
+  let releaseCalls = 0;
+  let releaseArgument;
+  client.query = async () => { queryCalls++; throw new Error("rollback must not be attempted on a dead connection"); };
+  client.release = error => { releaseCalls++; releaseArgument = error; };
+  const pool = { async connect() { return client; } };
+  const connectionError = Object.assign(new Error("simulated lost COMMIT response"), { code: "ECONNRESET" });
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const checkedOut = await acquireClient(pool);
+    checkedOut.emit("error", connectionError);
+    assert.equal(await rollbackQuietly(checkedOut, "unknown COMMIT outcome"), false);
+    releaseClient(checkedOut);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(queryCalls, 0, "rollback cannot prove outcome after connection-level failure");
+  assert.equal(releaseCalls, 1, "broken client must be discarded exactly once");
+  assert.equal(releaseArgument, connectionError, "the connection error must be passed to pool release");
+});
+
 test("rollback helper safely handles a missing client", async () => {
   assert.equal(await rollbackQuietly(null, "no connection"), false);
   releaseClient(null);
 });
-
 
 test("rollback failure logs omit raw exception messages", async () => {
   const secret = "postgres://private-user:private-password@db.internal/private-db";
@@ -77,7 +98,7 @@ test("rollback failure logs omit raw exception messages", async () => {
   rollbackError.code = "08006";
   const captured = [];
   const original = console.error;
-  console.error = (...args) => captured.push(args.map(value => typeof value === "string" ? value : JSON.stringify(value)).join(" "));
+  console.error = (...args) => captured.push(args.map(value => typeof value === "string" ? value : JSON.stringify(value)).join("\\n"));
   const client = {
     async query() { throw rollbackError; },
     release() {}

@@ -45,7 +45,11 @@ async function save(e){
  try{
   const dt=document.getElementById("next_hearing_at").value;
   const payload={client_id:clientId.value,case_number:document.getElementById("case_number").value.trim(),title:document.getElementById("title").value.trim(),case_type:document.getElementById("case_type").value.trim()||null,court_name:document.getElementById("court_name").value.trim()||null,branch_name:document.getElementById("branch_name").value.trim()||null,opposing_party:document.getElementById("opposing_party").value.trim()||null,status:document.getElementById("status").value,priority:document.getElementById("priority").value,filing_date:document.getElementById("filing_date").value||null,next_hearing_at:dt?new Date(dt).toISOString():null,description:document.getElementById("description").value.trim()||null,notes:document.getElementById("notes").value.trim()||null};
-  const r=await fetch(caseId?`${API}/api/cases/${encodeURIComponent(caseId)}`:`${API}/api/cases`,{method:caseId?"PATCH":"POST",credentials:"include",headers:{"Content-Type":"application/json","x-csrf-token":csrf()},body:JSON.stringify(payload)});
+  const mutationUrl=caseId?`${API}/api/cases/${encodeURIComponent(caseId)}`:`${API}/api/cases`;
+   const mutationOptions={method:caseId?"PATCH":"POST",credentials:"include",headers:{"Content-Type":"application/json","x-csrf-token":csrf()},body:JSON.stringify(payload)};
+   const mutation=window.dadbanWithMutationKey(mutationUrl,mutationOptions);
+   const r=await fetch(mutationUrl,mutation.options);
+   if(r.ok&&mutation.key)window.dadbanMutationSucceeded(mutationUrl,mutation.options.method,mutation.options.body,mutation.key);
   const d=await r.json().catch(()=>({}));
   if(r.status===401){location.href="login.html";return}
   if(!r.ok)throw new Error(d.error==="duplicate_record"?"شماره پرونده تکراری است.":d.error==="case_not_found"?"پرونده پیدا نشد.":"ذخیره پرونده انجام نشد.");
