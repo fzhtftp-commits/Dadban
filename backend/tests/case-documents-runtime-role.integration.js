@@ -70,6 +70,31 @@ async function denied(query, label) {
 }
 
 try {
+  // This shared role is created as NOLOGIN by the earlier tombstone-privilege
+  // step in this same disposable job. Assert that precondition so this test
+  // can restore it rather than accidentally deleting or permanently enabling it.
+  const initialRoles = await pool.query(`
+    SELECT rolname, rolcanlogin
+    FROM pg_roles
+    WHERE rolname IN (
+      'dadban_document_runtime_ci',
+      'dadban_document_runtime_alt_ci',
+      'dadban_case_documents_owner_ci',
+      'dadban_case_documents_migrator_ci'
+    )
+  `);
+  const initialByName = new Map(initialRoles.rows.map(row => [row.rolname, row]));
+  assert.equal(initialByName.get("dadban_document_runtime_ci")?.rolcanlogin, false,
+    "expected earlier tombstone test to leave the shared runtime role as NOLOGIN");
+  for (const roleName of [
+    "dadban_document_runtime_alt_ci",
+    "dadban_case_documents_owner_ci",
+    "dadban_case_documents_migrator_ci"
+  ]) {
+    assert.equal(initialByName.has(roleName), false,
+      `Refusing to reuse pre-existing test-only PostgreSQL role: ${roleName}`);
+  }
+
   await pool.query(`
     DROP FUNCTION IF EXISTS public.lock_live_document_actor(uuid,uuid,uuid) CASCADE;
     DROP FUNCTION IF EXISTS public.lock_live_client_parent(uuid,uuid) CASCADE;
@@ -1083,20 +1108,35 @@ try {
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci') THEN
           EXECUTE 'DROP OWNED BY dadban_case_documents_owner_ci';
         END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_alt_ci') THEN
+          EXECUTE 'DROP OWNED BY dadban_document_runtime_alt_ci';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_alt_ci') THEN
+          EXECUTE 'DROP ROLE dadban_document_runtime_alt_ci';
+        END IF;
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_migrator_ci') THEN
           EXECUTE 'DROP ROLE dadban_case_documents_migrator_ci';
         END IF;
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci') THEN
           EXECUTE 'DROP ROLE dadban_case_documents_owner_ci';
         END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_ci') THEN
+          EXECUTE 'ALTER ROLE dadban_document_runtime_ci NOLOGIN PASSWORD NULL NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT';
+        END IF;
       END
       $cleanup$
     `);
     const leftoverRoles = await pool.query(
-      "SELECT rolname FROM pg_roles WHERE rolname IN ('dadban_case_documents_owner_ci','dadban_case_documents_migrator_ci')"
+      "SELECT rolname FROM pg_roles WHERE rolname IN ('dadban_document_runtime_alt_ci','dadban_case_documents_owner_ci','dadban_case_documents_migrator_ci')"
     );
-    assert.equal(leftoverRoles.rowCount, 0, "test-only case-document owner/migrator roles must not leak into the CI PostgreSQL cluster");
-    console.log("PASS: isolated owner/migrator cleanup restores table ownership, revokes membership/grants, and leaves no test-only roles");
+    assert.equal(leftoverRoles.rowCount, 0, "test-only runtime-alt/owner/migrator roles must not leak into the CI PostgreSQL cluster");
+    const restoredRuntimeRole = await pool.query(
+      "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname='dadban_document_runtime_ci'"
+    );
+    assert.equal(restoredRuntimeRole.rowCount, 1, "shared runtime role created by the earlier tombstone step must remain present");
+    assert.deepEqual(restoredRuntimeRole.rows[0], { rolcanlogin: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false },
+      "shared runtime role must be restored to the earlier NOLOGIN least-privilege state");
+    console.log("PASS: owner/migrator/runtime-alt roles are removed; shared runtime role is restored to NOLOGIN with no elevated privileges");
   } catch (cleanupError) {
     console.error("FAIL: isolated owner/migrator cleanup did not complete", cleanupError);
     process.exitCode = 1;
