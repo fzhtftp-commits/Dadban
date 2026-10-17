@@ -91,7 +91,7 @@ BEGIN
     RAISE EXCEPTION 'runtime object/function ACL contract mismatch';
   END IF;
   SELECT count(*) INTO grantable_count FROM (
-    SELECT a.grantee,a.is_grantable FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::\"char\" ELSE 'r'::\"char\" END,c.relowner))) a
+    SELECT a.grantee,a.is_grantable FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) a
       WHERE c.oid IN ('$schema.fixture_table'::regclass,'$schema.fixture_view'::regclass,'$schema.fixture_seq'::regclass)
     UNION ALL
     SELECT a.grantee,a.is_grantable FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
