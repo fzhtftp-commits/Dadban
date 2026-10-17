@@ -421,6 +421,84 @@ try {
     error => error.code === "28000",
     "session belonging to another user must fail"
   );
+
+  // Session liveness also depends on the current user state, not only the session row.
+  const inactiveUserId = "cccccccc-cccc-4ccc-8ccc-cccccccccc05";
+  await pool.query(
+    "INSERT INTO users(id,office_id,full_name,email,role,is_active) VALUES($1,$2,'Inactive Runtime User','runtime-inactive@example.test','owner',false)",
+    [inactiveUserId,officeId]
+  );
+  const inactiveSessionId = (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour') RETURNING id",
+    [inactiveUserId,officeId,hash("inactive-user-token"),hash("inactive-user-csrf")]
+  )).rows[0].id;
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(
+      inactiveSessionId,inactiveUserId,"runtime-proof-inactive-user-001",
+      makeReserveProof(inactiveSessionId,inactiveUserId,"runtime-proof-inactive-user-001")
+    )),
+    error => error.code === "28000",
+    "an active session belonging to a disabled user must not reserve an idempotency key"
+  );
+
+  const deletedUserId = "cccccccc-cccc-4ccc-8ccc-cccccccccc06";
+  await pool.query(
+    "INSERT INTO users(id,office_id,full_name,email,role,deleted_at) VALUES($1,$2,'Deleted Runtime User','runtime-deleted@example.test','owner',clock_timestamp())",
+    [deletedUserId,officeId]
+  );
+  const deletedSessionId = (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour') RETURNING id",
+    [deletedUserId,officeId,hash("deleted-user-token"),hash("deleted-user-csrf")]
+  )).rows[0].id;
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(
+      deletedSessionId,deletedUserId,"runtime-proof-deleted-user-001",
+      makeReserveProof(deletedSessionId,deletedUserId,"runtime-proof-deleted-user-001")
+    )),
+    error => error.code === "28000",
+    "an active session belonging to a soft-deleted user must not reserve an idempotency key"
+  );
+
+  // If user deactivation commits while a reservation waits for the user lock,
+  // the proof function must re-read user state and fail closed.
+  const deactivateRaceUserId = "cccccccc-cccc-4ccc-8ccc-cccccccccc07";
+  await pool.query(
+    "INSERT INTO users(id,office_id,full_name,email,role) VALUES($1,$2,'Deactivation Race User','runtime-deactivate-race@example.test','owner')",
+    [deactivateRaceUserId,officeId]
+  );
+  const deactivateRaceSessionId = (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour') RETURNING id",
+    [deactivateRaceUserId,officeId,hash("deactivation-race-token"),hash("deactivation-race-csrf")]
+  )).rows[0].id;
+  const deactivatingClient = await pool.connect();
+  const waitingReservationClient = await runtimePool.connect();
+  try {
+    await deactivatingClient.query("BEGIN");
+    await deactivatingClient.query("UPDATE users SET is_active=false WHERE id=$1", [deactivateRaceUserId]);
+    await waitingReservationClient.query("BEGIN");
+    await waitingReservationClient.query("SET LOCAL lock_timeout = '3s'");
+    let deactivationRaceSettled = false;
+    const deactivationRacePromise = waitingReservationClient.query(reserveSql, reserveArgs(
+      deactivateRaceSessionId,deactivateRaceUserId,"runtime-proof-deactivate-race-001",
+      makeReserveProof(deactivateRaceSessionId,deactivateRaceUserId,"runtime-proof-deactivate-race-001")
+    )).then(
+      value => { deactivationRaceSettled = true; return { value }; },
+      error => { deactivationRaceSettled = true; return { error }; }
+    );
+    await delay(100);
+    assert.equal(deactivationRaceSettled, false, "reservation must wait for an in-flight user deactivation lock");
+    await deactivatingClient.query("COMMIT");
+    const deactivationRace = await deactivationRacePromise;
+    assert.equal(deactivationRace.error?.code, "28000", "reservation must fail after user deactivation commits");
+    await waitingReservationClient.query("ROLLBACK");
+  } finally {
+    await deactivatingClient.query("ROLLBACK").catch(() => {});
+    await waitingReservationClient.query("ROLLBACK").catch(() => {});
+    deactivatingClient.release();
+    waitingReservationClient.release();
+  }
+  console.log("PASS: disabled/deleted users and deactivation-first races cannot use otherwise-live session proofs");
+
   console.log("PASS: revoked, expired, old-login, and cross-user session proofs are rejected");
 
   const makeLiveSession = async label => (await pool.query(
