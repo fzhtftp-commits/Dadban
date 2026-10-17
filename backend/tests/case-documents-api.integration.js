@@ -2427,6 +2427,17 @@ try {
   assert.equal(purgedPatchReplay.status, 410, "purged PATCH replay must return a controlled 410");
   assert.equal((await pool.query("select full_name from clients where id=$1", [purgeClientId])).rows[0].full_name, "Purge Test Client Updated", "purged PATCH replay must not apply a second mutation");
   assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='update'", [ids.officeA, ids.userA, purgeClientId])).rows[0].count), 1, "purged PATCH replay must not duplicate audit");
+  await assert.rejects(
+    pool.query("update api_mutation_idempotency set response_body_purged=false,purged_at=null,response_body='{}'::jsonb where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.officeA, ids.userA, purgePatchKey]),
+    error => error.code === "23001",
+    "PostgreSQL guard must reject reopening a completed tombstone"
+  );
+  await assert.rejects(
+    pool.query("delete from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.officeA, ids.userA, purgePatchKey]),
+    error => error.code === "23001",
+    "PostgreSQL guard must reject deleting a generic idempotency tombstone"
+  );
+  console.log("PASS: generic API idempotency tombstone cannot be reopened or deleted even by table owner");
 
   const purgeActionCreateKey = "purge-action-create-01";
   const purgeActionCreate = await request("/api/actions", {
