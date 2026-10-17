@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -42,11 +43,11 @@ async function waitForServer(port) {
   throw new Error("Commit-outcome API did not become healthy");
 }
 
-async function request(path, { method, body, key, port = apiPort }) {
+async function request(path, { method, body, key, port = apiPort, sessionToken = token, csrfToken = csrf } = {}) {
   const headers = {
     origin,
-    cookie: `dadban_session=${token}; dadban_csrf=${csrf}`,
-    "x-csrf-token": csrf
+    cookie: `dadban_session=${sessionToken}; dadban_csrf=${csrfToken}`,
+    "x-csrf-token": csrfToken
   };
   if (body !== undefined) headers["content-type"] = "application/json";
   if (key) headers["idempotency-key"] = key;
@@ -59,6 +60,26 @@ async function request(path, { method, body, key, port = apiPort }) {
   return {
     status: response.status,
     body: response.status === 204 ? null : await response.json()
+  };
+}
+
+async function login(email, password, port = apiPort) {
+  const response = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
+    signal: AbortSignal.timeout(10000)
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, `fresh login should succeed for ${email}`);
+  const cookies = response.headers.getSetCookie();
+  const sessionCookie = cookies.find(value => value.startsWith("dadban_session="));
+  const csrfCookie = cookies.find(value => value.startsWith("dadban_csrf="));
+  assert.ok(sessionCookie && csrfCookie, "login must issue both authentication cookies");
+  return {
+    token: decodeURIComponent(sessionCookie.split(";", 1)[0].slice("dadban_session=".length)),
+    csrf: body.data.csrf_token,
+    user: body.data.user
   };
 }
 
@@ -185,6 +206,17 @@ try {
     proxy.listen(proxyPort, "127.0.0.1", resolve);
   });
 
+  // Configure only the disposable synthetic owner account for a real login-endpoint
+  // round trip later in this test; never touches a non-local database.
+  const ownerEmail = "commit-outcome-owner-" + crypto.randomUUID() + "@example.test";
+  const ownerPassword = "CommitOutcome-test-password-2026!";
+  const ownerSalt = crypto.randomBytes(16);
+  const ownerDerived = Buffer.from(await promisify(crypto.scrypt)(ownerPassword, ownerSalt, 64, {
+    N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024
+  }));
+  const ownerPasswordHash = `scrypt$16384$8$1${ownerSalt.toString("base64url")}${ownerDerived.toString("base64url")}`;
+  await pool.query("update users set email=$1 where id=$2 and office_id=$3", [ownerEmail, ids.user, ids.office]);
+  await pool.query("update auth_credentials set password_hash=$1 where user_id=$2", [ownerPasswordHash, ids.user]);
   await pool.query("update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
     [hash(token), ids.user, ids.office]);
   const sessionCheck = await pool.query(
@@ -592,31 +624,130 @@ try {
   )).rows[0].count, 1, "concurrent same-key client deletes must reserve one operation identity");
   assert.equal(await countEntityAudit("client", standaloneClientId, "delete"), 1,
     "concurrent same-key client deletes must append one audit event");
-  console.log("PASS: concurrent same-key client DELETE returns 204 to both callers with one idempotency row and one audit event");
-
-  // A retry after session expiry must not mutate without authentication; once the
-  // same user has a live session again, the persisted key must still replay 204.
+  console.log("PASS: concurrent same-key client DELETE returns 204 to both callers with one i  // Expire the old session, then use the real login endpoint to obtain a different
+  // token for the same user/office and replay the completed operation.
   const sessionRetryKey = "session-expiry-delete-" + crypto.randomUUID();
   const sessionRetryFirst = await request(`/api/cases/${sessionCaseId}`, { method: "DELETE", key: sessionRetryKey });
   assert.equal(sessionRetryFirst.status, 204, "case delete should complete before expiry test");
+  const originalDeleteAuditCount = await countEntityAudit("case", sessionCaseId, "delete");
+  assert.equal(originalDeleteAuditCount, 1, "initial delete must write one audit event");
   await pool.query(
     "update auth_sessions set expires_at=now()-interval '1 minute' where token_hash=$1 and user_id=$2 and office_id=$3",
     [hash(token), ids.user, ids.office]
   );
   const expiredRetry = await request(`/api/cases/${sessionCaseId}`, { method: "DELETE", key: sessionRetryKey });
   assert.equal(expiredRetry.status, 401, "expired session must be rejected before idempotency replay");
-  await pool.query(
-    "update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
-    [hash(token), ids.user, ids.office]
+  const liveCountBeforeLogin = await pool.query(
+    "select count(*)::int as count from auth_sessions where user_id=$1 and office_id=$2 and revoked_at is null and expires_at>now()",
+    [ids.user, ids.office]
   );
-  const restoredSessionRetry = await request(`/api/cases/${sessionCaseId}`, { method: "DELETE", key: sessionRetryKey });
-  assert.equal(restoredSessionRetry.status, 204, "same key must replay after session is restored");
+  assert.equal(liveCountBeforeLogin.rows[0].count, 0, "expired old session must not remain live");
+  const freshOwner = await login(ownerEmail, ownerPassword);
+  assert.equal(freshOwner.user.id, ids.user);
+  assert.equal(freshOwner.user.office_id, ids.office);
+  assert.notEqual(freshOwner.token, token, "fresh login must issue a different session token");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null and expires_at>now()",
+    [hash(freshOwner.token), ids.user, ids.office]
+  )).rows[0].count, 1, "fresh login must persist a live new session");
+  const restoredSessionRetry = await request(`/api/cases/${sessionCaseId}`, {
+    method: "DELETE", key: sessionRetryKey, sessionToken: freshOwner.token, csrfToken: freshOwner.csrf
+  });
+  assert.equal(restoredSessionRetry.status, 204, "fresh login for same user/office must replay the durable result");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=204",
+    [ids.office, ids.user, sessionRetryKey]
+  )).rows[0].count, 1, "fresh-session replay must reuse the single completed operation record");
+  assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), 1, "fresh-session replay must not duplicate delete audit");
+  console.log("PASS: expired session returns 401; real fresh login for same user/office replays 204 with one idempotency row and one delete audit");
+
+  // A different user in the same office must not replay the owner's result.
+  const otherUserId = crypto.randomUUID();
+  const otherUserEmail = "commit-outcome-other-" + crypto.randomUUID() + "@example.test";
+  const otherUserPassword = "CommitOutcome-other-password-2026!";
+  const otherSalt = crypto.randomBytes(16);
+  const otherDerived = Buffer.from(await promisify(crypto.scrypt)(otherUserPassword, otherSalt, 64, {
+    N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024
+  }));
+  const otherPasswordHash = `scrypt$16384$8$1$${otherSalt.toString("base64url")}$${otherDerived.toString("base64url")}`;
+  await pool.query(
+    "insert into users (id,office_id,full_name,email,role) values($1,$2,'Other test user',$3,'assistant')",
+    [otherUserId, ids.office, otherUserEmail]
+  );
+  await pool.query("insert into auth_credentials(user_id,password_hash) values($1,$2)", [otherUserId, otherPasswordHash]);
+  const otherUserSession = await login(otherUserEmail, otherUserPassword);
+  assert.equal(otherUserSession.user.office_id, ids.office);
+  const auditBeforeOtherUserReplay = await countEntityAudit("case", sessionCaseId, "delete");
+  const otherUserReplay = await request(`/api/cases/${sessionCaseId}`, {
+    method: "DELETE", key: sessionRetryKey,
+    sessionToken: otherUserSession.token, csrfToken: otherUserSession.csrf
+  });
+  assert.equal(otherUserReplay.status, 404, "same-office different user must not learn or replay another user's completed DELETE");
   assert.equal((await pool.query(
     "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
-    [ids.office, ids.user, sessionRetryKey]
-  )).rows[0].count, 1, "session expiry must not erase the durable operation identity");
-  assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), 1, "session-expiry retry must not duplicate audit");
-  console.log("PASS: expired session gets 401; after same-user reauthentication, same-key replay returns 204 without duplicate audit");
+    [ids.office, otherUserId, sessionRetryKey]
+  )).rows[0].count, 0, "denied different-user replay must roll back its reservation");
+  assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), auditBeforeOtherUserReplay,
+    "different-user replay must not add a delete audit event");
+  console.log("PASS: different user in same office cannot replay or disclose completed DELETE result");
+
+  // A user in a different office must likewise receive no result disclosure.
+  const otherOfficeEmail = "commit-outcome-other-office-" + crypto.randomUUID() + "@example.test";
+  const otherOfficePassword = "CommitOutcome-office-password-2026!";
+  const registerResponse = await fetch(`http://127.0.0.1:${apiPort}/api/auth/register`, {
+    method: "POST",
+    headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({
+      full_name: "Other Office Test Owner",
+      email: otherOfficeEmail,
+      password: otherOfficePassword,
+      office_name: "Commit Outcome Isolated Office"
+    }),
+    signal: AbortSignal.timeout(10000)
+  });
+  const registerBody = await registerResponse.json();
+  assert.equal(registerResponse.status, 201, "test-only other-office registration should succeed");
+  const otherOfficeSessionCookie = registerResponse.headers.getSetCookie().find(value => value.startsWith("dadban_session="));
+  assert.ok(otherOfficeSessionCookie, "registration must issue a new office session");
+  const otherOfficeToken = decodeURIComponent(otherOfficeSessionCookie.split(";", 1)[0].slice("dadban_session=".length));
+  const otherOfficeCsrf = registerBody.data.csrf_token;
+  assert.notEqual(registerBody.data.user.office_id, ids.office);
+  const auditBeforeOtherOfficeReplay = await countEntityAudit("case", sessionCaseId, "delete");
+  const otherOfficeReplay = await request(`/api/cases/${sessionCaseId}`, {
+    method: "DELETE", key: sessionRetryKey,
+    sessionToken: otherOfficeToken, csrfToken: otherOfficeCsrf
+  });
+  assert.equal(otherOfficeReplay.status, 404, "different office must not learn or replay the owner's completed DELETE");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and idempotency_key=$2",
+    [registerBody.data.user.office_id, sessionRetryKey]
+  )).rows[0].count, 0, "different-office denied replay must not leave an idempotency reservation");
+  assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), auditBeforeOtherOfficeReplay,
+    "different-office replay must not add a delete audit event");
+  console.log("PASS: different office cannot replay or disclose completed DELETE result; no reservation or duplicate audit");
+
+  // Reusing the completed key for another case is a fingerprint conflict, not a new delete.
+  const conflictCaseId = crypto.randomUUID();
+  const conflictClientId = crypto.randomUUID();
+  const conflictNationalId = "8" + String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, "0");
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Fingerprint conflict client',$3,$4,$4)",
+    [conflictClientId, ids.office, conflictNationalId, ids.user]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Fingerprint conflict case',$5,$5)",
+    [conflictCaseId, ids.office, conflictClientId, "CONFLICT-" + crypto.randomUUID(), ids.user]
+  );
+  const fingerprintConflict = await request(`/api/cases/${conflictCaseId}`, { method: "DELETE", key: sessionRetryKey,
+    sessionToken: freshOwner.token, csrfToken: freshOwner.csrf });
+  assert.equal(fingerprintConflict.status, 409, "same owner/key with different case resource must be rejected");
+  assert.equal((await pool.query("select deleted_at from cases where id=$1 and office_id=$2", [conflictCaseId, ids.office])).rows[0].deleted_at,
+    null, "fingerprint conflict must not delete the other case");
+  assert.equal(await countEntityAudit("case", conflictCaseId, "delete"), 0, "fingerprint conflict must not audit a second delete");
+  assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), 1, "fingerprint conflict must not duplicate original audit");
+  console.log("PASS: completed key reused for another case returns 409 without mutation or duplicate audit");
+
+eturns 204 without duplicate audit");
 
   console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; missing_key=428; cross_resource_key_reuse=409; case/client soft-delete replay is exact-once");
 
