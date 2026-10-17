@@ -13,10 +13,10 @@ const clientProfile = await readFile(new URL("../../client-profile.js", import.m
 const caseProfile = await readFile(new URL("../../case-profile.js", import.meta.url), "utf8");
 test("client and case delete idempotency keys are shared across tabs and retained until confirmed success", () => {
  for (const [name, source] of [["client-profile.js", clientProfile], ["case-profile.js", caseProfile]]) {
-  assert.match(source, /localStorage\\.getItem\\(deleteIdempotencyStorageKey\\)/, name + " must read the shared per-resource key");
-  assert.match(source, /localStorage\\.setItem\\(deleteIdempotencyStorageKey, key\\)/, name + " must persist the key for sibling tabs");
-  assert.match(source, /localStorage\\.removeItem\\(deleteIdempotencyStorageKey\\)/, name + " may clear the key only after a successful response");
-  assert.doesNotMatch(source, /sessionStorage\\.(?:getItem|setItem|removeItem)\\(deleteIdempotencyStorageKey/, name + " must not isolate the delete key to one tab");
+  assert.match(source, /localStorage\.getItem\(deleteIdempotencyStorageKey\)/, name + " must read the shared per-resource key");
+  assert.match(source, /localStorage\.setItem\(deleteIdempotencyStorageKey, key\)/, name + " must persist the key for sibling tabs");
+  assert.match(source, /localStorage\.removeItem\(deleteIdempotencyStorageKey\)/, name + " may clear the key only after a successful response");
+  assert.doesNotMatch(source, /sessionStorage\.(?:getItem|setItem|removeItem)\(deleteIdempotencyStorageKey/, name + " must not isolate the delete key to one tab");
  }
 });
 
@@ -171,9 +171,9 @@ test("unhandled and oversized request errors return sanitized JSON", () => {
 test("server error logging records only safe error metadata", () => {
  assert.match(server, /const logSafeError = \(context, error\) =>/);
  assert.match(server, /console\.error\(context, safe\)/);
- assert.doesNotMatch(server, /console\.error\([^\\n]*,\s*error\s*\)/);
+ assert.doesNotMatch(server, /console\.error\([^\n]*,\s*error\s*\)/);
  assert.match(transactionHelper, /rollbackError\?\.code/);
- assert.doesNotMatch(transactionHelper, /console\.error\([^\\n]*,\s*rollbackError\s*\)/);
+ assert.doesNotMatch(transactionHelper, /console\.error\([^\n]*,\s*rollbackError\s*\)/);
 });
 
 test("document migration has office-scoped partial indexes for active-document listing", () => {
