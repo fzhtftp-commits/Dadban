@@ -265,31 +265,49 @@ try {
   assert.ok(tombstone.rows[0].purged_at);
   console.log("PASS: one-way completion and tombstone replay protection");
 
-  // Cleanup is eligible only for committed completions. It must leave a pending
-  // reservation untouched; once completion commits, cleanup may erase only the
-  // response body while preserving the durable identity/status tombstone.
+  // Race completion against cleanup while completion owns an uncommitted row version.
+  // Cleanup must not wait on or purge a reservation that is not yet committed as complete.
   const completionPurgeKey = "runtime-proof-complete-purge-001";
   const completionPurgeReservation = await runtimePool.query(reserveSql, reserveArgs(
     liveSessionId, userId, completionPurgeKey,
     makeReserveProof(liveSessionId, userId, completionPurgeKey)
   ));
   assert.equal(completionPurgeReservation.rows[0].inserted, true);
-  const pendingCleanup = await pool.query(
+  const completingClient = await runtimePool.connect();
+  const cleanupRacingClient = await pool.connect();
+  try {
+    await completingClient.query("BEGIN");
+    const completionInFlight = await completingClient.query(completeSql, [
+      liveSessionId, userId, officeId, completionPurgeKey, "case", "POST",
+      proofFingerprint, caseId, 201,
+      makeCompleteProof(liveSessionId, userId, completionPurgeKey, caseId, 201)
+    ]);
+    assert.equal(completionInFlight.rows[0].completed, true);
+    await cleanupRacingClient.query("BEGIN");
+    await cleanupRacingClient.query("SET LOCAL lock_timeout = '3s'");
+    let cleanupSettled = false;
+    const cleanupPromise = cleanupRacingClient.query(
+      "UPDATE public.api_mutation_idempotency SET response_body=NULL,response_body_purged=true,purged_at=clock_timestamp() WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3 AND completed_at IS NOT NULL",
+      [officeId, userId, completionPurgeKey]
+    ).then(value => { cleanupSettled = true; return { value }; }, error => { cleanupSettled = true; return { error }; });
+    await delay(100);
+    assert.equal(cleanupSettled, true, "cleanup must skip the still-uncommitted completion, not block on it");
+    await completingClient.query("COMMIT");
+    const cleanupOutcome = await cleanupPromise;
+    assert.equal(cleanupOutcome.error, undefined, "cleanup against the old incomplete version should finish safely");
+    assert.equal(cleanupOutcome.value.rowCount, 0, "cleanup must not purge an uncommitted completion");
+    await cleanupRacingClient.query("COMMIT");
+  } finally {
+    await completingClient.query("ROLLBACK").catch(() => {});
+    await cleanupRacingClient.query("ROLLBACK").catch(() => {});
+    completingClient.release();
+    cleanupRacingClient.release();
+  }
+  const cleanupAfterCommittedCompletion = await pool.query(
     "UPDATE public.api_mutation_idempotency SET response_body=NULL,response_body_purged=true,purged_at=clock_timestamp() WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3 AND completed_at IS NOT NULL",
     [officeId, userId, completionPurgeKey]
   );
-  assert.equal(pendingCleanup.rowCount, 0, "cleanup must not purge an incomplete reservation");
-  const completedForPurge = await runtimePool.query(completeSql, [
-    liveSessionId, userId, officeId, completionPurgeKey, "case", "POST",
-    proofFingerprint, caseId, 201,
-    makeCompleteProof(liveSessionId, userId, completionPurgeKey, caseId, 201)
-  ]);
-  assert.equal(completedForPurge.rows[0].completed, true);
-  const cleanupAfterCompletion = await pool.query(
-    "UPDATE public.api_mutation_idempotency SET response_body=NULL,response_body_purged=true,purged_at=clock_timestamp() WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3 AND completed_at IS NOT NULL",
-    [officeId, userId, completionPurgeKey]
-  );
-  assert.equal(cleanupAfterCompletion.rowCount, 1);
+  assert.equal(cleanupAfterCommittedCompletion.rowCount, 1, "cleanup may purge after completion is committed");
   const completionPurgeReplay = await runtimePool.query(
     reserveSql, reserveArgs(liveSessionId, userId, completionPurgeKey, makeReserveProof(liveSessionId, userId, completionPurgeKey))
   );
