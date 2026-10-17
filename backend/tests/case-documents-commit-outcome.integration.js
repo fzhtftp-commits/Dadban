@@ -71,7 +71,7 @@ async function login(email, password, port = apiPort) {
     signal: AbortSignal.timeout(10000)
   });
   const body = await response.json();
-  assert.equal(response.status, 200, `fresh login should succeed for ${email}`);
+  assert.equal(response.status, 200, `fresh login should succeed for ${email}; got HTTP ${response.status}: ${JSON.stringify(body)}`);
   const cookies = response.headers.getSetCookie();
   const sessionCookie = cookies.find(value => value.startsWith("dadban_session="));
   const csrfCookie = cookies.find(value => value.startsWith("dadban_csrf="));
