@@ -183,6 +183,8 @@ try {
   await pool.query(caseReassignmentLockMigration);
   const apiMutationIdempotencyMigration = await readFile(new URL("../migrations/010_api_mutation_idempotency.sql", import.meta.url), "utf8");
   await pool.query(apiMutationIdempotencyMigration);
+  const apiMutationTombstoneMigration = await readFile(new URL("../migrations/011_api_mutation_idempotency_tombstones.sql", import.meta.url), "utf8");
+  await pool.query(apiMutationTombstoneMigration);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
@@ -2358,6 +2360,78 @@ try {
     [ids.officeA, ids.userA, reloginClientId]
   )).rows[0].count), 1, "re-login replay must not duplicate the audit event");
   console.log("PASS: generic API idempotency key scope, cross-resource conflict, live-role replay authorization, logout denial, and same-user re-login recovery");
+
+  // Persisted replay payloads contain only stable identifiers; purge leaves a
+  // durable tombstone so POST/PATCH/DELETE cannot execute again without a body.
+  const purgeCreateKey = "purge-create-response-01";
+  const purgeCreatePayload = { client_type: "individual", full_name: "Purge Test Client", national_id: "1234567891" };
+  const purgeCreate = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: purgeCreateKey, body: purgeCreatePayload
+  });
+  assert.equal(purgeCreate.status, 201);
+  const purgeClientId = purgeCreate.body.data.id;
+  const storedMinimalResponse = (await pool.query(
+    "select response_body,response_body_purged,purged_at from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, purgeCreateKey]
+  )).rows[0];
+  assert.deepEqual(storedMinimalResponse.response_body, { data: { id: purgeClientId } }, "stored response must contain only the stable resource id");
+  assert.equal(storedMinimalResponse.response_body_purged, false);
+  assert.equal(storedMinimalResponse.purged_at, null);
+  assert.equal(JSON.stringify(storedMinimalResponse.response_body).includes("Purge Test Client"), false, "full name must not be retained in replay response");
+  assert.equal(JSON.stringify(storedMinimalResponse.response_body).includes("1234567891"), false, "national ID must not be retained in replay response");
+  await pool.query(
+    "update api_mutation_idempotency set response_body=null,response_body_purged=true,purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and completed_at is not null",
+    [ids.officeA, ids.userA, purgeCreateKey]
+  );
+  const purgedCreateReplay = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: purgeCreateKey, body: purgeCreatePayload
+  });
+  assert.equal(purgedCreateReplay.status, 410, "purged POST replay must return a controlled 410");
+  assert.deepEqual(purgedCreateReplay.body, { error: "idempotency_result_purged" });
+  assert.equal(Number((await pool.query("select count(*)::int as count from clients where office_id=$1 and id=$2", [ids.officeA, purgeClientId])).rows[0].count), 1, "purged POST replay must not create a duplicate");
+  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='create'", [ids.officeA, ids.userA, purgeClientId])).rows[0].count), 1, "purged POST replay must not duplicate audit");
+
+  const purgePatchKey = "purge-patch-response-01";
+  const purgePatchPayload = { full_name: "Purge Test Client Updated" };
+  const purgePatch = await request("/api/clients/" + purgeClientId, {
+    token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: purgePatchKey, body: purgePatchPayload
+  });
+  assert.equal(purgePatch.status, 200);
+  const purgePatchId = purgePatch.body.data.id;
+  const patchStored = (await pool.query("select response_body from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.officeA, ids.userA, purgePatchKey])).rows[0].response_body;
+  assert.deepEqual(patchStored, { data: { id: purgePatchId } }, "PATCH replay storage must not retain the full updated row");
+  await pool.query(
+    "update api_mutation_idempotency set response_body=null,response_body_purged=true,purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and completed_at is not null",
+    [ids.officeA, ids.userA, purgePatchKey]
+  );
+  const purgedPatchReplay = await request("/api/clients/" + purgeClientId, {
+    token: tokenA, csrf: csrfA, method: "PATCH", idempotencyKey: purgePatchKey, body: purgePatchPayload
+  });
+  assert.equal(purgedPatchReplay.status, 410, "purged PATCH replay must return a controlled 410");
+  assert.equal((await pool.query("select full_name from clients where id=$1", [purgeClientId])).rows[0].full_name, "Purge Test Client Updated", "purged PATCH replay must not apply a second mutation");
+  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='update'", [ids.officeA, ids.userA, purgeClientId])).rows[0].count), 1, "purged PATCH replay must not duplicate audit");
+
+  const purgeDeleteKey = "purge-delete-response-01";
+  const purgeDelete = await request("/api/clients/" + purgeClientId, {
+    token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: purgeDeleteKey
+  });
+  assert.equal(purgeDelete.status, 204, "keyed DELETE must preserve its empty 204 response");
+  const deleteStored = (await pool.query("select response_body,response_status from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.officeA, ids.userA, purgeDeleteKey])).rows[0];
+  assert.deepEqual(deleteStored.response_body, {});
+  assert.equal(deleteStored.response_status, 204);
+  await pool.query(
+    "update api_mutation_idempotency set response_body=null,response_body_purged=true,purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and completed_at is not null",
+    [ids.officeA, ids.userA, purgeDeleteKey]
+  );
+  const purgedDeleteReplay = await request("/api/clients/" + purgeClientId, {
+    token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: purgeDeleteKey
+  });
+  assert.equal(purgedDeleteReplay.status, 410, "purged 204 DELETE replay must return a controlled 410 instead of repeating DELETE");
+  assert.deepEqual(purgedDeleteReplay.body, { error: "idempotency_result_purged" });
+  assert.notEqual((await pool.query("select deleted_at from clients where id=$1", [purgeClientId])).rows[0].deleted_at, null, "purged DELETE replay must preserve the original soft delete");
+  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='delete'", [ids.officeA, ids.userA, purgeClientId])).rows[0].count), 1, "purged DELETE replay must not duplicate audit");
+  console.log("PASS: minimal generic idempotency response bodies and POST/PATCH/204 DELETE tombstone replay after response purge");
+
 
   const expiredSession = await pool.query("update auth_sessions set expires_at=now()-interval '1 minute' where token_hash=$1", [hash(tokenA)]);
   assert.equal(expiredSession.rowCount, 1, "test fixture session should exist before expiry test");
