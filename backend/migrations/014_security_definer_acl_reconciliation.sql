@@ -20,6 +20,27 @@ BEGIN
 END
 $preflight$;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+-- Reconcile stale explicit CREATE grants as well as PUBLIC defaults. A prior
+-- deployment may have granted CREATE (possibly with GRANT OPTION) to an
+-- unrelated role; those grants must not survive this security boundary.
+DO $schema_acl_reset$
+DECLARE grantee record;
+BEGIN
+  FOR grantee IN
+    SELECT DISTINCT r.rolname
+    FROM pg_namespace n
+    CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+    WHERE n.nspname = 'public'
+      AND acl.privilege_type = 'CREATE'
+      AND acl.grantee <> n.nspowner
+      AND acl.grantee <> 0
+  LOOP
+    EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I CASCADE', grantee.rolname);
+  END LOOP;
+END
+$schema_acl_reset$;
 REVOKE CREATE ON SCHEMA public FROM dadban_actor_lock_owner;
 REVOKE CREATE ON SCHEMA public FROM dadban_api_idempotency_owner;
 ALTER DEFAULT PRIVILEGES FOR ROLE dadban_actor_lock_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
