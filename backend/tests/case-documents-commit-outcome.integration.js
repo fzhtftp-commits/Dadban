@@ -96,6 +96,19 @@ async function waitForCompletedKey(key, expectedStatus) {
   throw new Error(`PostgreSQL did not expose committed idempotency result for ${key}`);
 }
 
+async function waitForCompletedApiKey(key, expectedStatus) {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const result = await pool.query(
+      "select response_status,resource_id from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+      [ids.office, ids.user, key]
+    );
+    if (result.rowCount === 1 && result.rows[0].response_status === expectedStatus) return result.rows[0];
+    await delay(25);
+  }
+  throw new Error("PostgreSQL did not expose committed generic API idempotency result for " + key);
+}
+
 async function countAudit(documentId, action) {
   const result = await pool.query(
     "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action=$3",
