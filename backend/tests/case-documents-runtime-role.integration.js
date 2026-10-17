@@ -125,6 +125,12 @@ try {
     END
     $role$;
     ALTER ROLE dadban_document_runtime_ci LOGIN PASSWORD 'ci-only-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+    DO $alt_role$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_alt_ci') THEN
+        CREATE ROLE dadban_document_runtime_alt_ci LOGIN PASSWORD 'ci-only-alt-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+      END IF;
+    END $alt_role$;
+    ALTER ROLE dadban_document_runtime_alt_ci LOGIN PASSWORD 'ci-only-alt-runtime-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
   `);
 
   for (const path of [
@@ -144,6 +150,7 @@ try {
     GRANT CONNECT ON DATABASE dadban_runtime_role_test TO dadban_document_runtime_ci;
     REVOKE ALL ON SCHEMA public FROM dadban_document_runtime_ci;
     GRANT USAGE ON SCHEMA public TO dadban_document_runtime_ci;
+    GRANT USAGE ON SCHEMA public TO dadban_document_runtime_alt_ci;
     REVOKE ALL ON public.users, public.clients, public.cases, public.auth_sessions, public.audit_logs,
       public.case_documents, public.case_document_mutation_idempotency, public.api_mutation_idempotency
       FROM dadban_document_runtime_ci;
@@ -210,7 +217,8 @@ try {
       has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','response_body_purged','UPDATE') AS can_update_api_purged_flag,
       has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','purged_at','UPDATE') AS can_update_api_purged_at,
       has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','response_body_purged','SELECT') AS can_select_api_purged_flag,
-      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','purged_at','SELECT') AS can_select_api_purged_at
+      has_column_privilege('dadban_document_runtime_ci','public.api_mutation_idempotency','purged_at','SELECT') AS can_select_api_purged_at,
+      (SELECT count(*)::int FROM pg_auth_members m JOIN pg_roles member_role ON member_role.oid=m.member WHERE member_role.rolname='dadban_document_runtime_ci') AS direct_membership_count
     FROM pg_roles r WHERE r.rolname='dadban_document_runtime_ci'
   `);
   const role = roleState.rows[0];
@@ -219,6 +227,7 @@ try {
   }
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
   assert.notEqual(role.api_idem_owner, "dadban_document_runtime_ci", "runtime must not own the generic API idempotency table");
+  assert.equal(role.direct_membership_count, 0, "runtime must not have memberships that permit SET ROLE to an elevated role");
   assert.equal(role.can_complete_api_idem, true, "runtime must complete a pending generic idempotency row");
   assert.equal(role.can_select_api_purged_flag, true, "runtime may read the tombstone marker for replay decisions");
   assert.equal(role.can_select_api_purged_at, true, "runtime may read the purge timestamp for replay decisions");
