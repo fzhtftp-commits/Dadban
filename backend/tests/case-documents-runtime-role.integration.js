@@ -195,6 +195,35 @@ try {
     "../migrations/013_api_mutation_idempotency_proof_functions.sql"
   ]) {
     const migrationSql = await readFile(new URL(path, import.meta.url), "utf8");
+    if (path === "../migrations/008_security_definer_document_actor_lock.sql") {
+      // A runtime membership could allow SET ROLE or inherit privileges. Migration
+      // 008 must reject it before creating any SECURITY DEFINER actor-lock helper.
+      const probeRole = "dadban_actor_runtime_membership_probe_ci";
+      const preflight = await pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [probeRole]);
+      assert.equal(preflight.rowCount, 0, "refusing to reuse pre-existing migration-008 runtime membership probe role");
+      await pool.query(`CREATE ROLE ${probeRole} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`);
+      let migrationClient;
+      try {
+        await pool.query(`GRANT ${probeRole} TO dadban_document_runtime_ci`);
+        migrationClient = await pool.connect();
+        let rejected = false;
+        try {
+          await migrationClient.query(migrationSql);
+        } catch (error) {
+          rejected = /runtime role dadban_document_runtime_ci must not participate in role memberships/.test(error.message);
+          await migrationClient.query("ROLLBACK").catch(() => {});
+          if (!rejected) throw error;
+        }
+        assert.equal(rejected, true, "migration 008 must reject compromised runtime role membership");
+        const absent = await pool.query("SELECT to_regprocedure('public.lock_live_document_actor(uuid,uuid,uuid)') AS fn");
+        assert.equal(absent.rows[0].fn, null, "failed migration 008 must not leave actor-lock SECURITY DEFINER function behind");
+        console.log("PASS: migration 008 rejects runtime-role membership and rolls back function creation");
+      } finally {
+        migrationClient?.release();
+        await pool.query(`REVOKE ${probeRole} FROM dadban_document_runtime_ci`).catch(() => {});
+        await pool.query(`DROP ROLE IF EXISTS ${probeRole}`);
+      }
+    }
     if (path === "../migrations/009_case_reassignment_parent_locks.sql") {
       // Replaying migration 009 with a compromised definer-owner membership must
       // fail before function creation/ownership transfer and roll back atomically.
