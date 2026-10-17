@@ -18,10 +18,11 @@ bridge=dadban_rr_owner_bridge_ci
 restore=dadban_rr_restore_executor_ci
 backup=dadban_rr_backup_reader_ci
 dump=/tmp/dadban-restore-role-boundary.dump
+toc=/tmp/dadban-restore-role-boundary.toc
 cleanup() {
   dropdb -h localhost -U "$admin" --if-exists "$target_db" >/dev/null 2>&1 || true
   dropdb -h localhost -U "$admin" --if-exists "$source_db" >/dev/null 2>&1 || true
-  rm -f "$dump"
+  rm -f "$dump" "$toc"
   psql -h localhost -U "$admin" -d dadban_test -X -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || true
 REVOKE $owner_a FROM $bridge;
 REVOKE $bridge FROM $restore;
@@ -124,10 +125,20 @@ SQL
 psql -h localhost -U "$admin" -d "$target_db" -X -v ON_ERROR_STOP=1 <<SQL
 GRANT CONNECT ON DATABASE $target_db TO $restore;
 SQL
-# A schema dump includes owner/ACL commands. pg_restore authenticates as the
-# non-superuser restore login, then uses its explicitly granted SET ROLE path to
-# owner_a; owner_a is a member of owner_b so ownership changes remain non-superuser.
-PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" --role="$owner_a" -d "$target_db" "$dump"
+# Pre-create the fixture schema under its intended owner and grant the restore
+# identity CREATE before object ownership commands run. The archive's SCHEMA TOC
+# item is omitted because the schema already exists; its separate ACL entry remains.
+# This avoids pg_restore ordering schema ACL restoration after ALTER OWNER statements.
+psql -h localhost -U "$admin" -d "$target_db" -X -v ON_ERROR_STOP=1 <<SQL
+CREATE SCHEMA $schema AUTHORIZATION $owner_a;
+GRANT USAGE, CREATE ON SCHEMA $schema TO $restore;
+SQL
+pg_restore -l "$dump" > "$toc"
+sed -i "/ SCHEMA - $schema /d" "$toc"
+# Authenticate as the non-superuser restore login, then explicitly SET ROLE to the
+# schema owner; owner_a is a member of owner_b so object ownership changes remain
+# non-superuser and are still exercised by pg_restore.
+PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" --role="$owner_a" --use-list="$toc" -d "$target_db" "$dump"
 
 fingerprint() {
   local db="$1"
