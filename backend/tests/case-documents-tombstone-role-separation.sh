@@ -62,10 +62,10 @@ BEGIN
       WHERE member.rolname=edge.member_name
         AND granted.rolname=edge.granted_name
         AND m.admin_option IS FALSE
-        AND m.inherit_option IS TRUE
+        AND m.inherit_option IS FALSE
         AND m.set_option IS TRUE
     ) THEN
-      RAISE EXCEPTION 'unexpected or missing role membership options for % -> % (require admin_option=false, inherit_option=true, set_option=true)',
+      RAISE EXCEPTION 'unexpected or missing role membership options for % -> % (require admin_option=false, inherit_option=false, set_option=true)',
         edge.member_name, edge.granted_name;
     END IF;
   END LOOP;
