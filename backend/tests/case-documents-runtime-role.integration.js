@@ -210,6 +210,13 @@ try {
     error => error.code === "42501",
     "an invalid proof must not reserve a key"
   );
+  await assert.rejects(
+    runtimePool.query(lookupSql, [
+      liveSessionId, userId, officeId, validKey, "case", "POST", proofFingerprint, "0".repeat(64)
+    ]),
+    error => error.code === "42501",
+    "an invalid lookup proof must not read an existing reservation"
+  );
   console.log("PASS: direct reservation/completion SQL is denied and invalid proof is rejected");
 
   await denied("SELECT secret FROM dadban_private.api_mutation_idempotency_hmac_key", "reading API idempotency HMAC key material");
@@ -252,6 +259,22 @@ try {
   )).rows[0].id;
   const revokedKey = "runtime-proof-revoked-001";
   await assert.rejects(runtimePool.query(reserveSql, reserveArgs(revokedSession,userId,revokedKey,makeReserveProof(revokedSession,userId,revokedKey))), error => error.code === "28000", "revoked session must fail");
+  await assert.rejects(
+    runtimePool.query(lookupSql, [
+      revokedSession, userId, officeId, "runtime-proof-revoked-001", "case", "POST", proofFingerprint,
+      makeApiProof({ action:"lookup", sessionId:revokedSession, key:"runtime-proof-revoked-001", resourceType:"case", operation:"POST", fingerprint:proofFingerprint })
+    ]),
+    error => error.code === "28000",
+    "revoked session must not read or replay an idempotency result"
+  );
+  await assert.rejects(
+    runtimePool.query(completeSql, [
+      revokedSession, userId, officeId, "runtime-proof-revoked-001", "case", "POST", proofFingerprint, caseId, 201,
+      makeCompleteProof(revokedSession, userId, "runtime-proof-revoked-001", caseId, 201)
+    ]),
+    error => error.code === "28000",
+    "revoked session must not complete an idempotency reservation"
+  );
   const expiredSession = (await pool.query(
     "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()-interval '1 minute') RETURNING id",
     [userId,officeId,hash("expired-proof-token"),hash("expired-proof-csrf")]
