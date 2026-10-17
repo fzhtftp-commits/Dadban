@@ -98,6 +98,7 @@ try {
     drop function if exists public.lock_live_case_reassignment(uuid,uuid,uuid) cascade;
     drop function if exists public.prevent_case_document_idempotency_delete() cascade;
     drop function if exists public.prevent_case_document_idempotency_reopen() cascade;
+    drop table if exists api_mutation_idempotency cascade;
     drop table if exists case_document_mutation_idempotency cascade;
     drop table if exists case_documents cascade;
     drop table if exists audit_logs cascade;
@@ -2240,6 +2241,121 @@ try {
   assert.equal(rateLimited, true, "document create requests must be rate-limited");
   console.log("PASS: idempotency retries do not duplicate documents or audit rows");
   console.log("PASS: document create rate limit returns sanitized 429");
+
+  // Generic API idempotency contract: a key is globally unique per (office,user),
+  // replay requires current authorization, and the same key cannot name another resource.
+  const genericKey = "generic-cross-resource-key-01";
+  const genericClientPayload = {
+    client_type: "individual",
+    full_name: "Idempotency Contract Client",
+    national_id: "1234567891"
+  };
+  const genericClientCreate = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: genericKey, body: genericClientPayload
+  });
+  assert.equal(genericClientCreate.status, 201, "generic keyed client create must commit");
+  const genericClientId = genericClientCreate.body.data.id;
+  const genericReplay = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: genericKey, body: genericClientPayload
+  });
+  assert.equal(genericReplay.status, 201, "same key and same payload must replay the original status");
+  assert.equal(genericReplay.body.data.id, genericClientId, "replay must return the original client, not create a duplicate");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from clients where office_id=$1 and id=$2", [ids.officeA, genericClientId]
+  )).rows[0].count), 1, "same-key replay must persist exactly one client");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and resource_type='client' and response_status=201 and completed_at is not null",
+    [ids.officeA, ids.userA, genericKey]
+  )).rows[0].count), 1, "successful keyed create must persist one completed idempotency row");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='create'",
+    [ids.officeA, ids.userA, genericClientId]
+  )).rows[0].count), 1, "same-key replay must not duplicate the audit event");
+
+  const crossResourceReuse = await request("/api/cases", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: genericKey,
+    body: { client_id: genericClientId, case_number: "IDEMPOTENCY-001", title: "Cross-resource key reuse" }
+  });
+  assert.equal(crossResourceReuse.status, 409, "same user/office key reused for another resource must conflict");
+  assert.deepEqual(crossResourceReuse.body, { error: "idempotency_key_reused" });
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from cases where office_id=$1 and case_number='IDEMPOTENCY-001'", [ids.officeA]
+  )).rows[0].count), 0, "cross-resource key conflict must not create a case");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case' and action='create' and metadata->>'case_number'='IDEMPOTENCY-001'",
+    [ids.officeA]
+  )).rows[0].count), 0, "cross-resource key conflict must not add a case audit event");
+
+  // A different office/user scope may use the same opaque key independently.
+  const officeBKeyReuse = await request("/api/clients", {
+    token: tokenB, csrf: csrfB, method: "POST", idempotencyKey: genericKey,
+    body: { ...genericClientPayload, full_name: "Office B Idempotency Client" }
+  });
+  assert.equal(officeBKeyReuse.status, 201, "the same key in another office/user scope must be independent");
+  assert.notEqual(officeBKeyReuse.body.data.id, genericClientId, "office B must not replay office A's client");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeB, ids.userB, genericKey]
+  )).rows[0].count), 1, "office B must persist its own idempotency row");
+
+  // Authorization must be evaluated before replaying a previously successful result.
+  await pool.query("update users set role='viewer' where id=$1 and office_id=$2", [ids.userA, ids.officeA]);
+  const deniedGenericReplay = await request("/api/clients", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: genericKey, body: genericClientPayload
+  });
+  assert.equal(deniedGenericReplay.status, 403, "a role downgrade must deny replay of a previously successful mutation");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from clients where office_id=$1 and id=$2", [ids.officeA, genericClientId]
+  )).rows[0].count), 1, "denied replay must leave the original client unchanged");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='create'",
+    [ids.officeA, ids.userA, genericClientId]
+  )).rows[0].count), 1, "denied replay must not add an audit event");
+  await pool.query("update users set role='owner' where id=$1 and office_id=$2", [ids.userA, ids.officeA]);
+
+  // The durable key is user/office scoped rather than session scoped: after logout,
+  // the old session is denied, but a new live session for the same user can recover
+  // the same committed response without repeating the mutation.
+  const reloginToken = "test-session-idem-relogin-".padEnd(48, "r");
+  const reloginCsrf = "test-csrf-idem-relogin-".padEnd(48, "s");
+  await pool.query(
+    "insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values($1,$2,$3,$4,now()+interval '1 hour')",
+    [ids.userA, ids.officeA, hash(reloginToken), hash(reloginCsrf)]
+  );
+  const reloginKey = "generic-relogin-replay-01";
+  const reloginPayload = { ...genericClientPayload, full_name: "Re-login Idempotency Client" };
+  const beforeRelogin = await request("/api/clients", {
+    token: reloginToken, csrf: reloginCsrf, method: "POST", idempotencyKey: reloginKey, body: reloginPayload
+  });
+  assert.equal(beforeRelogin.status, 201, "fresh session must create the keyed client");
+  const reloginClientId = beforeRelogin.body.data.id;
+  const reloginLogout = await request("/api/auth/logout", {
+    token: reloginToken, csrf: reloginCsrf, method: "POST"
+  });
+  assert.equal(reloginLogout.status, 200, "session used for keyed create must logout successfully");
+  const blockedOldSessionReplay = await request("/api/clients", {
+    token: reloginToken, csrf: reloginCsrf, method: "POST", idempotencyKey: reloginKey, body: reloginPayload
+  });
+  assert.equal(blockedOldSessionReplay.status, 401, "revoked session must not replay the committed generic mutation");
+  const newSessionToken = "test-session-idem-relogin-new-".padEnd(48, "t");
+  const newSessionCsrf = "test-csrf-idem-relogin-new-".padEnd(48, "u");
+  await pool.query(
+    "insert into auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) values($1,$2,$3,$4,now()+interval '1 hour')",
+    [ids.userA, ids.officeA, hash(newSessionToken), hash(newSessionCsrf)]
+  );
+  const allowedNewSessionReplay = await request("/api/clients", {
+    token: newSessionToken, csrf: newSessionCsrf, method: "POST", idempotencyKey: reloginKey, body: reloginPayload
+  });
+  assert.equal(allowedNewSessionReplay.status, 201, "same user may recover its committed result after re-authentication");
+  assert.equal(allowedNewSessionReplay.body.data.id, reloginClientId, "re-login replay must return the original client");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from clients where office_id=$1 and id=$2", [ids.officeA, reloginClientId]
+  )).rows[0].count), 1, "re-login replay must not duplicate the client");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='create'",
+    [ids.officeA, ids.userA, reloginClientId]
+  )).rows[0].count), 1, "re-login replay must not duplicate the audit event");
+  console.log("PASS: generic API idempotency key scope, cross-resource conflict, live-role replay authorization, logout denial, and same-user re-login recovery");
 
   const expiredSession = await pool.query("update auth_sessions set expires_at=now()-interval '1 minute' where token_hash=$1", [hash(tokenA)]);
   assert.equal(expiredSession.rowCount, 1, "test fixture session should exist before expiry test");
