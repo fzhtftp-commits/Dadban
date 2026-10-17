@@ -61,6 +61,9 @@ GRANT UPDATE (revoked_at) ON public.auth_sessions TO dadban_api_idempotency_owne
 GRANT UPDATE (full_name) ON public.users TO dadban_api_idempotency_owner;
 GRANT SELECT ON dadban_private.api_mutation_idempotency_hmac_key TO dadban_api_idempotency_owner;
 REVOKE ALL ON TABLE public.api_mutation_idempotency FROM PUBLIC;
+REVOKE SELECT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM PUBLIC;
+REVOKE INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM PUBLIC;
+REVOKE UPDATE (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE ON public.api_mutation_idempotency TO dadban_api_idempotency_owner;
 
 CREATE OR REPLACE FUNCTION public.reserve_api_mutation_idempotency(
@@ -346,6 +349,7 @@ BEGIN
         RAISE EXCEPTION 'runtime role % must not be a member of another role', runtime_name;
       END IF;
       EXECUTE format('REVOKE ALL ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
+      EXECUTE format('REVOKE SELECT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE UPDATE (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO %I', runtime_name);
