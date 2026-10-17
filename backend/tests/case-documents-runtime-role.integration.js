@@ -378,6 +378,9 @@ try {
             has_column_privilege('dadban_actor_acl_probe_ci',c.oid,'secret','UPDATE') AS probe_secret_update,
             has_column_privilege('dadban_hmac_acl_proxy_ci',c.oid,'secret','SELECT') AS proxy_secret_select,
             has_table_privilege('dadban_api_idempotency_owner',c.oid,'SELECT') AS definer_select,
+            has_table_privilege('dadban_api_idempotency_owner',c.oid,'INSERT') AS definer_insert,
+            has_table_privilege('dadban_api_idempotency_owner',c.oid,'UPDATE') AS definer_update,
+            has_table_privilege('dadban_api_idempotency_owner',c.oid,'DELETE') AS definer_delete,
             EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
               WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_actor_acl_probe_ci')) AS probe_table_acl,
             EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
@@ -389,11 +392,19 @@ try {
             EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
               WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_api_idempotency_owner')
                 AND a.privilege_type='SELECT' AND a.is_grantable) AS definer_select_grantable,
+            EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+              WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_api_idempotency_owner')
+                AND a.privilege_type <> 'SELECT') AS definer_unapproved_table_acl,
+            EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
+              WHERE a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_api_idempotency_owner')
+                AND a.is_grantable) AS definer_any_grantable,
             EXISTS (SELECT 1 FROM pg_attribute att CROSS JOIN LATERAL aclexplode(att.attacl) a
               WHERE att.attrelid=c.oid AND att.attnum>0 AND NOT att.attisdropped
                 AND a.grantee=(SELECT oid FROM pg_roles WHERE rolname='dadban_api_idempotency_owner')) AS definer_column_acl,
             EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
-              WHERE a.grantee=0) AS public_table_acl
+              WHERE a.grantee=0) AS public_table_acl,
+            EXISTS (SELECT 1 FROM pg_attribute att CROSS JOIN LATERAL aclexplode(att.attacl) a
+              WHERE att.attrelid=c.oid AND att.attnum>0 AND NOT att.attisdropped AND a.grantee=0) AS public_column_acl
           FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
           WHERE n.nspname='dadban_private' AND c.relname='api_mutation_idempotency_hmac_key'
         `);
@@ -410,9 +421,15 @@ try {
         assert.equal(hmac.proxy_table_acl,false,"intermediary table ACL must be removed");
         assert.equal(hmac.stale_column_acl,false,"stale column ACLs must be removed from both probe roles");
         assert.equal(hmac.definer_select,true,"proof-function owner must retain required SELECT");
+        assert.equal(hmac.definer_insert,false,"proof-function owner must not insert key rows");
+        assert.equal(hmac.definer_update,false,"proof-function owner must not update key material");
+        assert.equal(hmac.definer_delete,false,"proof-function owner must not delete key rows");
         assert.equal(hmac.definer_select_grantable,false,"proof-function owner SELECT must not have GRANT OPTION");
+        assert.equal(hmac.definer_unapproved_table_acl,false,"proof-function owner must retain only plain table SELECT");
+        assert.equal(hmac.definer_any_grantable,false,"proof-function owner must have no table GRANT OPTION");
         assert.equal(hmac.definer_column_acl,false,"proof-function owner must not retain separate column-level grants");
         assert.equal(hmac.public_table_acl,false,"PUBLIC must have no explicit table ACL");
+        assert.equal(hmac.public_column_acl,false,"PUBLIC must have no explicit column ACL");
         console.log("PASS: migration 014 reconciles HMAC key table/column ACLs, transitive-role grants, and grant options");
         console.log("PASS: migration 014 removes stale EXECUTE grants, runtime grant options, PUBLIC EXECUTE, unsafe definer defaults, and stale public-schema CREATE grants");
       } finally {
