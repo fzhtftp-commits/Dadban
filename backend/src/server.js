@@ -434,20 +434,24 @@ const beginApiMutationIdempotency = async (client, req, key, resourceType, opera
   );
   if (inserted.rowCount) return { kind: "new", key, fingerprint };
   const existing = await client.query(
-    "select resource_type,operation,request_fingerprint,resource_id,response_status,response_body,completed_at from public.api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
+    "select resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,completed_at from public.api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
     [req.auth.officeId, req.auth.userId, key]
   );
   if (!existing.rowCount) throw new Error("API mutation idempotency record disappeared");
   const row = existing.rows[0];
   if (row.resource_type !== resourceType || row.operation !== operation || row.request_fingerprint !== fingerprint) return { kind: "conflict" };
+  if (row.response_body_purged) return { kind: "replay", status: 410, body: { error: "idempotency_result_purged" }, resourceId: row.resource_id };
   if (row.response_status === null || row.completed_at === null || row.response_body === null) return { kind: "incomplete" };
   return { kind: "replay", status: row.response_status, body: row.response_body, resourceId: row.resource_id };
 };
 const completeApiMutationIdempotency = async (client, req, mutation, status, body, resourceId) => {
   if (!mutation || mutation.kind !== "new" || !mutation.key) return;
+  // Persist only the stable resource identifier, never client/case/hearing/action fields.
+  // The original live response remains unchanged; a replay returns this minimal envelope.
+  const minimalBody = status === 204 ? {} : { data: { id: resourceId ?? null } };
   const result = await client.query(
-    "update public.api_mutation_idempotency set resource_id=$4,response_status=$5,response_body=$6::jsonb,completed_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is null returning idempotency_key",
-    [req.auth.officeId, req.auth.userId, mutation.key, resourceId ?? null, status, JSON.stringify(body ?? {})]
+    "update public.api_mutation_idempotency set resource_id=$4,response_status=$5,response_body=$6::jsonb,response_body_purged=false,purged_at=null,completed_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is null returning idempotency_key",
+    [req.auth.officeId, req.auth.userId, mutation.key, resourceId ?? null, status, JSON.stringify(minimalBody)]
   );
   if (!result.rowCount) throw new Error("API mutation idempotency completion failed");
 };
