@@ -9,6 +9,7 @@
 \ir ../migrations/007_case_document_mutation_tombstones.sql
 \ir ../migrations/010_api_mutation_idempotency.sql
 \ir ../migrations/011_api_mutation_idempotency_tombstones.sql
+\ir ../migrations/012_api_mutation_idempotency_tombstone_guards.sql
 
 DO $catalog$
 DECLARE cols text[]; status_check text; constraint_names text[];
