@@ -21,6 +21,7 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
 const officeId = "10000000-0000-4000-8000-000000000001";
 const userId = "20000000-0000-4000-8000-000000000001";
 const sessionId = "30000000-0000-4000-8000-000000000001";
+let roleCleanupAuthorized = false;
 
 async function waitForLockWait(applicationName) {
   const deadline = Date.now() + 3000;
@@ -36,6 +37,14 @@ async function waitForLockWait(applicationName) {
 }
 
 async function setup() {
+  const existingRoles = await admin.query(
+    "SELECT rolname FROM pg_roles WHERE rolname IN ('dadban_actor_runtime_ci','dadban_actor_lock_owner_ci')"
+  );
+  assert(existingRoles.rowCount === 0,
+    "Refusing to reuse pre-existing actor-lock CI roles; inspect prior test cleanup");
+  // Cleanup may drop these names only after proving this test starts without them.
+  roleCleanupAuthorized = true;
+
   await admin.query(`
     DROP SCHEMA IF EXISTS actor_lock_test CASCADE;
     DO $role_guard$
@@ -225,10 +234,12 @@ try {
     Number(totals.rows[0].security_definer_functions) === 1, "Unexpected final disposable database counts");
 } finally {
   await runtime.end();
-  await admin.query("DROP SCHEMA IF EXISTS actor_lock_test CASCADE").catch(() => {});
-  await admin.query("DROP OWNED BY dadban_actor_runtime_ci").catch(() => {});
-  await admin.query("DROP OWNED BY dadban_actor_lock_owner_ci").catch(() => {});
-  await admin.query("DROP ROLE IF EXISTS dadban_actor_runtime_ci").catch(() => {});
-  await admin.query("DROP ROLE IF EXISTS dadban_actor_lock_owner_ci").catch(() => {});
+  if (roleCleanupAuthorized) {
+    await admin.query("DROP SCHEMA IF EXISTS actor_lock_test CASCADE").catch(() => {});
+    await admin.query("DROP OWNED BY dadban_actor_runtime_ci").catch(() => {});
+    await admin.query("DROP OWNED BY dadban_actor_lock_owner_ci").catch(() => {});
+    await admin.query("DROP ROLE IF EXISTS dadban_actor_runtime_ci").catch(() => {});
+    await admin.query("DROP ROLE IF EXISTS dadban_actor_lock_owner_ci").catch(() => {});
+  }
   await admin.end();
 }
