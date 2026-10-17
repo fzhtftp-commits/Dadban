@@ -46,7 +46,8 @@ BEGIN
 END
 $owner_preflight$;
 
-GRANT USAGE ON SCHEMA public TO dadban_api_idempotency_owner;
+GRANT USAGE, CREATE ON SCHEMA public TO dadban_api_idempotency_owner;
+GRANT USAGE ON SCHEMA dadban_private TO dadban_api_idempotency_owner;
 GRANT SELECT ON public.auth_sessions, public.users TO dadban_api_idempotency_owner;
 GRANT UPDATE (revoked_at) ON public.auth_sessions TO dadban_api_idempotency_owner;
 GRANT UPDATE (full_name) ON public.users TO dadban_api_idempotency_owner;
