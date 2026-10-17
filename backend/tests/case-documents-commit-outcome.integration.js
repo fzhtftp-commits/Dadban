@@ -220,7 +220,7 @@ try {
   const ownerDerived = Buffer.from(await promisify(crypto.scrypt)(ownerPassword, ownerSalt, 64, {
     N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024
   }));
-  const ownerPasswordHash = `scrypt$16384$8$1${ownerSalt.toString("base64url")}${ownerDerived.toString("base64url")}`;
+  const ownerPasswordHash = `scrypt$16384$8$1$${ownerSalt.toString("base64url")}$${ownerDerived.toString("base64url")}`;
   await pool.query("update users set email=$1 where id=$2 and office_id=$3", [ownerEmail, ids.user, ids.office]);
   await pool.query("insert into auth_credentials(user_id,password_hash) values($2,$1) on conflict (user_id) do update set password_hash=excluded.password_hash", [ownerPasswordHash, ids.user]);
   await pool.query("update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
