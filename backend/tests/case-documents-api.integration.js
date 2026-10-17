@@ -2364,7 +2364,7 @@ try {
   // Persisted replay payloads contain only stable identifiers; purge leaves a
   // durable tombstone so POST/PATCH/DELETE cannot execute again without a body.
   const purgeCreateKey = "purge-create-response-01";
-  const purgeCreatePayload = { client_type: "individual", full_name: "Purge Test Client", national_id: "1234567891" };
+  const purgeCreatePayload = { client_type: "individual", full_name: "Purge Test Client", national_id: "9876543210" };
   const purgeCreate = await request("/api/clients", {
     token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: purgeCreateKey, body: purgeCreatePayload
   });
