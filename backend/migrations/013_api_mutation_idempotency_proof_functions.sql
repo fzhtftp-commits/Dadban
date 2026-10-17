@@ -334,6 +334,9 @@ ALTER FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,tex
 REVOKE ALL ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) FROM PUBLIC;
 ALTER FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)
   OWNER TO dadban_api_idempotency_owner;
+-- CREATE is needed only while ownership is transferred; the definer role
+-- must not retain schema object-creation rights after migration setup.
+REVOKE CREATE ON SCHEMA public FROM dadban_api_idempotency_owner;
 REVOKE ALL ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) FROM PUBLIC;
 
