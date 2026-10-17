@@ -972,6 +972,19 @@ try {
   )).rows[0].count, 1, "logout during unknown-outcome recovery must have exactly one audit row");
   console.log("PASS: unknown-COMMIT POST + logout rejects stale-cookie replay; fresh same-owner login returns exact stored result with one client, idempotency row, create audit, and logout audit");
 
+
+  // Restore the synthetic session only after proving logout and stale-cookie
+  // rejection; the later independent backup/restore test expects this fixture live.
+  await pool.query(
+    "update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
+    [hash(token), ids.user, ids.office]
+  );
+  assert.equal((await pool.query(
+    "select count(*)::int as count from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null and expires_at>now()",
+    [hash(token), ids.user, ids.office]
+  )).rows[0].count, 1, "restore synthetic API session for downstream backup/restore integration fixture");
+  console.log("PASS: unknown-outcome logout/re-login assertions completed; disposable synthetic session restored for downstream backup/restore test");
+
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE and generic client POST");
 } catch (error) {
   console.error(error);
