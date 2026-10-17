@@ -693,11 +693,11 @@ try {
   );
   const expiredRetry = await request(`/api/cases/${sessionCaseId}`, { method: "DELETE", key: sessionRetryKey });
   assert.equal(expiredRetry.status, 401, "expired session must be rejected before idempotency replay");
-  const liveCountBeforeLogin = await pool.query(
-    "select count(*)::int as count from auth_sessions where user_id=$1 and office_id=$2 and revoked_at is null and expires_at>now()",
-    [ids.user, ids.office]
+  const oldSessionLiveCount = await pool.query(
+    "select count(*)::int as count from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null and expires_at>now()",
+    [hash(token), ids.user, ids.office]
   );
-  assert.equal(liveCountBeforeLogin.rows[0].count, 0, "expired old session must not remain live");
+  assert.equal(oldSessionLiveCount.rows[0].count, 0, "expired old session must not remain live; other valid sessions for the same user are independent");
   const freshOwner = await login(ownerEmail, ownerPassword);
   assert.equal(freshOwner.user.id, ids.user);
   assert.equal(freshOwner.user.office_id, ids.office);
