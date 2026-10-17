@@ -915,11 +915,27 @@ try {
     "select id from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3",
     [hash(token), ids.user, ids.office]
   )).rows[0].id;
-  const logoutAfterUnknownCommit = await request("/api/auth/logout", {
-    method: "POST", sessionToken: token, csrfToken: csrf
-  });
-  assert.equal(logoutAfterUnknownCommit.status, 200, "logout after unknown POST outcome must succeed");
+  // Race a retry of the unknown-COMMIT POST against logout using the same
+  // session. Either the retry serializes first and replays the committed result,
+  // or logout serializes first and the retry is rejected; neither order may
+  // create another client/idempotency row/audit event.
+  const [logoutAfterUnknownCommit, concurrentUnknownCommitRetry] = await Promise.all([
+    request("/api/auth/logout", {
+      method: "POST", sessionToken: token, csrfToken: csrf
+    }),
+    request("/api/clients", {
+      method: "POST", key: genericClientKey, body: genericClientBody,
+      sessionToken: token, csrfToken: csrf
+    })
+  ]);
+  assert.equal(logoutAfterUnknownCommit.status, 200, "logout racing unknown POST retry must succeed");
   assert.deepEqual(logoutAfterUnknownCommit.body, { ok: true });
+  assert.ok([201, 401].includes(concurrentUnknownCommitRetry.status),
+    `concurrent retry must either replay before logout (201) or be rejected after logout (401), got ${concurrentUnknownCommitRetry.status}`);
+  if (concurrentUnknownCommitRetry.status === 201) {
+    assert.deepEqual(concurrentUnknownCommitRetry.body, genericStored.rows[0].response_body,
+      "retry winning the race must return the exact durable response");
+  }
   assert.equal((await pool.query(
     "select count(*)::int as count from auth_sessions where id=$1 and revoked_at is not null",
     [genericClientSessionId]
@@ -941,6 +957,19 @@ try {
     "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'",
     [ids.office, genericClientId]
   )).rows[0].count), 1, "stale-cookie replay must not duplicate the create audit");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from clients where id=$1 and deleted_at is null",
+    [genericClientId]
+  )).rows[0].count), 1, "logout/retry race must preserve exactly one committed client");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, genericClientKey]
+  )).rows[0].count, 1, "logout/retry race must preserve exactly one idempotency row");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'",
+    [ids.office, genericClientId]
+  )).rows[0].count), 1, "logout/retry race must preserve exactly one create audit");
+  console.log("PASS: unknown-COMMIT retry racing logout serializes to replay-or-401; stale cookie is rejected and mutation/idempotency/audit remain exact-once");
 
   const freshOwnerAfterUnknownCommit = await login(ownerEmail, ownerPassword);
   assert.equal(freshOwnerAfterUnknownCommit.user.id, ids.user);
