@@ -278,6 +278,21 @@ try {
     [ids.office, ids.user, patchKey])).rows[0].count, 1, "PATCH must retain one durable idempotency row");
   assert.equal(await countAudit(patchId, "update"), 1, "PATCH retry must not duplicate audit rows");
 
+  // A completed PATCH key is bound to the canonical payload, not merely the resource.
+  const patchPayloadConflict = await request(`/api/case-documents/${patchId}`, {
+    method: "PATCH", key: patchKey, body: { title: "Conflicting payload must not apply" }
+  });
+  assert.equal(patchPayloadConflict.status, 409, "same key/resource with a different PATCH payload must conflict");
+  assert.deepEqual(patchPayloadConflict.body, { error: "idempotency_key_reused" });
+  assert.equal((await pool.query("select title from case_documents where id=$1", [patchId])).rows[0].title,
+    "Committed despite lost COMMIT response", "conflicting payload must not overwrite the completed PATCH result");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, patchKey]
+  )).rows[0].count, 1, "payload conflict must retain exactly one idempotency row");
+  assert.equal(await countAudit(patchId, "update"), 1, "payload conflict must not append a second audit row");
+  console.log("PASS: completed PATCH key reused with a different payload returns 409; title, one key row, and one audit remain");
+
   // Case 2: confidentiality change uses the same durable transaction contract.
   const classificationId = await makeDocument("Before lost COMMIT confidentiality");
   const classificationKey = "commit-loss-class-01";
@@ -632,6 +647,26 @@ try {
     "concurrent same-key client deletes must append one audit event");
   console.log("PASS: concurrent same-key client DELETE returns 204 to both callers with one idempotency row and one audit event");
 
+  // PATCH concurrency is distinct from DELETE concurrency: two identical edits race.
+  const concurrentPatchId = await makeDocument("Before concurrent PATCH");
+  const concurrentPatchKey = "concurrent-patch-" + crypto.randomUUID();
+  const concurrentPatchPayload = { title: "Concurrent PATCH committed once" };
+  const concurrentPatchResults = await Promise.all([
+    request(`/api/case-documents/${concurrentPatchId}`, { method: "PATCH", key: concurrentPatchKey, body: concurrentPatchPayload }),
+    request(`/api/case-documents/${concurrentPatchId}`, { method: "PATCH", key: concurrentPatchKey, body: concurrentPatchPayload })
+  ]);
+  assert.deepEqual(concurrentPatchResults.map(result => result.status).sort(), [200, 200],
+    "concurrent same-key identical PATCH callers must both observe the completed result");
+  await waitForCompletedKey(concurrentPatchKey, 200);
+  assert.equal((await pool.query("select title from case_documents where id=$1", [concurrentPatchId])).rows[0].title,
+    concurrentPatchPayload.title, "concurrent PATCH must leave the requested final title");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, concurrentPatchKey]
+  )).rows[0].count, 1, "concurrent PATCH must reserve one idempotency identity");
+  assert.equal(await countAudit(concurrentPatchId, "update"), 1, "concurrent PATCH must append exactly one audit row");
+  console.log("PASS: concurrent same-key PATCH returns 200 to both callers with one idempotency row and one audit event");
+
   // Expire the old session, then use the real login endpoint to obtain a different
   // token for the same user/office and replay the completed operation.
   const sessionRetryKey = "session-expiry-delete-" + crypto.randomUUID();
@@ -668,6 +703,45 @@ try {
   )).rows[0].count, 1, "fresh-session replay must reuse the single completed operation record");
   assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), 1, "fresh-session replay must not duplicate delete audit");
   console.log("PASS: expired session returns 401; real fresh login for same user/office replays 204 with one idempotency row and one delete audit");
+
+  // Logout must revoke the just-used session. Only a subsequent real login may replay
+  // the completed operation; the revoked cookie must no longer authorize a replay.
+  const logoutResponse = await request("/api/auth/logout", {
+    method: "POST", sessionToken: freshOwner.token, csrfToken: freshOwner.csrf
+  });
+  assert.equal(logoutResponse.status, 200, "real logout endpoint must succeed for the fresh session");
+  assert.deepEqual(logoutResponse.body, { ok: true });
+  assert.equal((await pool.query(
+    "select count(*)::int as count from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is not null",
+    [hash(freshOwner.token), ids.user, ids.office]
+  )).rows[0].count, 1, "logout must persist revocation of the session used for replay");
+  const revokedSessionReplay = await request(`/api/cases/${sessionCaseId}`, {
+    method: "DELETE", key: sessionRetryKey, sessionToken: freshOwner.token, csrfToken: freshOwner.csrf
+  });
+  assert.equal(revokedSessionReplay.status, 401, "logged-out session must not replay even a completed idempotency result");
+  const freshAfterLogout = await login(ownerEmail, ownerPassword);
+  assert.equal(freshAfterLogout.user.id, ids.user);
+  assert.equal(freshAfterLogout.user.office_id, ids.office);
+  assert.notEqual(freshAfterLogout.token, freshOwner.token, "login after logout must issue a distinct session");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from auth_sessions where token_hash=$1 and user_id=$2 and office_id=$3 and revoked_at is null and expires_at>now()",
+    [hash(freshAfterLogout.token), ids.user, ids.office]
+  )).rows[0].count, 1, "post-logout login must persist a new live session");
+  const replayAfterLogoutAndLogin = await request(`/api/cases/${sessionCaseId}`, {
+    method: "DELETE", key: sessionRetryKey, sessionToken: freshAfterLogout.token, csrfToken: freshAfterLogout.csrf
+  });
+  assert.equal(replayAfterLogoutAndLogin.status, 204, "same owner/office must replay completed operation after actual logout and fresh login");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=204",
+    [ids.office, ids.user, sessionRetryKey]
+  )).rows[0].count, 1, "post-logout replay must reuse exactly one completed idempotency row");
+  assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), 1,
+    "post-logout replay must preserve exactly one business delete audit row");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='auth_session' and entity_id=$2 and action='logout'",
+    [ids.office, (await pool.query("select id from auth_sessions where token_hash=$1", [hash(freshOwner.token)])).rows[0].id]
+  )).rows[0].count, 1, "actual logout must append exactly one logout audit row");
+  console.log("PASS: real logout revokes session (401 on old cookie); fresh login replays same completed DELETE with one operation/audit row and one logout audit");
 
   // A different user in the same office must not replay the owner's result.
   const otherUserId = crypto.randomUUID();
