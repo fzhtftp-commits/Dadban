@@ -144,7 +144,8 @@ BEGIN
 END
 $function$;
 
-CREATE OR REPLACE FUNCTION public.read_api_mutation_idempotency(
+DROP FUNCTION IF EXISTS public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text);
+CREATE FUNCTION public.read_api_mutation_idempotency(
   p_session_id uuid,
   p_user_id uuid,
   p_office_id uuid,
@@ -154,7 +155,16 @@ CREATE OR REPLACE FUNCTION public.read_api_mutation_idempotency(
   p_request_fingerprint text,
   p_proof text
 )
-RETURNS SETOF public.api_mutation_idempotency
+RETURNS TABLE (
+  resource_type text,
+  operation text,
+  request_fingerprint text,
+  resource_id uuid,
+  response_status smallint,
+  response_body jsonb,
+  response_body_purged boolean,
+  completed_at timestamptz
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -211,7 +221,8 @@ BEGIN
   END IF;
 
   RETURN QUERY
-  SELECT r.*
+  SELECT r.resource_type, r.operation, r.request_fingerprint, r.resource_id,
+         r.response_status, r.response_body, r.response_body_purged, r.completed_at
   FROM public.api_mutation_idempotency r
   WHERE r.office_id = p_office_id
     AND r.user_id = p_user_id
