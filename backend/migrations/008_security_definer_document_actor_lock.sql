@@ -33,6 +33,25 @@ BEGIN
 END
 $preflight$;
 
+-- The runtime receives EXECUTE on the helpers below. Any direct membership
+-- could enable SET ROLE or inherited privileges through an intermediary role.
+DO $runtime_preflight$
+DECLARE runtime_role record;
+BEGIN
+  FOR runtime_role IN
+    SELECT oid, rolname FROM pg_roles
+    WHERE rolname IN ('dadban_document_runtime','dadban_document_runtime_ci')
+  LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_auth_members m
+      WHERE m.member=runtime_role.oid OR m.roleid=runtime_role.oid
+    ) THEN
+      RAISE EXCEPTION 'runtime role % must not participate in role memberships', runtime_role.rolname;
+    END IF;
+  END LOOP;
+END
+$runtime_preflight$;
+
 GRANT USAGE ON SCHEMA public TO dadban_actor_lock_owner;
 GRANT SELECT ON public.auth_sessions, public.users, public.clients, public.cases TO dadban_actor_lock_owner;
 -- PostgreSQL requires UPDATE privilege on each FOR UPDATE target. Keep these
