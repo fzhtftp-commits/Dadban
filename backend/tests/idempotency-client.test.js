@@ -62,3 +62,22 @@ test("frontend does not attach idempotency keys to read-only requests", () => {
   assert.equal(read.key, null);
   assert.equal(read.options.headers["Idempotency-Key"], undefined);
 });
+
+test("all frontend mutation pages load the helper before their write handlers", () => {
+  for (const [page, script] of [
+    ["client-form.html", "client-form.js"],
+    ["case-form.html", "case-form.js"],
+    ["calendar.html", "hearings.js"],
+    ["actions.html", "actions.js"],
+    ["documents.html", "documents.js"]
+  ]) {
+    const html = readFileSync(new URL("../../" + page, import.meta.url), "utf8");
+    assert.ok(html.includes('src="idempotency-client.js"'), page + " must load the shared helper");
+    assert.ok(html.indexOf('src="idempotency-client.js"') < html.indexOf('src="' + script), page + " must load helper first");
+  }
+  for (const script of ["client-form.js", "case-form.js", "hearings.js", "actions.js", "documents.js"]) {
+    const source = readFileSync(new URL("../../" + script, import.meta.url), "utf8");
+    assert.ok(source.includes("dadbanWithMutationKey"), script + " must attach an idempotency key");
+    assert.ok(source.includes("dadbanMutationSucceeded"), script + " must clear the key only after success");
+  }
+});
