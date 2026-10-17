@@ -1025,6 +1025,7 @@ try {
 
   const counts = await pool.query(`
     SELECT
+      (SELECT count(*)::int FROM case_documents WHERE id=$3) AS business_rows,
       (SELECT count(*)::int FROM case_document_mutation_idempotency WHERE office_id=$1 AND user_id=$2) AS idempotency_rows,
       (SELECT count(*)::int FROM audit_logs WHERE office_id=$1 AND entity_type='case_document' AND entity_id=$3) AS audit_rows,
       (SELECT count(*)::int FROM audit_logs WHERE office_id=$1 AND entity_type='case_document' AND entity_id=$3 AND action='create') AS create_audit_rows,
@@ -1033,7 +1034,7 @@ try {
       (SELECT count(*)::int FROM case_documents WHERE id=$3 AND deleted_at IS NOT NULL) AS soft_deleted_documents
   `, [officeId,userId,documentId]);
   assert.deepEqual(counts.rows[0], {
-    idempotency_rows:3, audit_rows:4, create_audit_rows:1, update_audit_rows:2, delete_audit_rows:1, soft_deleted_documents:1
+    business_rows:1, idempotency_rows:3, audit_rows:4, create_audit_rows:1, update_audit_rows:2, delete_audit_rows:1, soft_deleted_documents:1
   });
   const durableKeys = await pool.query(
     "SELECT idempotency_key,response_status,purged_at FROM case_document_mutation_idempotency WHERE office_id=$1 AND user_id=$2 ORDER BY idempotency_key",
@@ -1042,7 +1043,7 @@ try {
   assert.equal(durableKeys.rowCount, 3);
   assert.deepEqual(durableKeys.rows.map(row=>row.response_status).sort((a,b)=>a-b), [200,200,204]);
   assert.ok(durableKeys.rows.every(row=>row.purged_at === null));
-  console.log(`DIRECT DB ASSERTIONS: case_document_mutation_idempotency=${counts.rows[0].idempotency_rows} audit_logs=${counts.rows[0].audit_rows} create=${counts.rows[0].create_audit_rows} update=${counts.rows[0].update_audit_rows} delete=${counts.rows[0].delete_audit_rows} soft_deleted=${counts.rows[0].soft_deleted_documents}`);
+  console.log(`DIRECT DB ASSERTIONS: business_rows=${counts.rows[0].business_rows} case_document_mutation_idempotency=${counts.rows[0].idempotency_rows} audit_logs=${counts.rows[0].audit_rows} create=${counts.rows[0].create_audit_rows} update=${counts.rows[0].update_audit_rows} delete=${counts.rows[0].delete_audit_rows} soft_deleted=${counts.rows[0].soft_deleted_documents}`);
   console.log("PASS: create/replay, edit/replay, confidentiality transition/replay, and delete/replay work over HTTP as the least-privilege runtime login without duplicate audit or idempotency rows");
 } catch (error) {
   console.error(error);
