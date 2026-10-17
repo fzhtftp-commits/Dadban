@@ -144,7 +144,7 @@ try {
     REVOKE ALL ON SCHEMA public FROM dadban_document_runtime_ci;
     GRANT USAGE ON SCHEMA public TO dadban_document_runtime_ci;
     REVOKE ALL ON public.users, public.clients, public.cases, public.auth_sessions, public.audit_logs,
-      public.case_documents, public.case_document_mutation_idempotency
+      public.case_documents, public.case_document_mutation_idempotency, public.api_mutation_idempotency
       FROM dadban_document_runtime_ci;
     GRANT SELECT ON public.users, public.clients, public.cases, public.auth_sessions TO dadban_document_runtime_ci;
     -- PostgreSQL requires UPDATE on at least one column of a FOR UPDATE target.
