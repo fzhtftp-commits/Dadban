@@ -1275,6 +1275,47 @@ try {
   )).rows[0].count, 1, "restore synthetic API session for downstream backup/restore integration fixture");
   console.log("PASS: unknown-outcome logout/re-login assertions completed; disposable synthetic session restored for downstream backup/restore test");
 
+  // A later authorized mutation may change the resource after a successful POST.
+  // Retrying the original key must replay its immutable stored response, not create
+  // another client or roll the resource back to the old representation.
+  const changedClientName = "Changed after original POST " + crypto.randomUUID();
+  const changeAfterPost = await request(`/api/clients/${genericClientId}`, {
+    method: "PATCH", key: "content-change-" + crypto.randomUUID().replace(/-/g, "").slice(0, 16),
+    body: { full_name: changedClientName },
+    sessionToken: freshOwnerAfterUnknownCommit.token,
+    csrfToken: freshOwnerAfterUnknownCommit.csrf
+  });
+  assert.equal(changeAfterPost.status, 200, "authorized post-create client update must commit before testing old-key replay");
+  assert.equal((await pool.query("select full_name from clients where id=$1 and office_id=$2", [genericClientId, ids.office])).rows[0].full_name,
+    changedClientName, "later mutation must change current resource content");
+  const originalPostAfterContentChange = await request("/api/clients", {
+    method: "POST", key: genericClientKey, body: genericClientBody,
+    sessionToken: freshOwnerAfterUnknownCommit.token,
+    csrfToken: freshOwnerAfterUnknownCommit.csrf
+  });
+  assert.equal(originalPostAfterContentChange.status, 201, "original key must replay the completed POST response after resource content changes");
+  assert.deepEqual(originalPostAfterContentChange.body, genericStored.rows[0].response_body,
+    "original key replay must return its stored response rather than current resource content");
+  assert.equal((await pool.query("select full_name from clients where id=$1 and office_id=$2", [genericClientId, ids.office])).rows[0].full_name,
+    changedClientName, "old-key replay must not overwrite the later committed resource change");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from clients where id=$1 and office_id=$2 and deleted_at is null",
+    [genericClientId, ids.office]
+  )).rows[0].count), 1, "content-change replay must preserve exactly one client");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, genericClientKey]
+  )).rows[0].count), 1, "content-change replay must preserve exactly one original idempotency identity");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'",
+    [ids.office, genericClientId]
+  )).rows[0].count), 1, "content-change replay must not duplicate create audit");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='update'",
+    [ids.office, genericClientId]
+  )).rows[0].count), 1, "later content update must have exactly one update audit");
+  console.log("PASS: generic POST replay after later content change returns original stored response; current client remains updated with one client/key/create audit/update audit");
+
   // Generic API response-retention boundary: purging a completed result must
   // preserve its key identity and return 410, never reopen the POST or duplicate
   // the committed client/audit when a retry arrives after retention.
