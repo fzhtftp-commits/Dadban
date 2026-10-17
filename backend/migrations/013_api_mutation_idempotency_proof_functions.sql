@@ -221,7 +221,7 @@ BEGIN
   END IF;
 
   RETURN QUERY
-  SELECT r.resource_type, r.operation, r.request_fingerprint, r.resource_id,
+  SELECT r.resource_type::text, r.operation::text, r.request_fingerprint::text, r.resource_id,
          r.response_status, r.response_body, r.response_body_purged, r.completed_at
   FROM public.api_mutation_idempotency r
   WHERE r.office_id = p_office_id
