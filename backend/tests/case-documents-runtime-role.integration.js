@@ -213,6 +213,8 @@ try {
     assert.equal(role[attr], false, `runtime role must not have ${attr}`);
   }
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
+  assert.notEqual(role.api_idem_owner, "dadban_document_runtime_ci", "runtime must not own the generic API idempotency table");
+  assert.equal(role.can_complete_api_idem, true, "runtime must complete a pending generic idempotency row");
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
   assert.deepEqual(runtimeIdentity.rows[0], { role:"dadban_document_runtime_ci", rolsuper:false, rolcreatedb:false, rolcreaterole:false });
   assert.equal(role.can_update_full_name, false, "runtime must not have UPDATE(full_name); row locking is delegated to the SECURITY DEFINER helper");
