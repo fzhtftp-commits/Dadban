@@ -116,6 +116,57 @@ ALTER DEFAULT PRIVILEGES FOR ROLE dadban_actor_lock_owner REVOKE EXECUTE ON FUNC
 ALTER DEFAULT PRIVILEGES FOR ROLE dadban_actor_lock_owner IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE dadban_api_idempotency_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE dadban_api_idempotency_owner IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+-- Reconcile stale default EXECUTE ACLs for every schema scope, not only
+-- PUBLIC in the global/public scopes. Otherwise a previous deployment can
+-- make future SECURITY DEFINER functions executable by arbitrary roles.
+DO $default_function_acl_reset$
+DECLARE
+  default_acl record;
+  grantee record;
+  owner_name text;
+  scope_sql text;
+BEGIN
+  FOR default_acl IN
+    SELECT d.defaclrole, d.defaclnamespace,
+           pg_get_userbyid(d.defaclrole) AS owner_name,
+           n.nspname AS schema_name
+    FROM pg_default_acl d
+    LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace
+    WHERE d.defaclobjtype='f'
+      AND d.defaclrole IN (
+        SELECT oid FROM pg_roles
+        WHERE rolname IN ('dadban_actor_lock_owner','dadban_api_idempotency_owner')
+      )
+  LOOP
+    owner_name := default_acl.owner_name;
+    scope_sql := CASE WHEN default_acl.defaclnamespace=0 THEN ''
+                      ELSE format(' IN SCHEMA %I',default_acl.schema_name) END;
+    FOR grantee IN
+      SELECT DISTINCT acl.grantee, r.rolname
+      FROM pg_default_acl d
+      CROSS JOIN LATERAL aclexplode(d.defaclacl) acl
+      LEFT JOIN pg_roles r ON r.oid=acl.grantee
+      WHERE d.defaclrole=default_acl.defaclrole
+        AND d.defaclnamespace=default_acl.defaclnamespace
+        AND d.defaclobjtype='f'
+        AND acl.privilege_type='EXECUTE'
+        AND acl.grantee<>d.defaclrole
+    LOOP
+      IF grantee.grantee=0 THEN
+        EXECUTE format(
+          'ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC',
+          owner_name,scope_sql
+        );
+      ELSE
+        EXECUTE format(
+          'ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE EXECUTE ON FUNCTIONS FROM %I CASCADE',
+          owner_name,scope_sql,grantee.rolname
+        );
+      END IF;
+    END LOOP;
+  END LOOP;
+END
+$default_function_acl_reset$;
 DO $function_acl_reset$
 DECLARE fn record; grantee record; runtime_name text;
 BEGIN
