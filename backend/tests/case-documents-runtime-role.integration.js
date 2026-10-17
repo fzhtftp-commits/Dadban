@@ -328,6 +328,7 @@ try {
   await denied("TRUNCATE public.case_document_mutation_idempotency", "TRUNCATE idempotency table");
   await denied("ALTER TABLE public.case_document_mutation_idempotency DISABLE TRIGGER ALL", "disable tombstone triggers");
   await denied("DELETE FROM public.api_mutation_idempotency", "DELETE generic idempotency identity");
+  await denied("INSERT INTO public.api_mutation_idempotency (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,response_status,response_body,completed_at,response_body_purged,purged_at) VALUES ('cccccccc-cccc-4ccc-8ccc-cccccccccccc'::uuid,'cccccccc-cccc-4ccc-8ccc-cccccccccc01'::uuid,'forged-complete-01','client','POST',repeat('a',64),201,'{}'::jsonb,clock_timestamp(),true,clock_timestamp())", "insert pre-completed generic idempotency tombstone");
   await denied("UPDATE public.api_mutation_idempotency SET response_body_purged=false", "UPDATE generic tombstone marker");
   await denied("TRUNCATE public.api_mutation_idempotency", "TRUNCATE generic idempotency table");
   await denied("ALTER TABLE public.api_mutation_idempotency DISABLE TRIGGER ALL", "disable generic tombstone triggers");
