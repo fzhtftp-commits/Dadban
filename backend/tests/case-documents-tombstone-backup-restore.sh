@@ -25,7 +25,9 @@ echo "BACKUP SOURCE DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_trigger
 
 pg_dump -h localhost -U postgres -Fc -d dadban_test -f "$backup"
 createdb -h localhost -U postgres "$restore_db"
-pg_restore -h localhost -U postgres --no-owner --role=postgres -d "$restore_db" "$backup"
+# Restore with original owners and ACLs intact. --no-owner would silently make
+# SECURITY DEFINER functions owned by postgres, elevating them after recovery.
+pg_restore -h localhost -U postgres -d "$restore_db" "$backup"
 
 after="$(psql -h localhost -U postgres -X -A -t -v ON_ERROR_STOP=1 -d "$restore_db" -c "
 SELECT
@@ -37,6 +39,48 @@ if [[ "$before" != "$after" ]]; then
   echo "FAIL: restore counts/trigger state differ: before=$before after=$after" >&2; exit 1
 fi
 echo "RESTORED DB ASSERTIONS: idempotency_rows,audit_rows,tombstone_triggers=$after"
+
+# A successful row/trigger restore is not enough: SECURITY DEFINER owners and
+# effective ACLs must survive the dump. Check all eight restricted helpers.
+psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d "$restore_db" <<'SQL'
+DO $definer_restore$
+DECLARE fn record;
+BEGIN
+  FOR fn IN
+    SELECT * FROM (VALUES
+      ('public.lock_live_document_actor(uuid,uuid,uuid)'::regprocedure, 'dadban_actor_lock_owner'),
+      ('public.lock_live_client_parent(uuid,uuid)'::regprocedure, 'dadban_actor_lock_owner'),
+      ('public.lock_live_case_client(uuid,uuid)'::regprocedure, 'dadban_actor_lock_owner'),
+      ('public.lock_live_case_parents(uuid,uuid[])'::regprocedure, 'dadban_actor_lock_owner'),
+      ('public.lock_live_case_reassignment(uuid,uuid,uuid)'::regprocedure, 'dadban_actor_lock_owner'),
+      ('public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure, 'dadban_api_idempotency_owner'),
+      ('public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure, 'dadban_api_idempotency_owner'),
+      ('public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)'::regprocedure, 'dadban_api_idempotency_owner')
+    ) AS expected(oid, expected_owner)
+  LOOP
+    IF (SELECT r.rolname FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner WHERE p.oid=fn.oid)
+       IS DISTINCT FROM fn.expected_owner THEN
+      RAISE EXCEPTION 'restored SECURITY DEFINER function % has unexpected owner', fn.oid;
+    END IF;
+    IF has_function_privilege('PUBLIC', fn.oid, 'EXECUTE') THEN
+      RAISE EXCEPTION 'PUBLIC can execute restored SECURITY DEFINER function %', fn.oid;
+    END IF;
+    IF NOT has_function_privilege('dadban_document_runtime_ci', fn.oid, 'EXECUTE') THEN
+      RAISE EXCEPTION 'approved runtime lost EXECUTE on restored function %', fn.oid;
+    END IF;
+  END LOOP;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_auth_members m
+    JOIN pg_roles r ON r.oid=m.roleid OR r.oid=m.member
+    WHERE r.rolname IN ('dadban_actor_lock_owner','dadban_api_idempotency_owner')
+  ) THEN
+    RAISE EXCEPTION 'restored SECURITY DEFINER owner unexpectedly participates in role membership';
+  END IF;
+END
+$definer_restore$;
+SQL
+echo "PASS: backup/restore preserves all eight SECURITY DEFINER owners, denies PUBLIC EXECUTE, and retains approved runtime EXECUTE"
 
 # Migration 007 must not be re-applied over a restored DB; failure must leave
 # the restored protection/catalog intact.
