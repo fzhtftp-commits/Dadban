@@ -52,6 +52,11 @@ GRANT dadban_api_idempotency_acl_probe_ci TO dadban_api_idempotency_member_probe
 GRANT EXECUTE ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO dadban_api_idempotency_acl_probe_ci;
 GRANT EXECUTE ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO dadban_api_idempotency_acl_probe_ci;
 GRANT EXECUTE ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) TO dadban_api_idempotency_acl_probe_ci;
+-- Seed a stale delegation right: rerunning migration must not leave runtime able
+-- to grant these SECURITY DEFINER functions to an intermediary role.
+GRANT EXECUTE ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO dadban_document_runtime_ci WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO dadban_document_runtime_ci WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) TO dadban_document_runtime_ci WITH GRANT OPTION;
 SQL
 
 # Reapplying migration 013 must remove stale explicit EXECUTE grants on CREATE OR REPLACE functions.
@@ -75,6 +80,21 @@ BEGIN
        'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)','EXECUTE') THEN
     RAISE EXCEPTION 'intermediary role membership retained effective EXECUTE after migration rerun';
   END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+    WHERE p.oid IN (
+      'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure,
+      'public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure,
+      'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)'::regprocedure
+    )
+      AND acl.grantee = (SELECT oid FROM pg_roles WHERE rolname='dadban_document_runtime_ci')
+      AND acl.privilege_type='EXECUTE'
+      AND acl.is_grantable
+  ) THEN
+    RAISE EXCEPTION 'runtime retained grant option on a SECURITY DEFINER function after migration rerun';
+  END IF;
   IF NOT has_function_privilege('dadban_document_runtime_ci',
        'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)','EXECUTE')
      OR NOT has_function_privilege('dadban_document_runtime_ci',
@@ -86,7 +106,7 @@ BEGIN
 END
 $assert_acl$;
 SQL
-echo "PASS: migration rerun removes stale direct and inherited function EXECUTE grants and preserves intended runtime grants"
+echo "PASS: migration rerun removes stale direct/inherited grants and runtime grant options while preserving plain EXECUTE"
 
 # A role granted membership in the runtime role must be rejected in either membership direction.
 psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test -c   "GRANT dadban_document_runtime_ci TO dadban_api_idempotency_member_probe_ci"
