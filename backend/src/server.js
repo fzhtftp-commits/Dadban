@@ -425,14 +425,27 @@ const canonicalizeApiMutationValue = (value) => {
 };
 const apiMutationFingerprint = (resourceType, operation, entityId, payload) =>
   hashToken(JSON.stringify({ resourceType, operation, entityId: entityId ? String(entityId).toLowerCase() : null, payload: canonicalizeApiMutationValue(payload ?? null) }));
+const apiMutationProof = ({ action, req, key, resourceType, operation, fingerprint, resourceId = null, status = null }) => {
+  const secret = process.env.API_MUTATION_IDEMPOTENCY_HMAC_KEY || "";
+  if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error("API mutation idempotency proof key is not configured");
+  const payload = [
+    "dadban-idem-v1", action, String(req.auth.sessionId).toLowerCase(),
+    String(req.auth.userId).toLowerCase(), String(req.auth.officeId).toLowerCase(),
+    key, resourceType, operation, fingerprint,
+    resourceId == null ? "" : String(resourceId).toLowerCase(),
+    status == null ? "" : String(status)
+  ].join("|");
+  return crypto.createHmac("sha256", Buffer.from(secret, "hex")).update(payload, "utf8").digest("hex");
+};
 const beginApiMutationIdempotency = async (client, req, key, resourceType, operation, entityId, payload) => {
   if (!key) return { kind: "new", key: null };
   const fingerprint = apiMutationFingerprint(resourceType, operation, entityId, payload);
-  const inserted = await client.query(
-    "insert into public.api_mutation_idempotency(office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint) values($1,$2,$3,$4,$5,$6) on conflict (office_id,user_id,idempotency_key) do nothing returning idempotency_key",
-    [req.auth.officeId, req.auth.userId, key, resourceType, operation, fingerprint]
+  const proof = apiMutationProof({ action: "reserve", req, key, resourceType, operation, fingerprint });
+  const reservation = await client.query(
+    "select public.reserve_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8) as inserted",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId, key, resourceType, operation, fingerprint, proof]
   );
-  if (inserted.rowCount) return { kind: "new", key, fingerprint };
+  if (reservation.rows[0].inserted) return { kind: "new", key, fingerprint, resourceType, operation };
   const existing = await client.query(
     "select resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,completed_at from public.api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
     [req.auth.officeId, req.auth.userId, key]
@@ -446,14 +459,16 @@ const beginApiMutationIdempotency = async (client, req, key, resourceType, opera
 };
 const completeApiMutationIdempotency = async (client, req, mutation, status, body, resourceId) => {
   if (!mutation || mutation.kind !== "new" || !mutation.key) return;
-  // Persist only the stable resource identifier, never client/case/hearing/action fields.
-  // The original live response remains unchanged; a replay returns this minimal envelope.
-  const minimalBody = status === 204 ? {} : { data: { id: resourceId ?? null } };
+  const proof = apiMutationProof({
+    action: "complete", req, key: mutation.key, resourceType: mutation.resourceType,
+    operation: mutation.operation, fingerprint: mutation.fingerprint, resourceId, status
+  });
   const result = await client.query(
-    "update public.api_mutation_idempotency set resource_id=$4,response_status=$5,response_body=$6::jsonb,completed_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status is null returning idempotency_key",
-    [req.auth.officeId, req.auth.userId, mutation.key, resourceId ?? null, status, JSON.stringify(minimalBody)]
+    "select public.complete_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) as completed",
+    [req.auth.sessionId, req.auth.userId, req.auth.officeId, mutation.key, mutation.resourceType,
+      mutation.operation, mutation.fingerprint, resourceId, status, proof]
   );
-  if (!result.rowCount) throw new Error("API mutation idempotency completion failed");
+  if (!result.rows[0]?.completed) throw new Error("API mutation idempotency completion failed");
 };
 const respondApiMutationReplay = (res, mutation) => {
   if (mutation.status === 204) return res.status(204).end();
