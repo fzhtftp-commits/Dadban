@@ -6,6 +6,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   const editButton = document.getElementById("editClient");
   const deleteButton = document.getElementById("deleteClient");
   const csrfToken = () => sessionStorage.getItem("dadban_csrf") || "";
+  const deleteIdempotencyStorageKey = `dadban:delete:client:${id || "missing"}`;
+  const deleteIdempotencyKey = () => {
+    let key = sessionStorage.getItem(deleteIdempotencyStorageKey);
+    if (!key) {
+      key = crypto.randomUUID();
+      sessionStorage.setItem(deleteIdempotencyStorageKey, key);
+    }
+    return key;
+  };
+
   const faDigits = d => "۰۱۲۳۴۵۶۷۸۹"[d];
   const statusLabel = {active:"فعال",pending:"در انتظار",closed:"بسته",archived:"بایگانی"};
   const priorityLabel = {low:"کم",normal:"عادی",high:"بالا",urgent:"فوری"};
@@ -104,12 +114,13 @@ document.addEventListener("DOMContentLoaded", async () => {
           const deleteResponse = await fetch(`${API}/api/clients/${encodeURIComponent(id)}`, {
             method: "DELETE",
             credentials: "include",
-            headers: { "x-csrf-token": token }
+            headers: { "x-csrf-token": token, "idempotency-key": deleteIdempotencyKey() }
           });
           const deleteData = await deleteResponse.json().catch(() => ({}));
           if (deleteResponse.status === 401) { window.location.href = "login.html"; return; }
           if (deleteResponse.status === 403) throw new Error("درخواست حذف از نظر امنیتی تأیید نشد. صفحه را تازه‌سازی کنید.");
           if (!deleteResponse.ok) throw new Error(deleteData?.error || "حذف موکل انجام نشد.");
+          sessionStorage.removeItem(deleteIdempotencyStorageKey);
           window.location.href = "clients.html?deleted=1";
         } catch (error) {
           message.textContent = error.message || "خطا در ارتباط با سرور.";
