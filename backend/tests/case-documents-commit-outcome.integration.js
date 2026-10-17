@@ -411,9 +411,9 @@ try {
     method: "PATCH", key: assistantKey, body: { title: "Assistant committed title" },
     sessionToken: assistantToken, csrfToken: assistantCsrf
   });
-  assert.equal(assistantReplayAfterRestriction.status, 403,
-    "assistant replay must not return a stored confidential response after document becomes restricted");
-  assert.deepEqual(assistantReplayAfterRestriction.body, { error: "document_role_forbidden" });
+  assert.equal(assistantReplayAfterRestriction.status, 404,
+    "assistant replay must hide the document after its confidentiality becomes restricted");
+  assert.deepEqual(assistantReplayAfterRestriction.body, { error: "document_not_found" });
   assert.equal((await pool.query("select confidentiality,title from case_documents where id=$1 and office_id=$2",
     [confidentialityReplayId, ids.office])).rows[0].confidentiality, "restricted");
   assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
