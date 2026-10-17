@@ -49,6 +49,7 @@ async function request(path, method, body, options = {}) {
     "content-type": "application/json",
     "user-agent": options.userAgent ?? "dadban-audit-mutation-test"
   };
+  if (options.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey;
   if (method === "DELETE" && /^\/api\/(?:clients|cases)\//.test(path)) {
     headers["idempotency-key"] = crypto.randomUUID();
   }
