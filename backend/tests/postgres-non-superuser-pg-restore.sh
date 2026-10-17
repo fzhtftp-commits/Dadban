@@ -65,9 +65,6 @@ GRANT USAGE ON SCHEMA $schema TO $backup;
 GRANT SELECT ON $schema.fixture_table,$schema.fixture_view TO $backup;
 GRANT SELECT ON SEQUENCE $schema.fixture_seq TO $backup;
 GRANT USAGE ON SCHEMA $schema TO $restore;
-# ALTER OWNER on objects in this schema requires CREATE on the containing schema.
-# Grant the restore executor this explicit fixture-only privilege in the source archive,
-# so the ACL is also archived and can be compared after restore.
 GRANT CREATE ON SCHEMA $schema TO $restore;
 SQL
 # The restore role must be able to read a real custom-format dump, but cannot
