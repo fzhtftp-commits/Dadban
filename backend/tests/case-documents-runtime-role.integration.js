@@ -280,6 +280,134 @@ try {
   );
   console.log("PASS: revoked, expired, old-login, and cross-user session proofs are rejected");
 
+  const makeLiveSession = async label => (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour') RETURNING id",
+    [userId,officeId,hash(label + "-token"),hash(label + "-csrf")]
+  )).rows[0].id;
+
+  // If a mutation wins the session-row lock, logout must wait until the whole
+  // business/audit/idempotency transaction completes. The test uses only this
+  // disposable PostgreSQL database and a bounded lock_timeout.
+  const mutationFirstSession = await makeLiveSession("mutation-first-race");
+  const mutationFirstKey = "runtime-proof-mutation-first-001";
+  const mutationFirstClient = await runtimePool.connect();
+  const logoutWaitingClient = await pool.connect();
+  try {
+    await mutationFirstClient.query("BEGIN");
+    const reserved = await mutationFirstClient.query(reserveSql, reserveArgs(
+      mutationFirstSession, userId, mutationFirstKey,
+      makeReserveProof(mutationFirstSession, userId, mutationFirstKey)
+    ));
+    assert.equal(reserved.rows[0].inserted, true);
+    await logoutWaitingClient.query("BEGIN");
+    await logoutWaitingClient.query("SET LOCAL lock_timeout = '150ms'");
+    await assert.rejects(
+      logoutWaitingClient.query("UPDATE auth_sessions SET revoked_at=clock_timestamp() WHERE id=$1", [mutationFirstSession]),
+      error => error.code === "55P03",
+      "logout must block while the mutation owns the session lock"
+    );
+    await logoutWaitingClient.query("ROLLBACK");
+    const completedRace = await mutationFirstClient.query(completeSql, [
+      mutationFirstSession, userId, officeId, mutationFirstKey, "case", "POST",
+      proofFingerprint, caseId, 201,
+      makeCompleteProof(mutationFirstSession, userId, mutationFirstKey, caseId, 201)
+    ]);
+    assert.equal(completedRace.rows[0].completed, true);
+    await mutationFirstClient.query("COMMIT");
+    await pool.query("UPDATE auth_sessions SET revoked_at=clock_timestamp() WHERE id=$1", [mutationFirstSession]);
+    await assert.rejects(
+      runtimePool.query(reserveSql, reserveArgs(
+        mutationFirstSession, userId, "runtime-proof-after-logout-001",
+        makeReserveProof(mutationFirstSession, userId, "runtime-proof-after-logout-001")
+      )),
+      error => error.code === "28000",
+      "a mutation after committed logout must fail"
+    );
+  } finally {
+    await mutationFirstClient.query("ROLLBACK").catch(() => {});
+    await logoutWaitingClient.query("ROLLBACK").catch(() => {});
+    mutationFirstClient.release();
+    logoutWaitingClient.release();
+  }
+  console.log("PASS: logout cannot revoke a session mid-mutation; after logout commits, new reservations are rejected");
+
+  // If logout acquires the session row first, a concurrent reservation must
+  // wait, observe the committed revocation, and fail rather than sneak through.
+  const logoutFirstSession = await makeLiveSession("logout-first-race");
+  const logoutFirstClient = await pool.connect();
+  const mutationWaitingClient = await runtimePool.connect();
+  try {
+    await logoutFirstClient.query("BEGIN");
+    await logoutFirstClient.query("UPDATE auth_sessions SET revoked_at=clock_timestamp() WHERE id=$1", [logoutFirstSession]);
+    await mutationWaitingClient.query("BEGIN");
+    await mutationWaitingClient.query("SET LOCAL lock_timeout = '3s'");
+    let reserveSettled = false;
+    const waitingReservation = mutationWaitingClient.query(reserveSql, reserveArgs(
+      logoutFirstSession, userId, "runtime-proof-logout-first-001",
+      makeReserveProof(logoutFirstSession, userId, "runtime-proof-logout-first-001")
+    )).then(
+      value => { reserveSettled = true; return { value }; },
+      error => { reserveSettled = true; return { error }; }
+    );
+    await delay(100);
+    assert.equal(reserveSettled, false, "reservation should wait for the in-flight logout row lock");
+    await logoutFirstClient.query("COMMIT");
+    const reserveOutcome = await waitingReservation;
+    assert.equal(reserveOutcome.error?.code, "28000", "reservation must reject after logout commits");
+    await mutationWaitingClient.query("ROLLBACK");
+  } finally {
+    await logoutFirstClient.query("ROLLBACK").catch(() => {});
+    await mutationWaitingClient.query("ROLLBACK").catch(() => {});
+    logoutFirstClient.release();
+    mutationWaitingClient.release();
+  }
+  console.log("PASS: logout-first race serializes; waiting reservation observes revocation and fails");
+
+  // Two different keys for one actor must acquire session/user locks in the
+  // same order and serialize without deadlock.
+  const lockOrderSession = await makeLiveSession("lock-order-race");
+  const lockOrderClientA = await runtimePool.connect();
+  const lockOrderClientB = await runtimePool.connect();
+  try {
+    await lockOrderClientA.query("BEGIN");
+    const keyA = "runtime-proof-lock-order-a1";
+    const keyB = "runtime-proof-lock-order-b1";
+    const firstLock = await lockOrderClientA.query(reserveSql, reserveArgs(
+      lockOrderSession, userId, keyA, makeReserveProof(lockOrderSession, userId, keyA)
+    ));
+    assert.equal(firstLock.rows[0].inserted, true);
+    await lockOrderClientB.query("BEGIN");
+    await lockOrderClientB.query("SET LOCAL lock_timeout = '3s'");
+    let secondSettled = false;
+    const secondLockPromise = lockOrderClientB.query(reserveSql, reserveArgs(
+      lockOrderSession, userId, keyB, makeReserveProof(lockOrderSession, userId, keyB)
+    )).then(
+      value => { secondSettled = true; return { value }; },
+      error => { secondSettled = true; return { error }; }
+    );
+    await delay(100);
+    assert.equal(secondSettled, false, "second mutation should serialize behind the first session lock");
+    await lockOrderClientA.query(completeSql, [
+      lockOrderSession, userId, officeId, keyA, "case", "POST", proofFingerprint, caseId, 201,
+      makeCompleteProof(lockOrderSession, userId, keyA, caseId, 201)
+    ]);
+    await lockOrderClientA.query("COMMIT");
+    const secondLock = await secondLockPromise;
+    assert.equal(secondLock.error, undefined, "second mutation must continue after first commit, without deadlock");
+    assert.equal(secondLock.value.rows[0].inserted, true);
+    await lockOrderClientB.query(completeSql, [
+      lockOrderSession, userId, officeId, keyB, "case", "POST", proofFingerprint, caseId, 201,
+      makeCompleteProof(lockOrderSession, userId, keyB, caseId, 201)
+    ]);
+    await lockOrderClientB.query("COMMIT");
+  } finally {
+    await lockOrderClientA.query("ROLLBACK").catch(() => {});
+    await lockOrderClientB.query("ROLLBACK").catch(() => {});
+    lockOrderClientA.release();
+    lockOrderClientB.release();
+  }
+  console.log("PASS: concurrent mutations for one session serialize in session-then-user lock order without deadlock");
+
   const roleState = await pool.query(`
     SELECT
       r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolinherit,
