@@ -97,6 +97,18 @@ async function waitForCompletedKey(key, expectedStatus) {
   throw new Error(`PostgreSQL did not expose committed idempotency result for ${key}`);
 }
 
+async function waitForActorAuthorizationLockWait() {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const result = await pool.query(
+      "select count(*)::int as count from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid() and wait_event_type='Lock' and query like '%lock_live_document_actor%'"
+    );
+    if (result.rows[0].count > 0) return;
+    await delay(25);
+  }
+  throw new Error("API replay did not reach the actor authorization row-lock wait");
+}
+
 async function countAudit(documentId, action) {
   const result = await pool.query(
     "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action=$3",
@@ -907,6 +919,36 @@ try {
   assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'", [ids.office, genericClientId])).rows[0].count), 1);
   console.log("PASS: generic POST COMMIT response loss replays the exact stored response with one resource, idempotency row, and audit");
 
+  // A previously completed response must not be disclosed if account deactivation
+  // commits while its same-key retry is waiting for the transactional actor lock.
+  const deactivationReplayGate = await pool.connect();
+  let deactivationReplayGateOpen = false;
+  try {
+    await deactivationReplayGate.query("begin");
+    deactivationReplayGateOpen = true;
+    await deactivationReplayGate.query("update users set is_active=false where id=$1 and office_id=$2", [ids.user, ids.office]);
+    const pendingDeactivatedReplay = request("/api/clients", {
+      method: "POST", key: genericClientKey, body: genericClientBody
+    });
+    await waitForActorAuthorizationLockWait();
+    await deactivationReplayGate.query("commit");
+    deactivationReplayGateOpen = false;
+    const deactivatedReplay = await pendingDeactivatedReplay;
+    assert.equal(deactivatedReplay.status, 401, "deactivation committed while replay waited must revoke replay authority");
+    assert.deepEqual(deactivatedReplay.body, { error: "authentication_required" },
+      "deactivated account must not receive the stored client response");
+    assert.equal((await pool.query("select count(*)::int as count from clients where id=$1 and deleted_at is null", [genericClientId])).rows[0].count, 1,
+      "denied replay must preserve exactly one committed client");
+    assert.equal((await pool.query("select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, genericClientKey])).rows[0].count, 1,
+      "denied replay must not create another idempotency row");
+    assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'", [ids.office, genericClientId])).rows[0].count), 1,
+      "denied replay must not duplicate the create audit");
+    console.log("PASS: account deactivation racing a completed-result replay returns 401 with no response disclosure or duplicate mutation/idempotency/audit");
+  } finally {
+    if (deactivationReplayGateOpen) await deactivationReplayGate.query("rollback").catch(() => {});
+    deactivationReplayGate.release();
+    await pool.query("update users set is_active=true where id=$1 and office_id=$2", [ids.user, ids.office]);
+  }
 
   // Combine the unknown-COMMIT POST outcome with logout and a fresh login.
   // The original cookie must lose replay authority, while the same owner/office
