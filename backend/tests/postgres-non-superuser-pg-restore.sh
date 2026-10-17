@@ -156,17 +156,17 @@ fingerprint() {
 WITH inventory(item) AS (
  SELECT format('CLASS|%s|%s|%s|owner=%s|acl=%s',n.nspname,c.relname,c.relkind,
    pg_get_userbyid(c.relowner),
-   coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))::text)
+   coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::\"char\" ELSE 'r'::\"char\" END,c.relowner))::text)
  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='$schema' AND c.relkind IN ('r','p','v','m','S','f','i','I','c')
  UNION ALL
  SELECT format('FUNCTION|%s|%s|%s|owner=%s|acl=%s',n.nspname,p.proname,
    pg_get_function_identity_arguments(p.oid),pg_get_userbyid(p.proowner),
-   coalesce(p.proacl,acldefault('f'::"char",p.proowner))::text)
+   coalesce(p.proacl,acldefault('f'::\"char\",p.proowner))::text)
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='$schema'
  UNION ALL
  SELECT format('SCHEMA|%s|owner=%s|acl=%s',n.nspname,pg_get_userbyid(n.nspowner),
-   (SELECT string_agg(format('%s:%s:%s:%s',a.grantee,a.privilege_type,a.is_grantable,a.grantor),',' ORDER BY a.grantee,a.privilege_type,a.is_grantable,a.grantor) FROM aclexplode(coalesce(n.nspacl,acldefault('n'::"char",n.nspowner))) a))
+   (SELECT string_agg(format('%s:%s:%s:%s',a.grantee,a.privilege_type,a.is_grantable,a.grantor),',' ORDER BY a.grantee,a.privilege_type,a.is_grantable,a.grantor) FROM aclexplode(coalesce(n.nspacl,acldefault('n'::\"char\",n.nspowner))) a))
  FROM pg_namespace n WHERE n.nspname='$schema'
  UNION ALL
  SELECT format('COLUMN|%s|%s|%s|acl=%s',n.nspname,c.relname,a.attname,a.attacl::text)
