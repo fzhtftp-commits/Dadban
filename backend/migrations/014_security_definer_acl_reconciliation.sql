@@ -41,6 +41,76 @@ BEGIN
   END LOOP;
 END
 $schema_acl_reset$;
+-- Reconcile every stale ACL on the private HMAC key table, including
+-- column-level grants and grant options left by previous deployments.
+-- Only the table owner and the non-login proof-function owner may retain
+-- access; the latter receives plain SELECT only.
+DO $hmac_key_acl_reset$
+DECLARE
+  table_owner oid;
+  grantee record;
+  column_row record;
+BEGIN
+  SELECT c.relowner INTO table_owner
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname='dadban_private'
+    AND c.relname='api_mutation_idempotency_hmac_key'
+    AND c.relkind='r';
+  IF table_owner IS NULL THEN
+    RAISE EXCEPTION 'private API idempotency HMAC key table is missing';
+  END IF;
+
+  REVOKE ALL ON TABLE dadban_private.api_mutation_idempotency_hmac_key FROM PUBLIC;
+  FOR column_row IN
+    SELECT attname FROM pg_attribute
+    WHERE attrelid='dadban_private.api_mutation_idempotency_hmac_key'::regclass
+      AND attnum > 0 AND NOT attisdropped
+  LOOP
+    EXECUTE format(
+      'REVOKE SELECT (%1$I), INSERT (%1$I), UPDATE (%1$I), REFERENCES (%1$I) ON TABLE dadban_private.api_mutation_idempotency_hmac_key FROM PUBLIC',
+      column_row.attname
+    );
+  END LOOP;
+
+  FOR grantee IN
+    SELECT DISTINCT r.rolname
+    FROM (
+      SELECT acl.grantee
+      FROM pg_class c
+      CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
+      WHERE c.oid='dadban_private.api_mutation_idempotency_hmac_key'::regclass
+      UNION
+      SELECT acl.grantee
+      FROM pg_attribute a
+      CROSS JOIN LATERAL aclexplode(a.attacl) acl
+      WHERE a.attrelid='dadban_private.api_mutation_idempotency_hmac_key'::regclass
+        AND a.attnum > 0 AND NOT a.attisdropped
+    ) grants
+    JOIN pg_roles r ON r.oid=grants.grantee
+    WHERE grants.grantee <> table_owner
+      AND r.rolname <> 'dadban_api_idempotency_owner'
+  LOOP
+    EXECUTE format(
+      'REVOKE ALL ON TABLE dadban_private.api_mutation_idempotency_hmac_key FROM %I CASCADE',
+      grantee.rolname
+    );
+    FOR column_row IN
+      SELECT attname FROM pg_attribute
+      WHERE attrelid='dadban_private.api_mutation_idempotency_hmac_key'::regclass
+        AND attnum > 0 AND NOT attisdropped
+    LOOP
+      EXECUTE format(
+        'REVOKE SELECT (%1$I), INSERT (%1$I), UPDATE (%1$I), REFERENCES (%1$I) ON TABLE dadban_private.api_mutation_idempotency_hmac_key FROM %2$I CASCADE',
+        column_row.attname, grantee.rolname
+      );
+    END LOOP;
+  END LOOP;
+
+  REVOKE ALL ON TABLE dadban_private.api_mutation_idempotency_hmac_key FROM dadban_api_idempotency_owner;
+  GRANT SELECT ON TABLE dadban_private.api_mutation_idempotency_hmac_key TO dadban_api_idempotency_owner;
+END
+$hmac_key_acl_reset$;
 REVOKE CREATE ON SCHEMA public FROM dadban_actor_lock_owner;
 REVOKE CREATE ON SCHEMA public FROM dadban_api_idempotency_owner;
 ALTER DEFAULT PRIVILEGES FOR ROLE dadban_actor_lock_owner REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
