@@ -2411,11 +2411,18 @@ try {
   assert.equal((await pool.query("select full_name from clients where id=$1", [purgeClientId])).rows[0].full_name, "Purge Test Client Updated", "purged PATCH replay must not apply a second mutation");
   assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='update'", [ids.officeA, ids.userA, purgeClientId])).rows[0].count), 1, "purged PATCH replay must not duplicate audit");
 
+  const purgeActionCreateKey = "purge-action-create-01";
+  const purgeActionCreate = await request("/api/actions", {
+    token: tokenA, csrf: csrfA, method: "POST", idempotencyKey: purgeActionCreateKey,
+    body: { case_id: ids.caseA, title: "Tombstone DELETE action", assigned_to: ids.userA }
+  });
+  assert.equal(purgeActionCreate.status, 201, "generic action fixture must be created");
+  const purgeActionId = purgeActionCreate.body.data.id;
   const purgeDeleteKey = "purge-delete-response-01";
-  const purgeDelete = await request("/api/clients/" + purgeClientId, {
+  const purgeDelete = await request("/api/actions/" + purgeActionId, {
     token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: purgeDeleteKey
   });
-  assert.equal(purgeDelete.status, 204, "keyed DELETE must preserve its empty 204 response");
+  assert.equal(purgeDelete.status, 204, "generic keyed DELETE must preserve its empty 204 response");
   const deleteStored = (await pool.query("select response_body,response_status from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.officeA, ids.userA, purgeDeleteKey])).rows[0];
   assert.deepEqual(deleteStored.response_body, {});
   assert.equal(deleteStored.response_status, 204);
@@ -2423,13 +2430,13 @@ try {
     "update api_mutation_idempotency set response_body=null,response_body_purged=true,purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3 and completed_at is not null",
     [ids.officeA, ids.userA, purgeDeleteKey]
   );
-  const purgedDeleteReplay = await request("/api/clients/" + purgeClientId, {
+  const purgedDeleteReplay = await request("/api/actions/" + purgeActionId, {
     token: tokenA, csrf: csrfA, method: "DELETE", idempotencyKey: purgeDeleteKey
   });
   assert.equal(purgedDeleteReplay.status, 410, "purged 204 DELETE replay must return a controlled 410 instead of repeating DELETE");
   assert.deepEqual(purgedDeleteReplay.body, { error: "idempotency_result_purged" });
-  assert.notEqual((await pool.query("select deleted_at from clients where id=$1", [purgeClientId])).rows[0].deleted_at, null, "purged DELETE replay must preserve the original soft delete");
-  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='client' and entity_id=$3 and action='delete'", [ids.officeA, ids.userA, purgeClientId])).rows[0].count), 1, "purged DELETE replay must not duplicate audit");
+  assert.notEqual((await pool.query("select deleted_at from case_actions where id=$1", [purgeActionId])).rows[0].deleted_at, null, "purged DELETE replay must preserve the original soft delete");
+  assert.equal(Number((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and user_id=$2 and entity_type='case_action' and entity_id=$3 and action='delete'", [ids.officeA, ids.userA, purgeActionId])).rows[0].count), 1, "purged DELETE replay must not duplicate audit");
   console.log("PASS: minimal generic idempotency response bodies and POST/PATCH/204 DELETE tombstone replay after response purge");
 
 
