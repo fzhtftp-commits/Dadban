@@ -95,6 +95,15 @@ PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$so
 if PGPASSWORD=ci-only-backup-role-password psql -h localhost -U "$backup" -d "$source_db" -X -v ON_ERROR_STOP=1 -c "SET ROLE $owner_a" >/tmp/dadban-rr-backup-set-role.log 2>&1; then
   echo "FAIL: read-only backup reader unexpectedly SET ROLE to an object owner" >&2; exit 1
 fi
+# Capture the cluster-global indirect membership graph before restore; pg_dump archives
+# database objects, not pg_auth_members, so restoration must not be mistaken for role provisioning.
+membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
+SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
+FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
+WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
+if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
+  echo "FAIL: unexpected pre-restore indirect membership graph: $membership_before" >&2; exit 1
+fi
 # This is a real pg_dump under the read-only backup identity.
 PGPASSWORD=ci-only-backup-role-password pg_dump -h localhost -U "$backup" -Fc --schema="$schema" -d "$source_db" -f "$dump"
 if [[ ! -s "$dump" ]]; then echo "FAIL: read-only backup role produced an empty dump" >&2; exit 1; fi
@@ -149,14 +158,39 @@ if [[ "$source_fp" != "$target_fp" ]]; then
 fi
 echo "PASS: real pg_dump by read-only role and pg_restore by non-superuser preserve table/view/sequence/function/schema/column ACL and ownership fingerprints"
 
+# Explicitly compare direct ACL grant-option state for both operational test roles
+# in source and restored databases; the full ACL fingerprint above also covers all grantees.
+assert_no_role_grant_option() {
+  local db="$1"
+  psql -h localhost -U "$admin" -d "$db" -X -v ON_ERROR_STOP=1 <<SQL
+DO \\$acl_guard\\$
+DECLARE backup_oid oid := (SELECT oid FROM pg_roles WHERE rolname='$backup');
+        restore_oid oid := (SELECT oid FROM pg_roles WHERE rolname='$restore');
+BEGIN
+ IF EXISTS (
+   SELECT 1 FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) a
+   JOIN pg_namespace n ON n.oid=c.relnamespace
+   WHERE n.nspname='$schema' AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
+ ) OR EXISTS (
+   SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f'::"char",p.proowner))) a
+   JOIN pg_namespace n ON n.oid=p.pronamespace
+   WHERE n.nspname='$schema' AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
+ ) THEN RAISE EXCEPTION 'backup/restore role unexpectedly has object GRANT OPTION in database %', current_database(); END IF;
+END
+\\$acl_guard\\$;
+SQL
+}
+assert_no_role_grant_option "$source_db"
+assert_no_role_grant_option "$target_db"
+
 # The role-membership graph is cluster-global (not carried by pg_dump); verify
 # the explicit indirect edges still exist and SET ROLE works after restore.
 PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$target_db" -X -v ON_ERROR_STOP=1 -c "SET ROLE $owner_a; RESET ROLE; SET ROLE $owner_b; RESET ROLE" >/dev/null
-membership="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
+membership_after="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
 WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
-if [[ "$membership" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
- echo "FAIL: indirect role membership graph changed: $membership" >&2; exit 1
+if [[ "$membership_before" != "$membership_after" ]]; then
+ echo "FAIL: indirect role membership graph changed during restore: before=$membership_before after=$membership_after" >&2; exit 1
 fi
 echo "PASS: indirect membership graph and SET ROLE validated before/after restore; backup/restore roles have no GRANT OPTION on fixture objects"
