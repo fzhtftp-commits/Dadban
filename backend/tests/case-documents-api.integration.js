@@ -1542,6 +1542,93 @@ try {
   )).rows[0].count, 1, "successful retry after lock timeout must leave one completed idempotency record");
   console.log("PASS: real PostgreSQL actor-lock wait hits lock_timeout, rolls back without audit/idempotency residue, releases locks, and a fresh write succeeds");
 
+  // A DELETE has a distinct transaction path: its idempotency reservation is
+  // created before it locks the live parent case. Force that parent lock to time
+  // out so the test proves rollback removes the reservation, tombstone, and audit
+  // event, and that the same key can succeed after the blocker is released.
+  const deleteLockTimeoutKey = "document-delete-parent-lock-timeout-01";
+  const deleteTimeoutAuditBefore = Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, timeoutId]
+  )).rows[0].count);
+  const deleteTimeoutKeyBefore = Number((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, deleteLockTimeoutKey]
+  )).rows[0].count);
+  assert.equal(deleteTimeoutKeyBefore, 0, "DELETE lock-timeout key must start unused");
+  const deleteTimeoutGate = await pool.connect();
+  let deleteTimeoutGateOpen = false;
+  let deleteTimeoutRequest;
+  try {
+    await deleteTimeoutGate.query("begin");
+    await deleteTimeoutGate.query("select id from cases where id=$1 for update", [ids.caseA]);
+    deleteTimeoutGateOpen = true;
+    deleteTimeoutRequest = request(`/api/case-documents/${timeoutId}`, {
+      token: tokenA, csrf: csrfA, method: "DELETE", portToUse: timeoutPort,
+      idempotencyKey: deleteLockTimeoutKey
+    });
+    const waitDeadline = Date.now() + 5000;
+    let observedParentLockWait = false;
+    while (Date.now() < waitDeadline) {
+      const waiting = await pool.query(`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname=current_database()
+          and wait_event_type='Lock'
+          and query ilike 'select id from public.lock_live_case_parents%'
+      `);
+      if (waiting.rows[0].count > 0) {
+        observedParentLockWait = true;
+        break;
+      }
+      await delay(10);
+    }
+    assert.equal(observedParentLockWait, true,
+      "DELETE must be observed waiting on the actual PostgreSQL live-parent lock helper");
+    const response = await deleteTimeoutRequest;
+    assert.equal(response.status, 503, "parent lock_timeout during DELETE must return retryable 503");
+    assert.deepEqual(response.body, { error: "database_retryable" },
+      "DELETE lock_timeout response must be sanitized and distinct from audit INSERT failure");
+  } finally {
+    if (deleteTimeoutGateOpen) await deleteTimeoutGate.query("rollback").catch(() => {});
+    deleteTimeoutGate.release();
+    if (deleteTimeoutRequest) await deleteTimeoutRequest.catch(() => {});
+  }
+  assert.equal((await pool.query("select deleted_at from case_documents where id=$1", [timeoutId])).rows[0].deleted_at,
+    null, "DELETE parent lock_timeout must leave the document tombstone unchanged");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, timeoutId]
+  )).rows[0].count), deleteTimeoutAuditBefore,
+  "DELETE parent lock_timeout must preserve the exact complete document audit-row count");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.officeA, ids.userA, deleteLockTimeoutKey]
+  )).rows[0].count), 0,
+  "DELETE parent lock_timeout must roll back its earlier idempotency reservation");
+  const deleteAfterLockRelease = await request(`/api/case-documents/${timeoutId}`, {
+    token: tokenA, csrf: csrfA, method: "DELETE", portToUse: timeoutPort,
+    idempotencyKey: deleteLockTimeoutKey
+  });
+  assert.equal(deleteAfterLockRelease.status, 204,
+    "the same DELETE idempotency key must succeed after the parent lock is released");
+  assert.ok((await pool.query("select deleted_at from case_documents where id=$1", [timeoutId])).rows[0].deleted_at,
+    "recovered DELETE must commit the document tombstone");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 and response_status=204",
+    [ids.officeA, ids.userA, deleteLockTimeoutKey]
+  )).rows[0].count), 1, "recovered DELETE must persist exactly one completed idempotency record");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action='delete'",
+    [ids.officeA, timeoutId]
+  )).rows[0].count), 1, "only the recovered DELETE may append one delete audit event");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2",
+    [ids.officeA, timeoutId]
+  )).rows[0].count), deleteTimeoutAuditBefore + 1,
+  "recovered DELETE must append exactly one row to the pre-timeout document audit history");
+  console.log("PASS: document DELETE parent lock_timeout rolls back tombstone, idempotency, and audit; same-key retry commits exactly once");
+
   // The general CRUD handlers used to issue a raw ROLLBACK and classify the
   // resulting 55P03 as a generic 500. Exercise the real /api/clients write path
   // under a genuine actor-row lock wait and prove confirmed rollback is retryable.
