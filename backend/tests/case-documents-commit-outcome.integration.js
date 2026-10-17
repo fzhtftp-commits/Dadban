@@ -667,8 +667,6 @@ try {
   assert.equal((await pool.query("select deleted_at from cases where id=$1 and office_id=$2", [ids.case, ids.office])).rows[0].deleted_at, null, "missing case key must not soft-delete");
   assert.equal(await countEntityAudit("case", ids.case, "delete"), 0, "missing case key must not emit audit");
   assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, caseKey])).rows[0].count, 0, "missing case key must not reserve idempotency record");
-  armed = true;
-
   // Seed a completed document PATCH before soft-deleting its parent case.
   const parentDeletedReplayId = await makeDocument("Replay must be hidden after parent case soft-delete");
   const parentDeletedReplayKey = "parent-delete-patch-replay-01";
@@ -677,6 +675,8 @@ try {
   });
   assert.equal(parentDeletedReplayFirst.status, 200);
   assert.equal(await countAudit(parentDeletedReplayId, "update"), 1);
+
+  armed = true;
 
   const firstCaseDelete = await request(`/api/cases/${ids.case}`, {
     method: "DELETE", key: caseKey
