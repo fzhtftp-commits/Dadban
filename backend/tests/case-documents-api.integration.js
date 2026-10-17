@@ -98,6 +98,7 @@ try {
     drop function if exists public.lock_live_case_reassignment(uuid,uuid,uuid) cascade;
     drop function if exists public.prevent_case_document_idempotency_delete() cascade;
     drop function if exists public.prevent_case_document_idempotency_reopen() cascade;
+    drop function if exists public.guard_api_mutation_idempotency_identity() cascade;
     drop table if exists api_mutation_idempotency cascade;
     drop table if exists case_document_mutation_idempotency cascade;
     drop table if exists case_documents cascade;
