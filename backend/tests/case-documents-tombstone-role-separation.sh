@@ -41,6 +41,80 @@ REVOKE ALL ON public.case_document_mutation_idempotency FROM dadban_maintenance_
 GRANT SELECT ON public.case_document_mutation_idempotency TO dadban_maintenance_ci;
 SQL
 
+# Role membership options are part of the security contract, not merely role names.
+# PostgreSQL 16 exposes admin_option, inherit_option, and set_option independently.
+psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 <<'SQL'
+DO $membership_contract$
+DECLARE edge record;
+BEGIN
+  FOR edge IN
+    SELECT * FROM (VALUES
+      ('dadban_schema_owner_ci','dadban_schema_owner_alt_ci'),
+      ('dadban_migrator_ci','dadban_schema_owner_ci'),
+      ('dadban_migrator_ci','dadban_schema_owner_alt_ci')
+    ) AS expected(member_name, granted_name)
+  LOOP
+    IF NOT EXISTS (
+      SELECT 1
+      FROM pg_auth_members m
+      JOIN pg_roles member ON member.oid=m.member
+      JOIN pg_roles granted ON granted.oid=m.roleid
+      WHERE member.rolname=edge.member_name
+        AND granted.rolname=edge.granted_name
+        AND m.admin_option IS FALSE
+        AND m.inherit_option IS TRUE
+        AND m.set_option IS TRUE
+    ) THEN
+      RAISE EXCEPTION 'unexpected or missing role membership options for % -> % (require admin_option=false, inherit_option=true, set_option=true)',
+        edge.member_name, edge.granted_name;
+    END IF;
+  END LOOP;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_auth_members m
+    JOIN pg_roles member ON member.oid=m.member
+    JOIN pg_roles granted ON granted.oid=m.roleid
+    WHERE (member.rolname, granted.rolname) IN (
+      ('dadban_maintenance_ci','dadban_schema_owner_ci'),
+      ('dadban_maintenance_ci','dadban_schema_owner_alt_ci'),
+      ('dadban_maintenance_ci','dadban_migrator_ci'),
+      ('dadban_document_runtime_ci','dadban_schema_owner_ci'),
+      ('dadban_document_runtime_ci','dadban_schema_owner_alt_ci'),
+      ('dadban_document_runtime_ci','dadban_migrator_ci')
+    )
+  ) THEN
+    RAISE EXCEPTION 'maintenance/runtime unexpectedly belongs to schema-owner or migrator role';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+    WHERE c.oid='public.case_document_mutation_idempotency'::regclass
+      AND a.grantee IN (
+        (SELECT oid FROM pg_roles WHERE rolname='dadban_maintenance_ci'),
+        (SELECT oid FROM pg_roles WHERE rolname='dadban_document_runtime_ci')
+      )
+      AND a.is_grantable
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_attribute ca
+    CROSS JOIN LATERAL aclexplode(ca.attacl) a
+    WHERE ca.attrelid='public.case_document_mutation_idempotency'::regclass
+      AND ca.attnum>0 AND NOT ca.attisdropped AND ca.attacl IS NOT NULL
+      AND a.grantee IN (
+        (SELECT oid FROM pg_roles WHERE rolname='dadban_maintenance_ci'),
+        (SELECT oid FROM pg_roles WHERE rolname='dadban_document_runtime_ci')
+      )
+      AND a.is_grantable
+  ) THEN
+    RAISE EXCEPTION 'maintenance/runtime unexpectedly has table or column GRANT OPTION';
+  END IF;
+END
+$membership_contract$;
+SQL
+
 # Migration role is explicitly elevated via membership in the schema-owner roles.
 # Verify it can alter trigger state and table ownership, but rollback both changes.
 psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 <<'SQL'
