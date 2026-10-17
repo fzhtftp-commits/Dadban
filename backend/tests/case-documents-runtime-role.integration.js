@@ -252,6 +252,34 @@ try {
         await pool.query(`REVOKE dadban_actor_lock_owner FROM ${probeRole}`).catch(() => {});
         await pool.query(`DROP ROLE IF EXISTS ${probeRole}`);
       }
+
+      // Membership drift can happen after migration 008; 009 must re-check it
+      // before granting the reassignment helper, not rely on the earlier guard.
+      const runtimeProbe = "dadban_case_reassign_runtime_membership_probe_ci";
+      const runtimePreflight = await pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [runtimeProbe]);
+      assert.equal(runtimePreflight.rowCount, 0, "refusing to reuse pre-existing migration-009 runtime membership probe role");
+      await pool.query(`CREATE ROLE ${runtimeProbe} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`);
+      let runtimeMigrationClient;
+      try {
+        await pool.query(`GRANT ${runtimeProbe} TO dadban_document_runtime_ci`);
+        runtimeMigrationClient = await pool.connect();
+        let rejected = false;
+        try {
+          await runtimeMigrationClient.query(migrationSql);
+        } catch (error) {
+          rejected = /runtime role dadban_document_runtime_ci must not participate in role memberships/.test(error.message);
+          await runtimeMigrationClient.query("ROLLBACK").catch(() => {});
+          if (!rejected) throw error;
+        }
+        assert.equal(rejected, true, "migration 009 must reject runtime membership drift after migration 008");
+        const absent = await pool.query("SELECT to_regprocedure('public.lock_live_case_reassignment(uuid,uuid,uuid)') AS fn");
+        assert.equal(absent.rows[0].fn, null, "failed migration 009 must not leave reassignment helper behind");
+        console.log("PASS: migration 009 rejects runtime membership drift and rolls back function creation");
+      } finally {
+        runtimeMigrationClient?.release();
+        await pool.query(`REVOKE ${runtimeProbe} FROM dadban_document_runtime_ci`).catch(() => {});
+        await pool.query(`DROP ROLE IF EXISTS ${runtimeProbe}`);
+      }
     }
     await pool.query(migrationSql);
   }
