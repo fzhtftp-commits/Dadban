@@ -1275,6 +1275,48 @@ try {
   )).rows[0].count, 1, "restore synthetic API session for downstream backup/restore integration fixture");
   console.log("PASS: unknown-outcome logout/re-login assertions completed; disposable synthetic session restored for downstream backup/restore test");
 
+  // Generic API response-retention boundary: purging a completed result must
+  // preserve its key identity and return 410, never reopen the POST or duplicate
+  // the committed client/audit when a retry arrives after retention.
+  const purgedGenericBefore = await pool.query(
+    "select resource_type, operation, request_fingerprint, resource_id, response_status, response_body, response_body_purged, purged_at from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3 for update",
+    [ids.office, ids.user, genericClientKey]
+  );
+  assert.equal(purgedGenericBefore.rowCount, 1, "completed generic POST must have one durable idempotency identity before purge");
+  assert.equal(purgedGenericBefore.rows[0].resource_type, "client");
+  assert.equal(purgedGenericBefore.rows[0].operation, "POST");
+  assert.equal(purgedGenericBefore.rows[0].response_body_purged, false);
+  await pool.query(
+    "update api_mutation_idempotency set response_body=null, response_body_purged=true, purged_at=clock_timestamp() where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, genericClientKey]
+  );
+  const genericReplayAfterPurge = await request("/api/clients", {
+    method: "POST", key: genericClientKey, body: genericClientBody,
+    sessionToken: freshOwnerAfterUnknownCommit.token,
+    csrfToken: freshOwnerAfterUnknownCommit.csrf
+  });
+  assert.equal(genericReplayAfterPurge.status, 410, "purged generic response must fail closed instead of rerunning the POST");
+  assert.deepEqual(genericReplayAfterPurge.body, { error: "idempotency_result_purged" });
+  const purgedGenericAfter = await pool.query(
+    "select resource_type, operation, resource_id, response_status, response_body, response_body_purged, purged_at from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, genericClientKey]
+  );
+  assert.equal(purgedGenericAfter.rowCount, 1, "purge replay must preserve exactly one durable key identity");
+  assert.equal(purgedGenericAfter.rows[0].resource_id, genericClientId);
+  assert.equal(purgedGenericAfter.rows[0].response_status, 201);
+  assert.equal(purgedGenericAfter.rows[0].response_body, null);
+  assert.equal(purgedGenericAfter.rows[0].response_body_purged, true);
+  assert.ok(purgedGenericAfter.rows[0].purged_at instanceof Date);
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from clients where id=$1 and office_id=$2 and deleted_at is null",
+    [genericClientId, ids.office]
+  )).rows[0].count), 1, "purged replay must preserve exactly one committed client");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from audit_logs where office_id=$1 and entity_type='client' and entity_id=$2 and action='create'",
+    [ids.office, genericClientId]
+  )).rows[0].count), 1, "purged replay must preserve exactly one create audit");
+  console.log("PASS: generic API replay after response purge returns 410; PostgreSQL retains one tombstone, one client mutation, and one create audit");
+
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE and generic client POST");
 } catch (error) {
   console.error(error);
