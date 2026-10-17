@@ -37,6 +37,10 @@ SQL
 }
 trap cleanup EXIT
 
+# The baseline migration-upgrade test does not install proof functions; establish
+# the current migration state before seeding stale grants for the rerun regression.
+psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test -f migrations/013_api_mutation_idempotency_proof_functions.sql
+
 psql -h localhost -U postgres -X -v ON_ERROR_STOP=1 -d dadban_test <<'SQL'
 CREATE ROLE dadban_api_idempotency_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 GRANT EXECUTE ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO dadban_api_idempotency_acl_probe_ci;
