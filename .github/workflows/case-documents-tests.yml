@@ -186,6 +186,14 @@ jobs:
         run: node tests/case-documents-commit-outcome.integration.js
         working-directory: backend
 
+      - name: Verify real pg_dump and pg_restore with non-superuser role separation
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGDATABASE: dadban_test
+        run: bash tests/postgres-non-superuser-pg-restore.sh
+        working-directory: backend
+
       - name: Verify PostgreSQL tombstone backup/restore and post-restore migration safety
         env:
           PGPASSWORD: postgres
