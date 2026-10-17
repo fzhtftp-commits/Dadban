@@ -38,6 +38,7 @@ const pool = new Pool({ connectionString: databaseUrl, ssl: false, max: 4 });
 const runtimePool = new Pool({ connectionString: apiDatabaseUrl, ssl: false, max: 2 });
 let server;
 let output = "";
+let testRoleCleanupAuthorized = false;
 
 async function waitHealthy() {
   for (let i = 0; i < 80; i++) {
@@ -94,6 +95,9 @@ try {
     assert.equal(initialByName.has(roleName), false,
       `Refusing to reuse pre-existing test-only PostgreSQL role: ${roleName}`);
   }
+  // Destructive cleanup is allowed only after proving these names were absent
+  // before this test. If the preflight fails, finally must not drop anything.
+  testRoleCleanupAuthorized = true;
 
   await pool.query(`
     DROP FUNCTION IF EXISTS public.lock_live_document_actor(uuid,uuid,uuid) CASCADE;
@@ -1079,10 +1083,9 @@ try {
     server.kill("SIGTERM");
     await new Promise(resolve => server.once("exit", resolve));
   }
-  // These owner/migrator roles are cluster-wide PostgreSQL objects, unlike
-  // the disposable database. Restore ownership, revoke membership/grants,
-  // and drop the test-only roles before the workflow drops the test database.
-  try {
+  // These roles are cluster-wide objects. Destructive cleanup is gated
+  // by the preflight proving the test-only role names were initially absent.
+  if (testRoleCleanupAuthorized) try {
     await pool.query(`
       DO $cleanup$
       BEGIN
