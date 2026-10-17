@@ -544,6 +544,60 @@ try {
   assert.equal(await countEntityAudit("case", ids.case, "delete"), 1, "cross-resource key reuse must not duplicate case audit");
   assert.equal(await countEntityAudit("client", clientId, "delete"), 1, "cross-resource key reuse must not duplicate client audit");
   assert.equal((await pool.query("select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key in ($3,$4)", [ids.office, ids.user, caseKey, clientKey])).rows[0].count, 2, "cross-resource key reuse must not create another idempotency row");
+  // Concurrent same-key deletes must serialize on the unique idempotency row.
+  // Both callers receive the same durable result, while the mutation and audit occur once.
+  const raceClientId = crypto.randomUUID();
+  const raceCaseId = crypto.randomUUID();
+  const raceNationalId = "9" + String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, "0");
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Concurrent delete client',$3,$4,$4)",
+    [raceClientId, ids.office, raceNationalId, ids.user]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Concurrent delete case',$5,$5)",
+    [raceCaseId, ids.office, raceClientId, "RACE-" + crypto.randomUUID(), ids.user]
+  );
+  const concurrentKey = "concurrent-delete-" + crypto.randomUUID();
+  const concurrentResults = await Promise.all([
+    request(`/api/clients/${raceClientId}`, { method: "DELETE", key: concurrentKey }),
+    request(`/api/clients/${raceClientId}`, { method: "DELETE", key: concurrentKey })
+  ]);
+  assert.deepEqual(concurrentResults.map(result => result.status).sort(), [204, 204],
+    "concurrent same-key DELETE callers must both observe successful replay");
+  await waitForCompletedKey(concurrentKey, 204);
+  assert.ok((await pool.query("select deleted_at from clients where id=$1 and office_id=$2", [raceClientId, ids.office])).rows[0].deleted_at);
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, concurrentKey]
+  )).rows[0].count, 1, "concurrent same-key requests must reserve one operation identity");
+  assert.equal(await countEntityAudit("client", raceClientId, "delete"), 1,
+    "concurrent same-key requests must append one audit event");
+  console.log("PASS: concurrent same-key client DELETE returns 204 to both callers with one idempotency row and one audit event");
+
+  // A retry after session expiry must not mutate without authentication; once the
+  // same user has a live session again, the persisted key must still replay 204.
+  const sessionRetryKey = "session-expiry-delete-" + crypto.randomUUID();
+  const sessionRetryFirst = await request(`/api/cases/${raceCaseId}`, { method: "DELETE", key: sessionRetryKey });
+  assert.equal(sessionRetryFirst.status, 204, "case delete should complete before expiry test");
+  await pool.query(
+    "update auth_sessions set expires_at=now()-interval '1 minute' where token_hash=$1 and user_id=$2 and office_id=$3",
+    [hash(token), ids.user, ids.office]
+  );
+  const expiredRetry = await request(`/api/cases/${raceCaseId}`, { method: "DELETE", key: sessionRetryKey });
+  assert.equal(expiredRetry.status, 401, "expired session must be rejected before idempotency replay");
+  await pool.query(
+    "update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
+    [hash(token), ids.user, ids.office]
+  );
+  const restoredSessionRetry = await request(`/api/cases/${raceCaseId}`, { method: "DELETE", key: sessionRetryKey });
+  assert.equal(restoredSessionRetry.status, 204, "same key must replay after session is restored");
+  assert.equal((await pool.query(
+    "select count(*)::int as count from case_document_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, sessionRetryKey]
+  )).rows[0].count, 1, "session expiry must not erase the durable operation identity");
+  assert.equal(await countEntityAudit("case", raceCaseId, "delete"), 1, "session-expiry retry must not duplicate audit");
+  console.log("PASS: expired session gets 401; after same-user reauthentication, same-key replay returns 204 without duplicate audit");
+
   console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; missing_key=428; cross_resource_key_reuse=409; case/client soft-delete replay is exact-once");
 
   console.log("PASS: PostgreSQL COMMIT response loss leaves unknown outcome, durable same-key replay, and exactly one mutation/audit row for document PATCH/DELETE plus case/client DELETE");
