@@ -166,6 +166,7 @@ RETURNS TABLE (
   response_status smallint,
   response_body jsonb,
   response_body_purged boolean,
+  purged_at timestamptz,
   completed_at timestamptz
 )
 LANGUAGE plpgsql
@@ -225,7 +226,7 @@ BEGIN
 
   RETURN QUERY
   SELECT r.resource_type::text, r.operation::text, r.request_fingerprint::text, r.resource_id,
-         r.response_status, r.response_body, r.response_body_purged, r.completed_at
+         r.response_status, r.response_body, r.response_body_purged, r.purged_at, r.completed_at
   FROM public.api_mutation_idempotency r
   WHERE r.office_id = p_office_id
     AND r.user_id = p_user_id
