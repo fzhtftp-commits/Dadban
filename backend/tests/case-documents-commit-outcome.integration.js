@@ -420,7 +420,7 @@ try {
     [ids.office, assistantId, assistantKey])).rows[0].count, 1, "denied confidentiality replay must retain one assistant idempotency row");
   assert.equal(await countAudit(confidentialityReplayId, "update"), 2,
     "assistant PATCH and owner confidentiality change must produce exactly two audit rows");
-  console.log("PASS: confidentiality downgrade from confidential to restricted denies completed assistant replay with 403 and no duplicate mutation/key/audit");
+  console.log("PASS: confidentiality downgrade from confidential to restricted denies completed assistant replay with concealed 404 and no duplicate mutation/key/audit");
 
   // A client soft-delete is also a parent-access revocation for child documents.
   const deletedClientId = crypto.randomUUID();
