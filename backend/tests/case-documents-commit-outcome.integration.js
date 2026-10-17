@@ -24,6 +24,7 @@ const ids = {
   case: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa02"
 };
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
+const proofSecret = "c".repeat(64);
 const pool = new Pool({ connectionString: databaseUrl, ssl: false, max: 4 });
 
 let armed = false;
@@ -113,6 +114,8 @@ async function countEntityAudit(entityType, entityId, action) {
 }
 
 try {
+  await pool.query("UPDATE dadban_private.api_mutation_idempotency_hmac_key SET secret=decode($1, 'hex') WHERE singleton=true", [proofSecret]);
+
   // A TCP proxy drops the PostgreSQL response only after forwarding COMMIT to the
   // disposable PostgreSQL service. The application must treat the result as unknown,
   // discard the broken connection, and resolve it through the durable same-key retry.
@@ -240,6 +243,7 @@ try {
       NODE_ENV: "test",
       DATABASE_URL: proxyUrl,
       CORS_ORIGIN: origin,
+      API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret,
       RATE_LIMIT_MODE: "memory"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -359,6 +363,7 @@ try {
       NODE_ENV: "test",
       DATABASE_URL: proxyUrl,
       CORS_ORIGIN: origin,
+      API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret,
       RATE_LIMIT_MODE: "memory"
     },
     stdio: ["ignore", "pipe", "pipe"]
