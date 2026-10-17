@@ -231,6 +231,8 @@ try {
   assert.equal(role.can_complete_api_idem, true, "runtime must complete a pending generic idempotency row");
   assert.equal(role.can_select_api_purged_flag, true, "runtime may read the tombstone marker for replay decisions");
   assert.equal(role.can_select_api_purged_at, true, "runtime may read the purge timestamp for replay decisions");
+  const alternateRuntimePrivileges = await pool.query("SELECT has_table_privilege($1,'public.api_mutation_idempotency','SELECT') AS can_select, has_table_privilege($1,'public.api_mutation_idempotency','INSERT') AS can_insert, has_table_privilege($1,'public.api_mutation_idempotency','UPDATE') AS can_update, has_table_privilege($1,'public.api_mutation_idempotency','DELETE') AS can_delete, has_table_privilege($1,'public.api_mutation_idempotency','TRUNCATE') AS can_truncate", ["dadban_document_runtime_alt_ci"]);
+  assert.deepEqual(alternateRuntimePrivileges.rows[0], { can_select:false, can_insert:false, can_update:false, can_delete:false, can_truncate:false }, "a differently named runtime role must fail closed until explicitly granted equivalent privileges");
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
   assert.deepEqual(runtimeIdentity.rows[0], { role:"dadban_document_runtime_ci", rolsuper:false, rolcreatedb:false, rolcreaterole:false });
   assert.equal(role.can_update_full_name, false, "runtime must not have UPDATE(full_name); row locking is delegated to the SECURITY DEFINER helper");
