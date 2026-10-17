@@ -7,6 +7,7 @@
 \ir ../migrations/005_shared_rate_limits.sql
 \ir ../migrations/006_case_document_mutation_idempotency.sql
 \ir ../migrations/007_case_document_mutation_tombstones.sql
+\ir ../migrations/010_api_mutation_idempotency.sql
 
 DO $catalog$
 DECLARE cols text[]; status_check text; constraint_names text[];
@@ -323,3 +324,36 @@ BEGIN
   ) THEN RAISE EXCEPTION 'Mutation idempotency office/user FK missing'; END IF;
 END
 $mutation_idempotency_catalog$;
+
+
+DO $api_mutation_idempotency_catalog$
+DECLARE cols text[]; pk_cols text[]; fk_count integer;
+BEGIN
+  SELECT array_agg(a.attname::text ORDER BY a.attnum) INTO cols
+  FROM pg_attribute a
+  WHERE a.attrelid='public.api_mutation_idempotency'::regclass
+    AND a.attnum>0 AND NOT a.attisdropped;
+  IF cols IS DISTINCT FROM ARRAY[
+    'office_id','user_id','idempotency_key','resource_type','operation',
+    'request_fingerprint','resource_id','response_status','response_body',
+    'completed_at','created_at'
+  ]::text[] THEN
+    RAISE EXCEPTION 'Unexpected generic API idempotency columns: %', cols;
+  END IF;
+  SELECT array_agg(a.attname::text ORDER BY k.ordinality) INTO pk_cols
+  FROM pg_constraint c
+  CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ordinality)
+  JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum
+  WHERE c.conrelid='public.api_mutation_idempotency'::regclass AND c.contype='p';
+  IF pk_cols IS DISTINCT FROM ARRAY['office_id','user_id','idempotency_key']::text[] THEN
+    RAISE EXCEPTION 'Unexpected generic idempotency key scope: %', pk_cols;
+  END IF;
+  SELECT count(*)::int INTO fk_count FROM pg_constraint
+  WHERE conrelid='public.api_mutation_idempotency'::regclass AND contype='f' AND convalidated;
+  IF fk_count <> 1 THEN RAISE EXCEPTION 'Expected validated same-office user FK, found %', fk_count; END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conrelid='public.api_mutation_idempotency'::regclass
+      AND conname='api_mutation_idempotency_response_state_check' AND contype='c'
+  ) THEN RAISE EXCEPTION 'Missing atomic response completion state check'; END IF;
+END
+$api_mutation_idempotency_catalog$;
