@@ -222,7 +222,7 @@ try {
   }));
   const ownerPasswordHash = `scrypt$16384$8$1${ownerSalt.toString("base64url")}${ownerDerived.toString("base64url")}`;
   await pool.query("update users set email=$1 where id=$2 and office_id=$3", [ownerEmail, ids.user, ids.office]);
-  await pool.query("update auth_credentials set password_hash=$1 where user_id=$2", [ownerPasswordHash, ids.user]);
+  await pool.query("insert into auth_credentials(user_id,password_hash) values($2,$1) on conflict (user_id) do update set password_hash=excluded.password_hash", [ownerPasswordHash, ids.user]);
   await pool.query("update auth_sessions set expires_at=now()+interval '1 hour', revoked_at=null where token_hash=$1 and user_id=$2 and office_id=$3",
     [hash(token), ids.user, ids.office]);
   const sessionCheck = await pool.query(
