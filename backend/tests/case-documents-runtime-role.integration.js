@@ -201,6 +201,8 @@ try {
   await denied("INSERT INTO public.api_mutation_idempotency(office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint) VALUES('cccccccc-cccc-4ccc-8ccc-cccccccccccc','cccccccc-cccc-4ccc-8ccc-cccccccccc01','direct-runtime-0001','case','POST','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')", "direct API idempotency reservation INSERT");
   await denied("UPDATE public.api_mutation_idempotency SET resource_id='cccccccc-cccc-4ccc-8ccc-cccccccccc02',response_status=201,response_body='{}'::jsonb,completed_at=now()", "direct API idempotency completion UPDATE");
   await denied("SELECT * FROM public.api_mutation_idempotency", "direct API idempotency table read");
+  await denied("UPDATE public.case_documents SET office_id='cccccccc-cccc-4ccc-8ccc-cccccccccccc'::uuid WHERE false", "direct document office ownership reassignment");
+  await denied("UPDATE public.case_documents SET case_id='cccccccc-cccc-4ccc-8ccc-cccccccccc02'::uuid WHERE false", "direct document parent-case reassignment");
 
   const validKey = "runtime-proof-valid-001";
   const validReservation = await runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, validKey, makeReserveProof(liveSessionId, userId, validKey)));
@@ -728,6 +730,8 @@ try {
       has_table_privilege('dadban_document_runtime_ci','public.cases','UPDATE') AS can_update_cases,
       has_column_privilege('dadban_document_runtime_ci','public.clients','deleted_at','UPDATE') AS can_update_client_deleted,
       has_column_privilege('dadban_document_runtime_ci','public.cases','deleted_at','UPDATE') AS can_update_case_deleted,
+      has_column_privilege('dadban_document_runtime_ci','public.case_documents','office_id','UPDATE') AS can_update_document_office,
+      has_column_privilege('dadban_document_runtime_ci','public.case_documents','case_id','UPDATE') AS can_update_document_case,
       has_function_privilege('dadban_document_runtime_ci','public.lock_live_client_parent(uuid,uuid)','EXECUTE') AS can_lock_client,
       has_function_privilege('dadban_document_runtime_ci','public.lock_live_case_client(uuid,uuid)','EXECUTE') AS can_lock_case_client,
       has_function_privilege('dadban_document_runtime_ci','public.lock_live_case_parents(uuid,uuid[])','EXECUTE') AS can_lock_cases,
@@ -755,7 +759,7 @@ try {
     FROM pg_roles r WHERE r.rolname='dadban_document_runtime_ci'
   `);
   const role = roleState.rows[0];
-  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_update_full_name","can_update_user_role","can_update_user_active","can_update_user_deleted","can_update_clients","can_update_cases","can_update_client_deleted","can_update_case_deleted","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at","can_update_api_idem_table","can_delete_api_idem","can_truncate_api_idem","can_manage_api_idem_triggers","can_update_api_purged_flag","can_update_api_purged_at"]) {
+  for (const attr of ["rolsuper","rolcreatedb","rolcreaterole","rolinherit","member_schema_owner","member_migrator","can_update_users","can_update_full_name","can_update_user_role","can_update_user_active","can_update_user_deleted","can_update_clients","can_update_cases","can_update_client_deleted","can_update_case_deleted","can_update_document_office","can_update_document_case","can_read_audit","can_update_audit","can_delete_audit","can_delete_idem","can_truncate_idem","can_update_purged_at","can_update_api_idem_table","can_delete_api_idem","can_truncate_api_idem","can_manage_api_idem_triggers","can_update_api_purged_flag","can_update_api_purged_at"]) {
     assert.equal(role[attr], false, `runtime role must not have ${attr}`);
   }
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
