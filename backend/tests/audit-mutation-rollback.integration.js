@@ -491,6 +491,19 @@ try {
   const clientConflict = await request("/api/clients", "POST", { ...clientCreateBody, full_name: "Conflicting Payload Client" }, { idempotencyKey: clientCreateKey });
   assert.equal(clientConflict.status, 409, "same key with a different POST payload must conflict");
   assert.equal(await countEntityAudit("client", createdClientId, "create"), 1, "conflict must not add audit");
+  const casesBeforeCrossResourceKey = Number((await pool.query(
+    "select count(*)::int as count from cases where office_id=$1 and deleted_at is null", [ids.office]
+  )).rows[0].count);
+  const crossResourceKey = await request("/api/cases", "POST",
+    { client_id: createdClientId, case_number: "GEN-IDEM-CROSS-001", title: "Must not be created" },
+    { idempotencyKey: clientCreateKey });
+  assert.equal(crossResourceKey.status, 409, "a generic idempotency key cannot be reused across resource types");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from cases where office_id=$1 and deleted_at is null", [ids.office]
+  )).rows[0].count), casesBeforeCrossResourceKey, "cross-resource key reuse must not create a case");
+  assert.equal(await countKey(clientCreateKey), 1, "cross-resource key reuse must not reserve another operation");
+  console.log("PASS: generic idempotency key reuse across client/case resource types conflicts without mutation");
+
   console.log("PASS: generic client POST replays original response, conflicts on payload mismatch, and writes one audit");
 
   const clientPatchKey = "generic-client-patch-01";
