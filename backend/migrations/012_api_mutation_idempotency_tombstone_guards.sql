@@ -91,6 +91,13 @@ BEGIN
       IF table_owner=runtime_name THEN
         RAISE EXCEPTION 'runtime role % must not own public.api_mutation_idempotency', runtime_name;
       END IF;
+      IF EXISTS (
+        SELECT 1 FROM pg_auth_members m
+        JOIN pg_roles member_role ON member_role.oid=m.member
+        WHERE member_role.rolname=runtime_name
+      ) THEN
+        RAISE EXCEPTION 'runtime role % must not be a member of another role; review effective privileges before applying restricted idempotency grants', runtime_name;
+      END IF;
       EXECUTE format('REVOKE ALL ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE SELECT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
