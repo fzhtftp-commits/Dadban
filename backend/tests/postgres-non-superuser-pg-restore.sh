@@ -182,7 +182,7 @@ if [[ "$source_fp" != "$target_fp" ]]; then
  diff -u <(printf '%s\\n' "$source_fp") <(printf '%s\\n' "$target_fp") || true
  exit 1
 fi
-echo "PASS: real pg_dump by read-only role and pg_restore by non-superuser preserve table/view/sequence/function/schema/column ACL and ownership fingerprints"
+echo "PASS: real pg_dump by read-only role and pg_restore plus non-superuser ownership reassignment preserve table/view/sequence/function/schema/column ACL and ownership fingerprints"
 
 # Explicitly compare direct ACL grant-option state for both operational test roles
 # in source and restored databases; the full ACL fingerprint above also covers all grantees.
@@ -200,6 +200,9 @@ BEGIN
  ) OR EXISTS (
    SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f'::"char",p.proowner))) a
    JOIN pg_namespace n ON n.oid=p.pronamespace
+   WHERE n.nspname='$schema' AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
+ ) OR EXISTS (
+   SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n'::\"char\",n.nspowner))) a
    WHERE n.nspname='$schema' AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
  ) THEN RAISE EXCEPTION 'backup/restore role unexpectedly has object GRANT OPTION in database %', current_database(); END IF;
 END
