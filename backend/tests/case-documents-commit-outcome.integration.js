@@ -248,10 +248,10 @@ try {
   server.stderr.on("data", chunk => { serverOutput += chunk.toString(); });
   await waitForServer(apiPort);
 
-  const makeDocument = async title => {
+  const makeDocument = async (title, caseId = ids.case) => {
     const result = await pool.query(
       "insert into case_documents(office_id,case_id,title,document_type,confidentiality,created_by,updated_by) values($1,$2,$3,'evidence','normal',$4,$4) returning id",
-      [ids.office, ids.case, title, ids.user]
+      [ids.office, caseId, title, ids.user]
     );
     return result.rows[0].id;
   };
@@ -648,7 +648,20 @@ try {
   console.log("PASS: concurrent same-key client DELETE returns 204 to both callers with one idempotency row and one audit event");
 
   // PATCH concurrency is distinct from DELETE concurrency: two identical edits race.
-  const concurrentPatchId = await makeDocument("Before concurrent PATCH");
+  // Use a dedicated live parent; the primary fixture case was soft-deleted by the
+  // earlier case DELETE idempotency scenario.
+  const concurrentPatchClientId = crypto.randomUUID();
+  const concurrentPatchCaseId = crypto.randomUUID();
+  const concurrentPatchNationalId = "7" + String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, "0");
+  await pool.query(
+    "insert into clients(id,office_id,client_type,full_name,national_id,created_by,updated_by) values($1,$2,'individual','Concurrent PATCH parent',$3,$4,$4)",
+    [concurrentPatchClientId, ids.office, concurrentPatchNationalId, ids.user]
+  );
+  await pool.query(
+    "insert into cases(id,office_id,client_id,case_number,title,created_by,updated_by) values($1,$2,$3,$4,'Concurrent PATCH case',$5,$5)",
+    [concurrentPatchCaseId, ids.office, concurrentPatchClientId, "PATCH-RACE-" + crypto.randomUUID(), ids.user]
+  );
+  const concurrentPatchId = await makeDocument("Before concurrent PATCH", concurrentPatchCaseId);
   const concurrentPatchKey = "concurrent-patch-" + crypto.randomUUID();
   const concurrentPatchPayload = { title: "Concurrent PATCH committed once" };
   const concurrentPatchResults = await Promise.all([
