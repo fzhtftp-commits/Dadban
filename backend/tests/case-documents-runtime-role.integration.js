@@ -198,6 +198,7 @@ try {
     const migrationSql = await readFile(new URL(path, import.meta.url), "utf8");
     if (path === "../migrations/014_security_definer_acl_reconciliation.sql") {
       await pool.query("CREATE ROLE dadban_actor_acl_probe_ci NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
+      await pool.query("GRANT CREATE ON SCHEMA public TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
       const aclSignatures = [
         "public.lock_live_document_actor(uuid,uuid,uuid)","public.lock_live_client_parent(uuid,uuid)",
         "public.lock_live_case_client(uuid,uuid)","public.lock_live_case_parents(uuid,uuid[])",
@@ -351,7 +352,14 @@ try {
           "SELECT count(*)::int AS n FROM pg_default_acl d JOIN pg_roles r ON r.oid=d.defaclrole CROSS JOIN LATERAL aclexplode(d.defaclacl) a " +
           "WHERE r.rolname IN ('dadban_actor_lock_owner','dadban_api_idempotency_owner') AND d.defaclobjtype='f' AND a.grantee=0 AND a.privilege_type='EXECUTE'");
         assert.equal(defaults.rows[0].n,0,"definer owners must not have PUBLIC EXECUTE default privileges");
-        console.log("PASS: migration 014 removes stale EXECUTE grants, runtime grant options, PUBLIC EXECUTE, and unsafe definer default ACLs");
+        const schemaCreate = await pool.query(
+          "SELECT has_schema_privilege($1,'public','CREATE') AS effective_create, " +
+          "EXISTS (SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a " +
+          "WHERE n.nspname='public' AND a.grantee=(SELECT oid FROM pg_roles WHERE rolname=$1) AND a.privilege_type='CREATE') AS explicit_create",
+          ["dadban_actor_acl_probe_ci"]);
+        assert.equal(schemaCreate.rows[0].effective_create,false,"unapproved role must not retain effective CREATE on public");
+        assert.equal(schemaCreate.rows[0].explicit_create,false,"stale explicit CREATE ACL must be removed from public");
+        console.log("PASS: migration 014 removes stale EXECUTE grants, runtime grant options, PUBLIC EXECUTE, unsafe definer defaults, and stale public-schema CREATE grants");
       } finally {
         await pool.query("DROP OWNED BY dadban_actor_acl_probe_ci").catch(()=>{});
         await pool.query("DROP ROLE IF EXISTS dadban_actor_acl_probe_ci");
