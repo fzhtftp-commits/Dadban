@@ -163,7 +163,7 @@ echo "PASS: real pg_dump by read-only role and pg_restore by non-superuser prese
 assert_no_role_grant_option() {
   local db="$1"
   psql -h localhost -U "$admin" -d "$db" -X -v ON_ERROR_STOP=1 <<SQL
-DO \\$acl_guard\\$
+DO \$acl_guard\$
 DECLARE backup_oid oid := (SELECT oid FROM pg_roles WHERE rolname='$backup');
         restore_oid oid := (SELECT oid FROM pg_roles WHERE rolname='$restore');
 BEGIN
@@ -177,7 +177,7 @@ BEGIN
    WHERE n.nspname='$schema' AND a.grantee IN (backup_oid,restore_oid) AND a.is_grantable
  ) THEN RAISE EXCEPTION 'backup/restore role unexpectedly has object GRANT OPTION in database %', current_database(); END IF;
 END
-\\$acl_guard\\$;
+\$acl_guard\$;
 SQL
 }
 assert_no_role_grant_option "$source_db"
