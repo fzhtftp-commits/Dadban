@@ -131,7 +131,10 @@ try {
     "../migrations/006_case_document_mutation_idempotency.sql",
     "../migrations/007_case_document_mutation_tombstones.sql",
     "../migrations/008_security_definer_document_actor_lock.sql",
-    "../migrations/009_case_reassignment_parent_locks.sql"
+    "../migrations/009_case_reassignment_parent_locks.sql",
+    "../migrations/010_api_mutation_idempotency.sql",
+    "../migrations/011_api_mutation_idempotency_tombstones.sql",
+    "../migrations/012_api_mutation_idempotency_tombstone_guards.sql"
   ]) {
     await pool.query(await readFile(new URL(path, import.meta.url), "utf8"));
   }
