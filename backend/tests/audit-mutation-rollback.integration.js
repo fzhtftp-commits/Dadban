@@ -321,6 +321,22 @@ try {
 
   for (const item of cases) await expectAuditFailure(item);
 
+  const failedGenericKey = "generic-audit-failure-01";
+  const failedGenericClientCount = await countRows("clients");
+  const failedGenericAuditCount = await countAudit("client", "create");
+  const failedGeneric = await request("/api/clients", "POST", {
+    client_type: "individual", full_name: "Must Roll Back Idempotent Client", national_id: "1234509878"
+  }, { idempotencyKey: failedGenericKey });
+  assert.equal(failedGeneric.status, 500, "generic idempotent mutation must fail when audit INSERT fails");
+  assert.equal(await countRows("clients"), failedGenericClientCount, "audit failure must roll back generic client insert");
+  assert.equal(await countAudit("client", "create"), failedGenericAuditCount, "audit failure must leave no audit row");
+  assert.equal(Number((await pool.query(
+    "select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3",
+    [ids.office, ids.user, failedGenericKey]
+  )).rows[0].count), 0, "idempotency reservation must roll back with the business mutation");
+  console.log("PASS: generic idempotency reservation, client INSERT, and audit all roll back together on audit failure");
+
+
   const registerBefore = await pool.query("select (select count(*) from offices)::int as offices, (select count(*) from users)::int as users, (select count(*) from auth_credentials)::int as credentials, (select count(*) from auth_sessions)::int as sessions");
   const registerAuditBefore = await countAudit("user", "register");
   const failedRegister = await request("/api/auth/register", "POST", {
