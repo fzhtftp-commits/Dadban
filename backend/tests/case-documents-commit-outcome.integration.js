@@ -749,7 +749,6 @@ try {
   assert.equal(await countEntityAudit("case", sessionCaseId, "delete"), 1, "fingerprint conflict must not duplicate original audit");
   console.log("PASS: completed key reused for another case returns 409 without mutation or duplicate audit");
 
-eturns 204 without duplicate audit");
 
   console.log("DB ASSERTIONS: unknown_delete_outcomes=2 idempotency_rows=2 audit_rows=2; missing_key=428; cross_resource_key_reuse=409; case/client soft-delete replay is exact-once");
 
