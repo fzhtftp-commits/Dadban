@@ -624,7 +624,9 @@ try {
   )).rows[0].count, 1, "concurrent same-key client deletes must reserve one operation identity");
   assert.equal(await countEntityAudit("client", standaloneClientId, "delete"), 1,
     "concurrent same-key client deletes must append one audit event");
-  console.log("PASS: concurrent same-key client DELETE returns 204 to both callers with one i  // Expire the old session, then use the real login endpoint to obtain a different
+  console.log("PASS: concurrent same-key client DELETE returns 204 to both callers with one idempotency row and one audit event");
+
+  // Expire the old session, then use the real login endpoint to obtain a different
   // token for the same user/office and replay the completed operation.
   const sessionRetryKey = "session-expiry-delete-" + crypto.randomUUID();
   const sessionRetryFirst = await request(`/api/cases/${sessionCaseId}`, { method: "DELETE", key: sessionRetryKey });
