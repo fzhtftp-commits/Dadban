@@ -175,7 +175,6 @@ try {
     GRANT INSERT ON public.audit_logs TO dadban_document_runtime_ci;
     GRANT SELECT, INSERT ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
     GRANT UPDATE (response_status) ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
-    GRANT SELECT ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
   `);
 
   await pool.query("INSERT INTO offices(id,name) VALUES($1,'Runtime Role Test Office')", [officeId]);
@@ -190,6 +189,7 @@ try {
   const liveSessionId = (await pool.query("SELECT id FROM auth_sessions WHERE token_hash=$1", [hash(token)])).rows[0].id;
   const proofFingerprint = "a".repeat(64);
   const reserveSql = "SELECT public.reserve_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8) AS inserted";
+  const lookupSql = "SELECT * FROM public.read_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8)";
   const completeSql = "SELECT public.complete_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS completed";
   const reserveArgs = (sessionId, actorUserId, key, proof, resourceType = "case", operation = "POST", fingerprint = proofFingerprint, actorOfficeId = officeId) =>
     [sessionId, actorUserId, actorOfficeId, key, resourceType, operation, fingerprint, proof];
@@ -200,6 +200,7 @@ try {
 
   await denied("INSERT INTO public.api_mutation_idempotency(office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint) VALUES('cccccccc-cccc-4ccc-8ccc-cccccccccccc','cccccccc-cccc-4ccc-8ccc-cccccccccc01','direct-runtime-0001','case','POST','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')", "direct API idempotency reservation INSERT");
   await denied("UPDATE public.api_mutation_idempotency SET resource_id='cccccccc-cccc-4ccc-8ccc-cccccccccc02',response_status=201,response_body='{}'::jsonb,completed_at=now()", "direct API idempotency completion UPDATE");
+  await denied("SELECT * FROM public.api_mutation_idempotency", "direct API idempotency table read");
 
   const validKey = "runtime-proof-valid-001";
   const validReservation = await runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, validKey, makeReserveProof(liveSessionId, userId, validKey)));
@@ -236,7 +237,10 @@ try {
   await denied("UPDATE public.api_mutation_idempotency SET response_body_purged=false,purged_at=NULL WHERE idempotency_key='runtime-proof-valid-001'", "direct tombstone reversal");
   const replayReservation = await runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, validKey, makeReserveProof(liveSessionId, userId, validKey)));
   assert.equal(replayReservation.rows[0].inserted, false, "replay after purge must retain the original key tombstone");
-  const tombstone = await runtimePool.query("SELECT response_status,response_body_purged,purged_at FROM public.api_mutation_idempotency WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3", [officeId,userId,validKey]);
+  const tombstone = await runtimePool.query(lookupSql, [
+    liveSessionId, userId, officeId, validKey, "case", "POST", proofFingerprint,
+    makeApiProof({ action:"lookup", sessionId:liveSessionId, key:validKey, resourceType:"case", operation:"POST", fingerprint:proofFingerprint })
+  ]);
   assert.equal(tombstone.rows[0].response_status, 201);
   assert.equal(tombstone.rows[0].response_body_purged, true);
   assert.ok(tombstone.rows[0].purged_at);
@@ -326,9 +330,10 @@ try {
   assert.equal(role.can_complete_api_idem, false, "runtime must not directly update generic idempotency result columns");
   assert.equal((await pool.query("SELECT has_table_privilege($1, 'public.api_mutation_idempotency', 'INSERT') AS can_insert", ["dadban_document_runtime_ci"])).rows[0].can_insert, false, "runtime must not directly insert generic idempotency reservations");
   assert.equal((await pool.query("SELECT has_function_privilege($1, 'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)', 'EXECUTE') AS can_reserve", ["dadban_document_runtime_ci"])).rows[0].can_reserve, true, "runtime needs reserve function EXECUTE");
+  assert.equal((await pool.query("SELECT has_function_privilege($1, 'public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)', 'EXECUTE') AS can_read", ["dadban_document_runtime_ci"])).rows[0].can_read, true, "runtime needs proof-bound lookup function EXECUTE");
   assert.equal((await pool.query("SELECT has_function_privilege($1, 'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)', 'EXECUTE') AS can_complete", ["dadban_document_runtime_ci"])).rows[0].can_complete, true, "runtime needs complete function EXECUTE");
-  assert.equal(role.can_select_api_purged_flag, true, "runtime may read the tombstone marker for replay decisions");
-  assert.equal(role.can_select_api_purged_at, true, "runtime may read the purge timestamp for replay decisions");
+  assert.equal(role.can_select_api_purged_flag, false, "runtime must not directly read the tombstone marker");
+  assert.equal(role.can_select_api_purged_at, false, "runtime must not directly read the purge timestamp");
   const alternateRuntimePrivileges = await pool.query("SELECT has_table_privilege($1,'public.api_mutation_idempotency','SELECT') AS can_select, has_table_privilege($1,'public.api_mutation_idempotency','INSERT') AS can_insert, has_table_privilege($1,'public.api_mutation_idempotency','UPDATE') AS can_update, has_table_privilege($1,'public.api_mutation_idempotency','DELETE') AS can_delete, has_table_privilege($1,'public.api_mutation_idempotency','TRUNCATE') AS can_truncate", ["dadban_document_runtime_alt_ci"]);
   assert.deepEqual(alternateRuntimePrivileges.rows[0], { can_select:false, can_insert:false, can_update:false, can_delete:false, can_truncate:false }, "a differently named runtime role must fail closed until explicitly granted equivalent privileges");
   const runtimeIdentity = await runtimePool.query("SELECT current_user AS role, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user");
@@ -393,11 +398,12 @@ try {
     FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner
     WHERE p.oid IN (
       'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure,
+      'public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)'::regprocedure,
       'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)'::regprocedure
     )
     ORDER BY p.proname
   `);
-  assert.equal(apiProofFunctions.rowCount, 2, "both proof-bound API idempotency functions must exist");
+  assert.equal(apiProofFunctions.rowCount, 3, "all proof-bound API idempotency functions must exist");
   for (const fn of apiProofFunctions.rows) {
     assert.equal(fn.function_owner, "dadban_api_idempotency_owner");
     assert.equal(fn.security_definer, true);
