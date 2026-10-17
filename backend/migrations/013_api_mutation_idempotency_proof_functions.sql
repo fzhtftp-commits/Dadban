@@ -11,6 +11,8 @@ $crypto_preflight$;
 
 CREATE SCHEMA IF NOT EXISTS dadban_private;
 REVOKE ALL ON SCHEMA dadban_private FROM PUBLIC;
+-- Prevent untrusted roles from inheriting CREATE on the shared public schema.
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 -- The API and database receive the same random 32-byte key out of band.
 -- Runtime logins cannot read or change this singleton.
