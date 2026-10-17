@@ -107,6 +107,10 @@ try {
   await pool.query(await readFile(new URL("../../database/schema.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../../database/migrations/20261010_office_isolation_constraints.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../../database/migrations/20261014_case_actions.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/004_case_documents_metadata.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/005_shared_rate_limits.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/006_case_document_mutation_idempotency.sql", import.meta.url), "utf8"));
+  await pool.query(await readFile(new URL("../migrations/007_case_document_mutation_tombstones.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/008_security_definer_document_actor_lock.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/009_case_reassignment_parent_locks.sql", import.meta.url), "utf8"));
   await pool.query(await readFile(new URL("../migrations/010_api_mutation_idempotency.sql", import.meta.url), "utf8"));
