@@ -187,6 +187,85 @@ try {
     [userId,officeId,hash(token),hash(csrf)]
   );
 
+  const liveSessionId = (await pool.query("SELECT id FROM auth_sessions WHERE token_hash=$1", [hash(token)])).rows[0].id;
+  const proofFingerprint = "a".repeat(64);
+  const reserveSql = "SELECT public.reserve_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8) AS inserted";
+  const completeSql = "SELECT public.complete_api_mutation_idempotency($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS completed";
+  const reserveArgs = (sessionId, actorUserId, key, proof, resourceType = "case", operation = "POST", fingerprint = proofFingerprint, actorOfficeId = officeId) =>
+    [sessionId, actorUserId, actorOfficeId, key, resourceType, operation, fingerprint, proof];
+  const makeReserveProof = (sessionId, actorUserId, key, resourceType = "case", operation = "POST", fingerprint = proofFingerprint, actorOfficeId = officeId) =>
+    makeApiProof({ action:"reserve", sessionId, userId:actorUserId, officeId:actorOfficeId, key, resourceType, operation, fingerprint });
+  const makeCompleteProof = (sessionId, actorUserId, key, resourceId, status, resourceType = "case", operation = "POST", fingerprint = proofFingerprint, actorOfficeId = officeId) =>
+    makeApiProof({ action:"complete", sessionId, userId:actorUserId, officeId:actorOfficeId, key, resourceType, operation, fingerprint, resourceId, status });
+
+  await denied("INSERT INTO public.api_mutation_idempotency(office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint) VALUES('cccccccc-cccc-4ccc-8ccc-cccccccccccc','cccccccc-cccc-4ccc-8ccc-cccccccccc01','direct-runtime-0001','case','POST','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')", "direct API idempotency reservation INSERT");
+  await denied("UPDATE public.api_mutation_idempotency SET resource_id='cccccccc-cccc-4ccc-8ccc-cccccccccc02',response_status=201,response_body='{}'::jsonb,completed_at=now()", "direct API idempotency completion UPDATE");
+
+  const validKey = "runtime-proof-valid-001";
+  const validReservation = await runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, validKey, makeReserveProof(liveSessionId, userId, validKey)));
+  assert.equal(validReservation.rows[0].inserted, true, "valid live-session proof must reserve a key");
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, "runtime-proof-invalid-001", "0".repeat(64))),
+    error => error.code === "42501",
+    "an invalid proof must not reserve a key"
+  );
+  console.log("PASS: direct reservation/completion SQL is denied and invalid proof is rejected");
+
+  const completed = await runtimePool.query(completeSql, [
+    liveSessionId, userId, officeId, validKey, "case", "POST", proofFingerprint, caseId, 201,
+    makeCompleteProof(liveSessionId, userId, validKey, caseId, 201)
+  ]);
+  assert.equal(completed.rows[0].completed, true, "valid proof must complete exactly one pending reservation");
+  const changedCompletion = await runtimePool.query(completeSql, [
+    liveSessionId, userId, officeId, validKey, "case", "POST", proofFingerprint, "cccccccc-cccc-4ccc-8ccc-cccccccccc03", 202,
+    makeCompleteProof(liveSessionId, userId, validKey, "cccccccc-cccc-4ccc-8ccc-cccccccccc03", 202)
+  ]);
+  assert.equal(changedCompletion.rows[0].completed, false, "completed result must not be rewritten");
+  await denied("UPDATE public.api_mutation_idempotency SET response_status=202,response_body='{}'::jsonb WHERE idempotency_key='runtime-proof-valid-001'", "direct completed-result rewrite");
+  await pool.query("UPDATE public.api_mutation_idempotency SET response_body=NULL,response_body_purged=true,purged_at=clock_timestamp() WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3", [officeId,userId,validKey]);
+  await denied("UPDATE public.api_mutation_idempotency SET response_body_purged=false,purged_at=NULL WHERE idempotency_key='runtime-proof-valid-001'", "direct tombstone reversal");
+  const replayReservation = await runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, validKey, makeReserveProof(liveSessionId, userId, validKey)));
+  assert.equal(replayReservation.rows[0].inserted, false, "replay after purge must retain the original key tombstone");
+  const tombstone = await runtimePool.query("SELECT response_status,response_body_purged,purged_at FROM public.api_mutation_idempotency WHERE office_id=$1 AND user_id=$2 AND idempotency_key=$3", [officeId,userId,validKey]);
+  assert.equal(tombstone.rows[0].response_status, 201);
+  assert.equal(tombstone.rows[0].response_body_purged, true);
+  assert.ok(tombstone.rows[0].purged_at);
+  console.log("PASS: one-way completion and tombstone replay protection");
+
+  const revokedSession = (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at,revoked_at) VALUES($1,$2,$3,$4,now()+interval '1 hour',now()) RETURNING id",
+    [userId,officeId,hash("revoked-proof-token"),hash("revoked-proof-csrf")]
+  )).rows[0].id;
+  const revokedKey = "runtime-proof-revoked-001";
+  await assert.rejects(runtimePool.query(reserveSql, reserveArgs(revokedSession,userId,revokedKey,makeReserveProof(revokedSession,userId,revokedKey))), error => error.code === "28000", "revoked session must fail");
+  const expiredSession = (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()-interval '1 minute') RETURNING id",
+    [userId,officeId,hash("expired-proof-token"),hash("expired-proof-csrf")]
+  )).rows[0].id;
+  const expiredKey = "runtime-proof-expired-001";
+  await assert.rejects(runtimePool.query(reserveSql, reserveArgs(expiredSession,userId,expiredKey,makeReserveProof(expiredSession,userId,expiredKey))), error => error.code === "28000", "expired session must fail");
+  const newLoginSession = (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour') RETURNING id",
+    [userId,officeId,hash("new-login-proof-token"),hash("new-login-proof-csrf")]
+  )).rows[0].id;
+  const oldLoginKey = "runtime-proof-old-login-001";
+  await assert.rejects(runtimePool.query(reserveSql, reserveArgs(revokedSession,userId,oldLoginKey,makeReserveProof(revokedSession,userId,oldLoginKey))), error => error.code === "28000", "old session proof must remain invalid after re-login");
+  const newLoginKey = "runtime-proof-new-login-001";
+  const newLoginReservation = await runtimePool.query(reserveSql, reserveArgs(newLoginSession,userId,newLoginKey,makeReserveProof(newLoginSession,userId,newLoginKey)));
+  assert.equal(newLoginReservation.rows[0].inserted, true, "new live session proof should work");
+  await pool.query("INSERT INTO users(id,office_id,full_name,email,role) VALUES('cccccccc-cccc-4ccc-8ccc-cccccccccc04',$1,'Other Runtime User','runtime-other@example.test','owner')", [officeId]);
+  const otherUserSession = (await pool.query(
+    "INSERT INTO auth_sessions(user_id,office_id,token_hash,csrf_hash,expires_at) VALUES('cccccccc-cccc-4ccc-8ccc-cccccccccc04',$1,$2,$3,now()+interval '1 hour') RETURNING id",
+    [officeId,hash("other-user-proof-token"),hash("other-user-proof-csrf")]
+  )).rows[0].id;
+  const crossUserKey = "runtime-proof-cross-user-001";
+  await assert.rejects(
+    runtimePool.query(reserveSql, reserveArgs(otherUserSession,userId,crossUserKey,makeReserveProof(otherUserSession,userId,crossUserKey))),
+    error => error.code === "28000",
+    "session belonging to another user must fail"
+  );
+  console.log("PASS: revoked, expired, old-login, and cross-user session proofs are rejected");
+
   const roleState = await pool.query(`
     SELECT
       r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolinherit,
