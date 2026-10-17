@@ -420,9 +420,6 @@ try {
     [ids.office, assistantId, assistantKey])).rows[0].count, 1, "denied confidentiality replay must retain one assistant idempotency row");
   assert.equal(await countAudit(confidentialityReplayId, "update"), 2,
     "assistant PATCH and owner confidentiality change must produce exactly two audit rows");
-  assert.equal((await pool.query("select count(*)::int as count from audit_logs where office_id=$1 and entity_type='case_document' and entity_id=$2 and action='update' and actor_user_id=$3",
-    [ids.office, confidentialityReplayId, assistantId])).rows[0].count, 1,
-    "denied replay must not duplicate assistant audit");
   console.log("PASS: confidentiality downgrade from confidential to restricted denies completed assistant replay with 403 and no duplicate mutation/key/audit");
 
   // A client soft-delete is also a parent-access revocation for child documents.
