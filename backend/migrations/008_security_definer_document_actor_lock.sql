@@ -217,4 +217,8 @@ BEGIN
 END
 $grants$;
 
+-- CREATE is not required by the function owner at runtime. Normalize stale
+-- schema ACL drift on every migration run, not only on a clean install.
+REVOKE CREATE ON SCHEMA public FROM dadban_actor_lock_owner;
+
 COMMIT;

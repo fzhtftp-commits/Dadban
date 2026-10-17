@@ -282,6 +282,29 @@ try {
       }
     }
     await pool.query(migrationSql);
+
+    // The migrations must normalize stale schema CREATE grants on the isolated
+    // SECURITY DEFINER owner, including drift introduced after an earlier run.
+    if (path === "../migrations/008_security_definer_document_actor_lock.sql") {
+      await pool.query("GRANT CREATE ON SCHEMA public TO dadban_actor_lock_owner");
+      await pool.query(migrationSql);
+      const createStillGranted = await pool.query(
+        "SELECT has_schema_privilege('dadban_actor_lock_owner','public','CREATE') AS allowed"
+      );
+      assert.equal(createStillGranted.rows[0].allowed, false,
+        "migration 008 must revoke stale CREATE on public from actor-lock owner");
+      console.log("PASS: migration 008 removes stale CREATE on public from SECURITY DEFINER owner");
+    }
+    if (path === "../migrations/009_case_reassignment_parent_locks.sql") {
+      await pool.query("GRANT CREATE ON SCHEMA public TO dadban_actor_lock_owner");
+      await pool.query(migrationSql);
+      const createStillGranted = await pool.query(
+        "SELECT has_schema_privilege('dadban_actor_lock_owner','public','CREATE') AS allowed"
+      );
+      assert.equal(createStillGranted.rows[0].allowed, false,
+        "migration 009 must revoke stale CREATE on public from actor-lock owner");
+      console.log("PASS: migration 009 removes stale CREATE on public from SECURITY DEFINER owner");
+    }
   }
 
   // Dedicated test database only: model the schema-owner/migrator trust boundary for case_documents.

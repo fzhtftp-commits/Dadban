@@ -122,4 +122,8 @@ BEGIN
 END
 $grants$;
 
+-- This NOLOGIN definer role needs no schema object-creation capability after
+-- ownership transfer. Remove stale/manual grants when migration 009 is replayed.
+REVOKE CREATE ON SCHEMA public FROM dadban_actor_lock_owner;
+
 COMMIT;
