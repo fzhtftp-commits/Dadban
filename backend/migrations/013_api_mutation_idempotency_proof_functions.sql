@@ -394,6 +394,12 @@ BEGIN
       EXECUTE format('REVOKE SELECT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
       EXECUTE format('REVOKE UPDATE (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint,resource_id,response_status,response_body,response_body_purged,purged_at,completed_at,created_at) ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
+      -- CREATE OR REPLACE and GRANT do not clear a pre-existing grant option.
+      -- Reset each runtime ACL before restoring plain EXECUTE, so runtime cannot
+      -- delegate these SECURITY DEFINER capabilities to another role.
+      EXECUTE format('REVOKE ALL ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) FROM %I', runtime_name);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) FROM %I', runtime_name);
+      EXECUTE format('REVOKE ALL ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) FROM %I', runtime_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO %I', runtime_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.read_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text) TO %I', runtime_name);
       EXECUTE format('GRANT EXECUTE ON FUNCTION public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text) TO %I', runtime_name);
