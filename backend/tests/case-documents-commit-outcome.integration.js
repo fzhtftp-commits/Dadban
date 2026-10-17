@@ -714,7 +714,7 @@ try {
     signal: AbortSignal.timeout(10000)
   });
   const registerBody = await registerResponse.json();
-  assert.equal(registerResponse.status, 201, "test-only other-office registration should succeed");
+  assert.equal(registerResponse.status, 201, `test-only other-office registration should succeed; got HTTP ${registerResponse.status}: ${JSON.stringify(registerBody)}`);
   const otherOfficeSessionCookie = registerResponse.headers.getSetCookie().find(value => value.startsWith("dadban_session="));
   assert.ok(otherOfficeSessionCookie, "registration must issue a new office session");
   const otherOfficeToken = decodeURIComponent(otherOfficeSessionCookie.split(";", 1)[0].slice("dadban_session=".length));
