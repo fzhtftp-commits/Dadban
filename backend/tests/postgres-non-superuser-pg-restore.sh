@@ -110,7 +110,7 @@ membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
 WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'),('$restore','$owner_a'),('$restore','$owner_b'))")"
-if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge,$restore->$owner_a,$restore->$owner_b" ]]; then
+if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$owner_a,$restore->$owner_b,$restore->$bridge" ]]; then
   echo "FAIL: unexpected pre-restore indirect membership graph: $membership_before" >&2; exit 1
 fi
 # This is a real pg_dump under the read-only backup identity.
