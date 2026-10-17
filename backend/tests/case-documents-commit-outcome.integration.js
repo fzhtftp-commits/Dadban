@@ -352,6 +352,28 @@ try {
     [ids.office, ids.user, deleteKey])).rows[0].count, 1, "DELETE must retain one durable idempotency row");
   assert.equal(await countAudit(deleteId, "delete"), 1, "DELETE retry must not duplicate audit rows");
 
+  // Generic business writes use the same transaction/error boundary but a distinct idempotency table.
+  // Prove a lost COMMIT acknowledgement for client creation is resolved by the generic key too.
+  const genericClientKey = "commit-loss-client-01";
+  const genericClientPayload = { client_type: "individual", full_name: "Generic COMMIT Outcome Client", national_id: "9876500001" };
+  armed = true;
+  const firstGenericClient = await request("/api/clients", { method: "POST", key: genericClientKey, body: genericClientPayload });
+  assert.equal(droppedCommitResponses, 4, "proxy must drop the PostgreSQL COMMIT response for generic client POST");
+  assert.equal(firstGenericClient.status, 500, "generic POST with lost COMMIT acknowledgement must report unknown outcome");
+  assert.deepEqual(firstGenericClient.body, { error: "database_error" });
+  const genericCommitted = await waitForCompletedApiKey(genericClientKey, 201);
+  assert.ok(genericCommitted.resource_id, "generic idempotency row must retain the committed client id");
+  const genericClientId = genericCommitted.resource_id;
+  assert.equal((await pool.query("select count(*)::int as count from clients where office_id=$1 and id=$2", [ids.office, genericClientId])).rows[0].count, 1);
+  assert.equal(await countEntityAudit("client", genericClientId, "create"), 1, "generic client POST must commit exactly one audit row");
+  const genericRetry = await request("/api/clients", { method: "POST", key: genericClientKey, body: genericClientPayload });
+  assert.equal(genericRetry.status, 201, "generic same-key retry must replay the committed POST");
+  assert.deepEqual(genericRetry.body, { data: { id: genericClientId } }, "generic replay must return only the stable id");
+  assert.equal((await pool.query("select count(*)::int as count from api_mutation_idempotency where office_id=$1 and user_id=$2 and idempotency_key=$3", [ids.office, ids.user, genericClientKey])).rows[0].count, 1);
+  assert.equal((await pool.query("select count(*)::int as count from clients where office_id=$1 and id=$2", [ids.office, genericClientId])).rows[0].count, 1, "generic replay must not create a duplicate client");
+  assert.equal(await countEntityAudit("client", genericClientId, "create"), 1, "generic replay must not duplicate audit");
+  console.log("PASS: lost COMMIT acknowledgement on generic client POST resolves via durable idempotency replay with one client and one audit");
+
   // Verify that the discarded connection was not reused as healthy by making a fresh
   // request on the same server/pool after all three fault-injected COMMITs.
   const health = await fetch(`http://127.0.0.1:${apiPort}/health/db`);
