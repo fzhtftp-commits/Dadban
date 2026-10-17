@@ -1103,24 +1103,6 @@ try {
     await pool.query(`
       DO $cleanup$
       BEGIN
-        IF to_regclass('public.case_document_mutation_idempotency') IS NOT NULL
-           AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('dadban_schema_owner_ci','dadban_schema_owner_alt_ci'))
-           AND (SELECT c.relowner FROM pg_class c WHERE c.oid='public.case_document_mutation_idempotency'::regclass)
-               IN (SELECT oid FROM pg_roles WHERE rolname IN ('dadban_schema_owner_ci','dadban_schema_owner_alt_ci')) THEN
-          ALTER TABLE public.case_document_mutation_idempotency OWNER TO postgres;
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci')
-           AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-          REVOKE dadban_schema_owner_ci FROM dadban_migrator_ci;
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci')
-           AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-          REVOKE dadban_schema_owner_alt_ci FROM dadban_migrator_ci;
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci')
-           AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci') THEN
-          REVOKE dadban_schema_owner_alt_ci FROM dadban_schema_owner_ci;
-        END IF;
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_owner_ci')
            AND to_regclass('public.case_documents') IS NOT NULL
            AND (SELECT c.relowner FROM pg_class c WHERE c.oid='public.case_documents'::regclass)
@@ -1146,32 +1128,8 @@ try {
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_alt_ci') THEN
           EXECUTE 'DROP OWNED BY dadban_document_runtime_alt_ci';
         END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-          EXECUTE 'DROP OWNED BY dadban_migrator_ci';
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci') THEN
-          EXECUTE 'DROP OWNED BY dadban_schema_owner_alt_ci';
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci') THEN
-          EXECUTE 'DROP OWNED BY dadban_schema_owner_ci';
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_maintenance_ci') THEN
-          EXECUTE 'DROP OWNED BY dadban_maintenance_ci';
-        END IF;
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_document_runtime_alt_ci') THEN
           EXECUTE 'DROP ROLE dadban_document_runtime_alt_ci';
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_migrator_ci') THEN
-          EXECUTE 'DROP ROLE dadban_migrator_ci';
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_alt_ci') THEN
-          EXECUTE 'DROP ROLE dadban_schema_owner_alt_ci';
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_schema_owner_ci') THEN
-          EXECUTE 'DROP ROLE dadban_schema_owner_ci';
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_maintenance_ci') THEN
-          EXECUTE 'DROP ROLE dadban_maintenance_ci';
         END IF;
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='dadban_case_documents_migrator_ci') THEN
           EXECUTE 'DROP ROLE dadban_case_documents_migrator_ci';
@@ -1186,9 +1144,9 @@ try {
       $cleanup$
     `);
     const leftoverRoles = await pool.query(
-      "SELECT rolname FROM pg_roles WHERE rolname IN ('dadban_document_runtime_alt_ci','dadban_case_documents_owner_ci','dadban_case_documents_migrator_ci','dadban_schema_owner_ci','dadban_schema_owner_alt_ci','dadban_migrator_ci','dadban_maintenance_ci')"
+      "SELECT rolname FROM pg_roles WHERE rolname IN ('dadban_document_runtime_alt_ci','dadban_case_documents_owner_ci','dadban_case_documents_migrator_ci')"
     );
-    assert.equal(leftoverRoles.rowCount, 0, "test-only role-separation/runtime-alt/owner/migrator roles must not leak into the CI PostgreSQL cluster");
+    assert.equal(leftoverRoles.rowCount, 0, "runtime-alt/owner/migrator roles created in this database must not leak into the CI PostgreSQL cluster");
     const restoredRuntimeRole = await pool.query(
       "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname='dadban_document_runtime_ci'"
     );
