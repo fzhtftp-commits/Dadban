@@ -78,4 +78,26 @@ FOR EACH ROW EXECUTE FUNCTION public.guard_api_mutation_idempotency_identity();
 COMMENT ON FUNCTION public.guard_api_mutation_idempotency_identity() IS
   'Prevents deletion, identity changes, completed-result rewriting, and reopening a purged API idempotency tombstone.';
 
+-- Configure the known runtime login names with only the columns needed by the
+-- API protocol. Fail closed if a runtime login owns the table, because owners can
+-- disable triggers. Deployments with another DB login must apply equivalent grants.
+DO $runtime_grants$
+DECLARE runtime_name text; table_owner text;
+BEGIN
+  SELECT pg_get_userbyid(relowner) INTO table_owner
+  FROM pg_class WHERE oid='public.api_mutation_idempotency'::regclass;
+  FOREACH runtime_name IN ARRAY ARRAY['dadban_document_runtime','dadban_document_runtime_ci'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname=runtime_name) THEN
+      IF table_owner=runtime_name THEN
+        RAISE EXCEPTION 'runtime role % must not own public.api_mutation_idempotency', runtime_name;
+      END IF;
+      EXECUTE format('REVOKE ALL ON TABLE public.api_mutation_idempotency FROM %I', runtime_name);
+      EXECUTE format('GRANT SELECT ON TABLE public.api_mutation_idempotency TO %I', runtime_name);
+      EXECUTE format('GRANT INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint) ON TABLE public.api_mutation_idempotency TO %I', runtime_name);
+      EXECUTE format('GRANT UPDATE (resource_id,response_status,response_body,completed_at) ON TABLE public.api_mutation_idempotency TO %I', runtime_name);
+    END IF;
+  END LOOP;
+END
+$runtime_grants$;
+
 COMMIT;
