@@ -26,6 +26,7 @@ cleanup() {
 REVOKE $owner_a FROM $bridge;
 REVOKE $bridge FROM $restore;
 REVOKE $owner_b FROM $bridge;
+REVOKE $owner_b FROM $owner_a;
 DROP ROLE IF EXISTS $backup;
 DROP ROLE IF EXISTS $restore;
 DROP ROLE IF EXISTS $bridge;
@@ -104,7 +105,7 @@ membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
 WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'),('$owner_a','$owner_b'))")"
-if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$owner_a->$owner_b,$restore->$bridge" ]]; then
+if [[ "$membership_before" != "$owner_a->$owner_b,$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
   echo "FAIL: unexpected pre-restore indirect membership graph: $membership_before" >&2; exit 1
 fi
 # This is a real pg_dump under the read-only backup identity.
