@@ -221,6 +221,11 @@ try {
         await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
         await pool.query("GRANT EXECUTE ON FUNCTION " + signature + " TO dadban_document_runtime_ci WITH GRANT OPTION");
       }
+      // Seed stale global and schema-scoped default EXECUTE grants from an
+      // earlier deployment; migration 014 must prevent future function leaks.
+      await pool.query("ALTER DEFAULT PRIVILEGES FOR ROLE dadban_api_idempotency_owner GRANT EXECUTE ON FUNCTIONS TO dadban_actor_acl_probe_ci WITH GRANT OPTION");
+      await pool.query("ALTER DEFAULT PRIVILEGES FOR ROLE dadban_api_idempotency_owner IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO dadban_hmac_acl_proxy_ci WITH GRANT OPTION");
+      await pool.query("ALTER DEFAULT PRIVILEGES FOR ROLE dadban_actor_lock_owner IN SCHEMA dadban_private GRANT EXECUTE ON FUNCTIONS TO dadban_hmac_acl_proxy_ci WITH GRANT OPTION");
     }
     if (path === "../migrations/008_security_definer_document_actor_lock.sql") {
       // Seed stale schema CREATE privilege before the first successful migration.
@@ -360,8 +365,9 @@ try {
         }
         const defaults = await pool.query(
           "SELECT count(*)::int AS n FROM pg_default_acl d JOIN pg_roles r ON r.oid=d.defaclrole CROSS JOIN LATERAL aclexplode(d.defaclacl) a " +
-          "WHERE r.rolname IN ('dadban_actor_lock_owner','dadban_api_idempotency_owner') AND d.defaclobjtype='f' AND a.grantee=0 AND a.privilege_type='EXECUTE'");
-        assert.equal(defaults.rows[0].n,0,"definer owners must not have PUBLIC EXECUTE default privileges");
+          "WHERE r.rolname IN ('dadban_actor_lock_owner','dadban_api_idempotency_owner') AND d.defaclobjtype='f' " +
+          "AND a.privilege_type='EXECUTE' AND a.grantee<>d.defaclrole");
+        assert.equal(defaults.rows[0].n,0,"definer owners must not retain PUBLIC or non-owner default EXECUTE grants in any schema scope");
         const schemaCreate = await pool.query(
           "SELECT has_schema_privilege($1,'public','CREATE') AS effective_create, " +
           "EXISTS (SELECT 1 FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a " +
