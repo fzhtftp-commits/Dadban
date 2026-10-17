@@ -217,6 +217,20 @@ try {
     error => error.code === "42501",
     "a valid proof must not be replayable against a different idempotency key"
   );
+  for (const [label, args] of [
+    ["resource type", reserveArgs(liveSessionId, userId, "runtime-proof-type-bind-001", makeReserveProof(liveSessionId, userId, validKey), "client")],
+    ["operation", reserveArgs(liveSessionId, userId, "runtime-proof-operation-bind-001", makeReserveProof(liveSessionId, userId, validKey), "case", "PATCH")],
+    ["request fingerprint", reserveArgs(liveSessionId, userId, "runtime-proof-fingerprint-bind-001", makeReserveProof(liveSessionId, userId, validKey), "case", "POST", "c".repeat(64))],
+    ["office identity", reserveArgs(liveSessionId, userId, "runtime-proof-office-bind-001", makeApiProof({ action:"reserve", sessionId:liveSessionId, userId, officeId:"dddddddd-dddd-4ddd-8ddd-dddddddddddd", key:validKey, resourceType:"case", operation:"POST", fingerprint:proofFingerprint }), "case", "POST", proofFingerprint, "dddddddd-dddd-4ddd-8ddd-dddddddddddd")]
+  ]) {
+    await assert.rejects(
+      runtimePool.query(reserveSql, args),
+      error => error.code === "42501",
+      `HMAC proof must bind the ${label}`
+    );
+  }
+  console.log("PASS: reservation HMAC cannot be rebound across resource type, operation, fingerprint, or office");
+
   await assert.rejects(
     runtimePool.query(reserveSql, reserveArgs(liveSessionId, userId, "runtime-proof-invalid-001", "0".repeat(64))),
     error => error.code === "42501",
