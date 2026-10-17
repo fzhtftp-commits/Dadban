@@ -185,6 +185,8 @@ try {
   await pool.query(apiMutationIdempotencyMigration);
   const apiMutationTombstoneMigration = await readFile(new URL("../migrations/011_api_mutation_idempotency_tombstones.sql", import.meta.url), "utf8");
   await pool.query(apiMutationTombstoneMigration);
+  const apiMutationTombstoneGuardMigration = await readFile(new URL("../migrations/012_api_mutation_idempotency_tombstone_guards.sql", import.meta.url), "utf8");
+  await pool.query(apiMutationTombstoneGuardMigration);
   const indexCheck = await pool.query(`
     select indexname, indexdef from pg_indexes
     where schemaname = 'public' and tablename = 'case_documents'
