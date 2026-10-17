@@ -13,6 +13,8 @@ backup=dadban_acl_backup_matrix_ci
 runtime=dadban_acl_runtime_matrix_ci
 cleanup() {
   psql -h localhost -U postgres -d "$db" -X -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || true
+REVOKE $owner FROM $migrator;
+REVOKE $alt FROM $owner;
 DROP SCHEMA IF EXISTS $schema CASCADE;
 DROP ROLE IF EXISTS $migrator;
 DROP ROLE IF EXISTS $maintenance;
@@ -38,6 +40,7 @@ GRANT $owner TO $migrator;
 GRANT $alt TO $owner;
 CREATE SCHEMA $schema AUTHORIZATION $owner;
 GRANT USAGE ON SCHEMA $schema TO $migrator, $maintenance, $backup, $runtime;
+GRANT CREATE ON SCHEMA $schema TO $alt;
 SET ROLE $owner;
 CREATE SEQUENCE $schema.fixture_seq;
 CREATE TABLE $schema.fixture_table (id bigint NOT NULL DEFAULT nextval('$schema.fixture_seq'), note text NOT NULL);
@@ -64,8 +67,8 @@ BEGIN
   SELECT r.rolname INTO object_owner FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner WHERE p.oid='$schema.fixture_fn()'::regprocedure;
   IF object_owner IS DISTINCT FROM '$owner' THEN RAISE EXCEPTION 'function owner mismatch: %',object_owner; END IF;
 
-  IF NOT pg_has_role('$migrator','$owner','MEMBER') THEN RAISE EXCEPTION 'migrator lacks expected owner membership'; END IF;
-  IF pg_has_role('$runtime','$owner','MEMBER') OR pg_has_role('$maintenance','$owner','MEMBER') OR pg_has_role('$backup','$owner','MEMBER') THEN
+  IF NOT pg_has_role('$migrator','$owner','MEMBER') OR NOT pg_has_role('$migrator','$alt','MEMBER') THEN RAISE EXCEPTION 'migrator lacks expected direct/transitive membership'; END IF;
+  IF pg_has_role('$runtime','$owner','MEMBER') OR pg_has_role('$runtime','$alt','MEMBER') OR pg_has_role('$maintenance','$owner','MEMBER') OR pg_has_role('$backup','$owner','MEMBER') THEN
     RAISE EXCEPTION 'runtime/maintenance/backup unexpectedly has owner membership';
   END IF;
   IF has_schema_privilege('$runtime','$schema','CREATE') OR has_schema_privilege('$maintenance','$schema','CREATE') OR has_schema_privilege('$backup','$schema','CREATE') THEN
@@ -88,7 +91,7 @@ BEGIN
     RAISE EXCEPTION 'runtime object/function ACL contract mismatch';
   END IF;
   SELECT count(*) INTO grantable_count FROM (
-    SELECT a.grantee,a.is_grantable FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S' ELSE 'r' END,c.relowner))) a
+    SELECT a.grantee,a.is_grantable FROM pg_class c CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::\"char\" ELSE 'r'::\"char\" END,c.relowner))) a
       WHERE c.oid IN ('$schema.fixture_table'::regclass,'$schema.fixture_view'::regclass,'$schema.fixture_seq'::regclass)
     UNION ALL
     SELECT a.grantee,a.is_grantable FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
@@ -104,4 +107,5 @@ if psql -h localhost -U postgres -d "$db" -X -v ON_ERROR_STOP=1 -c "SET SESSION 
   echo "FAIL: runtime unexpectedly SET ROLE to schema owner" >&2; exit 1
 fi
 psql -h localhost -U postgres -d "$db" -X -v ON_ERROR_STOP=1 -c "SET SESSION AUTHORIZATION $migrator; SET ROLE $owner" >/dev/null
+psql -h localhost -U postgres -d "$db" -X -v ON_ERROR_STOP=1 -c "SET SESSION AUTHORIZATION $migrator; SET ROLE $alt" >/dev/null
 echo "PASS: independent ACL matrix verified table/view/sequence/function ownership, migrator SET ROLE, maintenance/backup read-only grants, runtime denial, and absence of unintended direct GRANT OPTION"
