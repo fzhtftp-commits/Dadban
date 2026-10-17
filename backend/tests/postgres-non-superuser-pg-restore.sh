@@ -106,7 +106,7 @@ membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON
 SELECT string_agg(format('%s->%s|admin=%s|inherit=%s|set=%s',member.rolname,granted.rolname,m.admin_option,m.inherit_option,m.set_option),',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
 WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
-expected_memberships="$bridge->$owner_a|admin=false|inherit=true|set=true,$bridge->$owner_b|admin=false|inherit=true|set=true,$restore->$bridge|admin=false|inherit=true|set=true"
+expected_memberships="$bridge->$owner_a|admin=f|inherit=t|set=t,$bridge->$owner_b|admin=f|inherit=t|set=t,$restore->$bridge|admin=f|inherit=t|set=t"
 if [[ "$membership_before" != "$expected_memberships" ]]; then
   echo "FAIL: unexpected pre-restore indirect membership/options (admin_option must remain false): $membership_before" >&2; exit 1
 fi
@@ -159,9 +159,9 @@ SQL
 pg_restore -l "$dump" > "$toc"
 sed -i "/ SCHEMA - $schema /d" "$toc"
 # Authenticate as the non-superuser restore login, then explicitly SET ROLE to the
-# schema owner; owner_a is a member of owner_b so object ownership changes remain
+# schema owner; the restore login reaches both owner roles through the bridge membership so object ownership changes remain
 # non-superuser and are still exercised by pg_restore.
-PGPASSWORD=ci-only-restore-role-password PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" --no-owner --use-list="$toc" -d "$target_db" "$dump"
+PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" --no-owner --use-list="$toc" -d "$target_db" "$dump"
 # pg_restore's --no-owner avoids running archive owner changes before ACLs are in
 # place. Reassign ownership as the authenticated non-superuser restore identity,
 # which owns the restored objects, has CREATE on this fixture schema, and is a
