@@ -4,7 +4,7 @@ const csrf=()=>sessionStorage.getItem("dadban_csrf")||"";
 const deleteIdempotencyStorageKey=`dadban:delete:case:${id||"missing"}`;
 function deleteIdempotencyKey(){
  let key=localStorage.getItem(deleteIdempotencyStorageKey);
- if(!key){key=crypto.randomUUID();sessionStorage.setItem(deleteIdempotencyStorageKey,key);}
+ if(!key){key=crypto.randomUUID();localStorage.setItem(deleteIdempotencyStorageKey,key);}
  return key;
 }
 const $=x=>document.getElementById(x);
