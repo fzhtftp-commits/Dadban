@@ -1066,7 +1066,10 @@ app.patch("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, as
 app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_client_id" });
-
+  const keyResult = parseDocumentMutationIdempotencyKey(req);
+  if (!keyResult.ok) return res.status(400).json({ error: "invalid_idempotency_key" });
+  const key = keyResult.key;
+  const fingerprint = documentMutationFingerprint("DELETE", id.data, { resource: "client" });
   const client = await acquireClient(pool);
 
   try {
@@ -1075,6 +1078,27 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
     if (!actor.ok) {
       await client.query("rollback");
       return res.status(actor.status).json({ error: actor.error });
+    }
+    const idem = await beginDocumentMutationIdempotency(client, req, key, "DELETE", id.data, fingerprint);
+    if (idem.kind === "conflict") {
+      await rollbackQuietly(client, "client DELETE idempotency conflict");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (idem.kind === "incomplete") {
+      await rollbackQuietly(client, "incomplete client DELETE idempotency record");
+      return res.status(503).json({ error: "database_retryable" });
+    }
+    if (idem.kind === "gone") {
+      await rollbackQuietly(client, "purged client DELETE idempotency replay");
+      return res.status(410).json({ error: "idempotency_result_purged" });
+    }
+    if (idem.kind === "replay") {
+      if (idem.status !== 204) {
+        await rollbackQuietly(client, "invalid client DELETE replay status");
+        return res.status(500).json({ error: "database_error" });
+      }
+      await client.query("commit");
+      return res.status(204).send();
     }
     const result = await client.query(
       `
@@ -1085,13 +1109,12 @@ app.delete("/api/clients/:id", requireAuth, requireTrustedOrigin, requireCsrf, a
       `,
       [id.data, req.auth.officeId, req.auth.userId]
     );
-
     if (!result.rowCount) {
-      await client.query("rollback");
+      await rollbackQuietly(client, "delete missing client");
       return res.status(404).json({ error: "client_not_found" });
     }
-
     await writeAuditLog(client, req.auth, "delete", "client", result.rows[0].id, req);
+    await completeDocumentMutationIdempotency(client, req, key, 204);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
@@ -1338,6 +1361,10 @@ app.patch("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asyn
 app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, async (req, res) => {
   const id = parseUuid.safeParse(req.params.id);
   if (!id.success) return res.status(400).json({ error: "invalid_case_id" });
+  const keyResult = parseDocumentMutationIdempotencyKey(req);
+  if (!keyResult.ok) return res.status(400).json({ error: "invalid_idempotency_key" });
+  const key = keyResult.key;
+  const fingerprint = documentMutationFingerprint("DELETE", id.data, { resource: "case" });
 
   const client = await acquireClient(pool);
   try {
@@ -1346,6 +1373,27 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
     if (!actor.ok) {
       await client.query("rollback");
       return res.status(actor.status).json({ error: actor.error });
+    }
+    const idem = await beginDocumentMutationIdempotency(client, req, key, "DELETE", id.data, fingerprint);
+    if (idem.kind === "conflict") {
+      await rollbackQuietly(client, "case DELETE idempotency conflict");
+      return res.status(409).json({ error: "idempotency_key_reused" });
+    }
+    if (idem.kind === "incomplete") {
+      await rollbackQuietly(client, "incomplete case DELETE idempotency record");
+      return res.status(503).json({ error: "database_retryable" });
+    }
+    if (idem.kind === "gone") {
+      await rollbackQuietly(client, "purged case DELETE idempotency replay");
+      return res.status(410).json({ error: "idempotency_result_purged" });
+    }
+    if (idem.kind === "replay") {
+      if (idem.status !== 204) {
+        await rollbackQuietly(client, "invalid case DELETE replay status");
+        return res.status(500).json({ error: "database_error" });
+      }
+      await client.query("commit");
+      return res.status(204).send();
     }
     const result = await client.query(
       `
@@ -1357,10 +1405,11 @@ app.delete("/api/cases/:id", requireAuth, requireTrustedOrigin, requireCsrf, asy
       [id.data, req.auth.officeId, req.auth.userId]
     );
     if (!result.rowCount) {
-      await client.query("rollback");
+      await rollbackQuietly(client, "delete missing case");
       return res.status(404).json({ error: "case_not_found" });
     }
     await writeAuditLog(client, req.auth, "delete", "case", result.rows[0].id, req);
+    await completeDocumentMutationIdempotency(client, req, key, 204);
     await client.query("commit");
     return res.status(204).send();
   } catch (error) {
