@@ -208,6 +208,12 @@ try {
 
   // Configure only the disposable synthetic owner account for a real login-endpoint
   // round trip later in this test; never touches a non-local database.
+  await pool.query(`
+    create table if not exists auth_credentials (
+      user_id uuid primary key references users(id) on delete cascade,
+      password_hash text not null
+    )
+  `);
   const ownerEmail = "commit-outcome-owner-" + crypto.randomUUID() + "@example.test";
   const ownerPassword = "CommitOutcome-test-password-2026!";
   const ownerSalt = crypto.randomBytes(16);
