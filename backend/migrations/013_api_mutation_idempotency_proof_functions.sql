@@ -60,6 +60,7 @@ GRANT SELECT ON public.auth_sessions, public.users TO dadban_api_idempotency_own
 GRANT UPDATE (revoked_at) ON public.auth_sessions TO dadban_api_idempotency_owner;
 GRANT UPDATE (full_name) ON public.users TO dadban_api_idempotency_owner;
 GRANT SELECT ON dadban_private.api_mutation_idempotency_hmac_key TO dadban_api_idempotency_owner;
+REVOKE ALL ON TABLE public.api_mutation_idempotency FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE ON public.api_mutation_idempotency TO dadban_api_idempotency_owner;
 
 CREATE OR REPLACE FUNCTION public.reserve_api_mutation_idempotency(
