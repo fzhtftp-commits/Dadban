@@ -60,6 +60,14 @@ jobs:
         run: psql -h localhost -U postgres -d dadban_test -v ON_ERROR_STOP=1 -f tests/case-documents-tombstone-privileges.sql
         working-directory: backend
 
+      - name: Verify SECURITY DEFINER function ACL reset and runtime membership guards
+        env:
+          PGPASSWORD: postgres
+          PGHOST: localhost
+          PGDATABASE: dadban_test
+        run: bash tests/api-idempotency-function-acl-hardening.sh
+        working-directory: backend
+
       - name: Verify runtime cannot disable tombstone triggers or truncate identity rows
         env:
           PGPASSWORD: postgres
