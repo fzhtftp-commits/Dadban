@@ -178,6 +178,8 @@ try {
       pg_has_role('dadban_document_runtime_ci','dadban_migrator_ci','MEMBER') AS member_migrator,
       (SELECT r2.rolname FROM pg_class c JOIN pg_roles r2 ON r2.oid=c.relowner
         WHERE c.oid='public.case_document_mutation_idempotency'::regclass) AS idem_owner,
+      (SELECT r2.rolname FROM pg_class c JOIN pg_roles r2 ON r2.oid=c.relowner
+        WHERE c.oid='public.api_mutation_idempotency'::regclass) AS api_idem_owner,
       has_table_privilege('dadban_document_runtime_ci','public.users','UPDATE') AS can_update_users,
       has_table_privilege('dadban_document_runtime_ci','public.clients','UPDATE') AS can_update_clients,
       has_table_privilege('dadban_document_runtime_ci','public.cases','UPDATE') AS can_update_cases,
