@@ -194,7 +194,37 @@ try {
     "../migrations/012_api_mutation_idempotency_tombstone_guards.sql",
     "../migrations/013_api_mutation_idempotency_proof_functions.sql"
   ]) {
-    await pool.query(await readFile(new URL(path, import.meta.url), "utf8"));
+    const migrationSql = await readFile(new URL(path, import.meta.url), "utf8");
+    if (path === "../migrations/009_case_reassignment_parent_locks.sql") {
+      // Replaying migration 009 with a compromised definer-owner membership must
+      // fail before function creation/ownership transfer and roll back atomically.
+      const probeRole = "dadban_actor_lock_membership_probe_ci";
+      const preflight = await pool.query("SELECT 1 FROM pg_roles WHERE rolname=$1", [probeRole]);
+      assert.equal(preflight.rowCount, 0, "refusing to reuse pre-existing migration-009 membership probe role");
+      await pool.query(`CREATE ROLE ${probeRole} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`);
+      let migrationClient;
+      try {
+        await pool.query(`GRANT dadban_actor_lock_owner TO ${probeRole}`);
+        migrationClient = await pool.connect();
+        let rejected = false;
+        try {
+          await migrationClient.query(migrationSql);
+        } catch (error) {
+          rejected = /dadban_actor_lock_owner must not participate in role memberships/.test(error.message);
+          await migrationClient.query("ROLLBACK").catch(() => {});
+          if (!rejected) throw error;
+        }
+        assert.equal(rejected, true, "migration 009 must reject compromised SECURITY DEFINER owner membership");
+        const absent = await pool.query("SELECT to_regprocedure('public.lock_live_case_reassignment(uuid,uuid,uuid)') AS fn");
+        assert.equal(absent.rows[0].fn, null, "failed migration 009 must not leave the SECURITY DEFINER function behind");
+        console.log("PASS: migration 009 rejects owner-role membership and rolls back function creation");
+      } finally {
+        migrationClient?.release();
+        await pool.query(`REVOKE dadban_actor_lock_owner FROM ${probeRole}`).catch(() => {});
+        await pool.query(`DROP ROLE IF EXISTS ${probeRole}`);
+      }
+    }
+    await pool.query(migrationSql);
   }
 
   // Dedicated test database only: model the schema-owner/migrator trust boundary for case_documents.
