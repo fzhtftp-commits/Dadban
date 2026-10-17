@@ -26,7 +26,14 @@ const userId = "cccccccc-cccc-4ccc-8ccc-cccccccccc01";
 const caseId = "cccccccc-cccc-4ccc-8ccc-cccccccccc02";
 const token = "runtime-role-session-".padEnd(48, "r");
 const csrf = "runtime-role-csrf-".padEnd(48, "s");
+const proofSecret = "b".repeat(64);
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
+const makeApiProof = ({ action, sessionId, userId: actorUserId = userId, officeId: actorOfficeId = officeId, key, resourceType, operation, fingerprint, resourceId = null, status = null }) => {
+  const payload = ["dadban-idem-v1", action, String(sessionId).toLowerCase(), String(actorUserId).toLowerCase(),
+    String(actorOfficeId).toLowerCase(), key, resourceType, operation, fingerprint,
+    resourceId == null ? "" : String(resourceId).toLowerCase(), status == null ? "" : String(status)].join("|");
+  return crypto.createHmac("sha256", Buffer.from(proofSecret, "hex")).update(payload, "utf8").digest("hex");
+};
 const pool = new Pool({ connectionString: databaseUrl, ssl: false, max: 4 });
 const runtimePool = new Pool({ connectionString: apiDatabaseUrl, ssl: false, max: 2 });
 let server;
@@ -141,11 +148,13 @@ try {
     "../migrations/009_case_reassignment_parent_locks.sql",
     "../migrations/010_api_mutation_idempotency.sql",
     "../migrations/011_api_mutation_idempotency_tombstones.sql",
-    "../migrations/012_api_mutation_idempotency_tombstone_guards.sql"
+    "../migrations/012_api_mutation_idempotency_tombstone_guards.sql",
+    "../migrations/013_api_mutation_idempotency_proof_functions.sql"
   ]) {
     await pool.query(await readFile(new URL(path, import.meta.url), "utf8"));
   }
 
+  await pool.query("UPDATE dadban_private.api_mutation_idempotency_hmac_key SET secret=decode($1, 'hex') WHERE singleton=true", [proofSecret]);
   await pool.query(`
     GRANT CONNECT ON DATABASE dadban_runtime_role_test TO dadban_document_runtime_ci;
     REVOKE ALL ON SCHEMA public FROM dadban_document_runtime_ci;
@@ -167,9 +176,6 @@ try {
     GRANT SELECT, INSERT ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
     GRANT UPDATE (response_status) ON public.case_document_mutation_idempotency TO dadban_document_runtime_ci;
     GRANT SELECT ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
-    GRANT INSERT (office_id,user_id,idempotency_key,resource_type,operation,request_fingerprint)
-      ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
-    GRANT UPDATE (resource_id,response_status,response_body,completed_at) ON public.api_mutation_idempotency TO dadban_document_runtime_ci;
   `);
 
   await pool.query("INSERT INTO offices(id,name) VALUES($1,'Runtime Role Test Office')", [officeId]);
@@ -228,7 +234,10 @@ try {
   assert.notEqual(role.idem_owner, "dadban_document_runtime_ci", "runtime must not own the idempotency table");
   assert.notEqual(role.api_idem_owner, "dadban_document_runtime_ci", "runtime must not own the generic API idempotency table");
   assert.equal(role.direct_membership_count, 0, "runtime must not have memberships that permit SET ROLE to an elevated role");
-  assert.equal(role.can_complete_api_idem, true, "runtime must complete a pending generic idempotency row");
+  assert.equal(role.can_complete_api_idem, false, "runtime must not directly update generic idempotency result columns");
+  assert.equal((await pool.query("SELECT has_table_privilege($1, 'public.api_mutation_idempotency', 'INSERT') AS can_insert", ["dadban_document_runtime_ci"])).rows[0].can_insert, false, "runtime must not directly insert generic idempotency reservations");
+  assert.equal((await pool.query("SELECT has_function_privilege($1, 'public.reserve_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,text)', 'EXECUTE') AS can_reserve", ["dadban_document_runtime_ci"])).rows[0].can_reserve, true, "runtime needs reserve function EXECUTE");
+  assert.equal((await pool.query("SELECT has_function_privilege($1, 'public.complete_api_mutation_idempotency(uuid,uuid,uuid,text,text,text,text,uuid,integer,text)', 'EXECUTE') AS can_complete", ["dadban_document_runtime_ci"])).rows[0].can_complete, true, "runtime needs complete function EXECUTE");
   assert.equal(role.can_select_api_purged_flag, true, "runtime may read the tombstone marker for replay decisions");
   assert.equal(role.can_select_api_purged_at, true, "runtime may read the purge timestamp for replay decisions");
   const alternateRuntimePrivileges = await pool.query("SELECT has_table_privilege($1,'public.api_mutation_idempotency','SELECT') AS can_select, has_table_privilege($1,'public.api_mutation_idempotency','INSERT') AS can_insert, has_table_privilege($1,'public.api_mutation_idempotency','UPDATE') AS can_update, has_table_privilege($1,'public.api_mutation_idempotency','DELETE') AS can_delete, has_table_privilege($1,'public.api_mutation_idempotency','TRUNCATE') AS can_truncate", ["dadban_document_runtime_alt_ci"]);
@@ -297,7 +306,7 @@ try {
 
   server = spawn(process.execPath, ["src/server.js"], {
     cwd: new URL("..", import.meta.url).pathname,
-    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin, RATE_LIMIT_MODE: "memory" },
+    env: { ...process.env, PORT: String(port), NODE_ENV: "test", DATABASE_URL: apiDatabaseUrl, CORS_ORIGIN: origin, RATE_LIMIT_MODE: "memory", API_MUTATION_IDEMPOTENCY_HMAC_KEY: proofSecret },
     stdio: ["ignore","pipe","pipe"]
   });
   server.stdout.on("data", chunk => { output += chunk.toString(); });
