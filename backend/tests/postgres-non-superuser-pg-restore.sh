@@ -27,7 +27,6 @@ cleanup() {
 REVOKE $owner_a FROM $bridge;
 REVOKE $bridge FROM $restore;
 REVOKE $owner_b FROM $bridge;
-REVOKE $owner_b FROM $owner_a;
 DROP ROLE IF EXISTS $backup;
 DROP ROLE IF EXISTS $restore;
 DROP ROLE IF EXISTS $bridge;
@@ -46,7 +45,6 @@ CREATE ROLE $restore LOGIN PASSWORD 'ci-only-restore-role-password' NOSUPERUSER 
 CREATE ROLE $backup LOGIN PASSWORD 'ci-only-backup-role-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 GRANT $owner_a TO $bridge;
 GRANT $owner_b TO $bridge;
-GRANT $owner_b TO $owner_a;
 GRANT $bridge TO $restore;
 SQL
 createdb -h localhost -U "$admin" "$source_db"
@@ -105,8 +103,8 @@ fi
 membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
-WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'),('$owner_a','$owner_b'))")"
-if [[ "$membership_before" != "$owner_a->$owner_b,$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
+WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
+if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
   echo "FAIL: unexpected pre-restore indirect membership graph: $membership_before" >&2; exit 1
 fi
 # This is a real pg_dump under the read-only backup identity.
@@ -138,7 +136,19 @@ sed -i "/ SCHEMA - $schema /d" "$toc"
 # Authenticate as the non-superuser restore login, then explicitly SET ROLE to the
 # schema owner; owner_a is a member of owner_b so object ownership changes remain
 # non-superuser and are still exercised by pg_restore.
-PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" --role="$owner_a" --use-list="$toc" -d "$target_db" "$dump"
+PGPASSWORD=ci-only-restore-role-password PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" --no-owner --use-list="$toc" -d "$target_db" "$dump"
+# pg_restore's --no-owner avoids running archive owner changes before ACLs are in
+# place. Reassign ownership as the authenticated non-superuser restore identity,
+# which owns the restored objects, has CREATE on this fixture schema, and is a
+# member of both intended owner roles through the explicit bridge membership.
+PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$target_db" -X -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
+ALTER TABLE $schema.fixture_table OWNER TO $owner_a;
+ALTER VIEW $schema.fixture_view OWNER TO $owner_a;
+ALTER SEQUENCE $schema.fixture_seq OWNER TO $owner_b;
+ALTER FUNCTION $schema.fixture_fn() OWNER TO $owner_b;
+COMMIT;
+SQL
 
 fingerprint() {
   local db="$1"
