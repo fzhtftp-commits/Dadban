@@ -1,5 +1,32 @@
 BEGIN;
 
+-- Migration 009 can be rerun independently after role drift. Revalidate the
+-- SECURITY DEFINER owner immediately before transferring another function to it.
+DO $owner_preflight$
+DECLARE owner_state record;
+BEGIN
+  SELECT rolsuper, rolcanlogin, rolcreatedb, rolcreaterole, rolinherit
+    INTO owner_state
+  FROM pg_roles
+  WHERE rolname='dadban_actor_lock_owner';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'dadban_actor_lock_owner must be provisioned by migration 008 first';
+  END IF;
+  IF owner_state.rolsuper OR owner_state.rolcanlogin OR owner_state.rolcreatedb
+     OR owner_state.rolcreaterole OR owner_state.rolinherit THEN
+    RAISE EXCEPTION 'dadban_actor_lock_owner must remain NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_auth_members m
+    JOIN pg_roles owner_role ON owner_role.oid=m.roleid OR owner_role.oid=m.member
+    WHERE owner_role.rolname='dadban_actor_lock_owner'
+  ) THEN
+    RAISE EXCEPTION 'dadban_actor_lock_owner must not participate in role memberships';
+  END IF;
+END
+$owner_preflight$;
+
 -- Case reassignment must lock the live case first, then both its current and
 -- requested client rows in a single stable UUID order. This prevents a case
 -- from being moved away after its old client was soft-deleted and prevents
