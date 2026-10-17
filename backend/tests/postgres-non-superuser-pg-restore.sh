@@ -91,6 +91,15 @@ END
 \$guard\$;
 SQL
 # Exercise SET ROLE as the actual authenticated role, not via the postgres superuser.
+# The indirect chain restore -> bridge -> owner is not assumed to authorize SET ROLE:
+# test that boundary, then grant explicit membership in each object owner for restore.
+if PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$source_db" -X -v ON_ERROR_STOP=1 -c "SET ROLE $owner_a" >/tmp/dadban-rr-indirect-set-role.log 2>&1; then
+  echo "FAIL: indirect membership unexpectedly allowed SET ROLE to owner without direct membership" >&2; exit 1
+fi
+psql -h localhost -U "$admin" -d dadban_test -X -v ON_ERROR_STOP=1 <<SQL
+GRANT $owner_a TO $restore;
+GRANT $owner_b TO $restore;
+SQL
 PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$source_db" -X -v ON_ERROR_STOP=1 -c "SET ROLE $owner_a; RESET ROLE; SET ROLE $owner_b; RESET ROLE" >/dev/null
 if PGPASSWORD=ci-only-backup-role-password psql -h localhost -U "$backup" -d "$source_db" -X -v ON_ERROR_STOP=1 -c "SET ROLE $owner_a" >/tmp/dadban-rr-backup-set-role.log 2>&1; then
   echo "FAIL: read-only backup reader unexpectedly SET ROLE to an object owner" >&2; exit 1
@@ -100,8 +109,8 @@ fi
 membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
-WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
-if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
+WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'),('$restore','$owner_a'),('$restore','$owner_b'))")"
+if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge,$restore->$owner_a,$restore->$owner_b" ]]; then
   echo "FAIL: unexpected pre-restore indirect membership graph: $membership_before" >&2; exit 1
 fi
 # This is a real pg_dump under the read-only backup identity.
@@ -189,8 +198,8 @@ PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$ta
 membership_after="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
-WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
+WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'),('$restore','$owner_a'),('$restore','$owner_b'))")"
 if [[ "$membership_before" != "$membership_after" ]]; then
  echo "FAIL: indirect role membership graph changed during restore: before=$membership_before after=$membership_after" >&2; exit 1
 fi
-echo "PASS: indirect membership graph and SET ROLE validated before/after restore; backup/restore roles have no GRANT OPTION on fixture objects"
+echo "PASS: indirect membership graph preserved; direct owner memberships enable restore SET ROLE; backup reader cannot SET ROLE and neither role has GRANT OPTION"
