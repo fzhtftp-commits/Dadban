@@ -44,6 +44,7 @@ CREATE ROLE $restore LOGIN PASSWORD 'ci-only-restore-role-password' NOSUPERUSER 
 CREATE ROLE $backup LOGIN PASSWORD 'ci-only-backup-role-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 GRANT $owner_a TO $bridge;
 GRANT $owner_b TO $bridge;
+GRANT $owner_b TO $owner_a;
 GRANT $bridge TO $restore;
 SQL
 createdb -h localhost -U "$admin" "$source_db"
@@ -102,8 +103,8 @@ fi
 membership_before="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
-WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'))")"
-if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$restore->$bridge" ]]; then
+WHERE (member.rolname,granted.rolname) IN (('$bridge','$owner_a'),('$bridge','$owner_b'),('$restore','$bridge'),('$owner_a','$owner_b'))")"
+if [[ "$membership_before" != "$bridge->$owner_a,$bridge->$owner_b,$owner_a->$owner_b,$restore->$bridge" ]]; then
   echo "FAIL: unexpected pre-restore indirect membership graph: $membership_before" >&2; exit 1
 fi
 # This is a real pg_dump under the read-only backup identity.
@@ -122,9 +123,10 @@ SQL
 psql -h localhost -U "$admin" -d "$target_db" -X -v ON_ERROR_STOP=1 <<SQL
 GRANT CONNECT ON DATABASE $target_db TO $restore;
 SQL
-# A schema dump includes owner/ACL commands. pg_restore connects as the
-# non-superuser role; no --no-owner is used, so ownership must really restore.
-PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" -d "$target_db" "$dump"
+# A schema dump includes owner/ACL commands. pg_restore authenticates as the
+# non-superuser restore login, then uses its explicitly granted SET ROLE path to
+# owner_a; owner_a is a member of owner_b so ownership changes remain non-superuser.
+PGPASSWORD=ci-only-restore-role-password pg_restore -h localhost -U "$restore" --role="$owner_a" -d "$target_db" "$dump"
 
 fingerprint() {
   local db="$1"
@@ -186,7 +188,7 @@ assert_no_role_grant_option "$source_db"
 assert_no_role_grant_option "$target_db"
 
 # The role-membership graph is cluster-global (not carried by pg_dump); verify
-# the explicit indirect edges still exist and SET ROLE works after restore.
+# the explicit role edges still exist and SET ROLE works after restore.
 PGPASSWORD=ci-only-restore-role-password psql -h localhost -U "$restore" -d "$target_db" -X -v ON_ERROR_STOP=1 -c "SET ROLE $owner_a; RESET ROLE; SET ROLE $owner_b; RESET ROLE" >/dev/null
 membership_after="$(psql -h localhost -U "$admin" -d dadban_test -X -A -t -v ON_ERROR_STOP=1 -c "
 SELECT string_agg(member.rolname||'->'||granted.rolname,',' ORDER BY member.rolname,granted.rolname)
